@@ -39,11 +39,13 @@ class FFmpegService {
       ];
       for (const dir of transcodeDirs) {
         if (fs.existsSync(dir)) {
-          fs.rmSync(dir, { recursive: true, force: true });
+          fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 });
           fs.mkdirSync(dir, { recursive: true });
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('[FFmpeg] Error in cleanupOrphanedTranscodes:', e);
+    }
   }
 
   public async detectHardwareEncoder(): Promise<string> {
@@ -109,7 +111,9 @@ class FFmpegService {
       this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, existing);
       try { existing.process.kill('SIGKILL'); } catch (e) {}
       setTimeout(() => {
-        try { fs.rmSync(existing.sessionDir, { recursive: true, force: true }); } catch (e) {}
+        try { fs.rmSync(existing.sessionDir, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+          console.error(`[Continuous HLS] Failed to delete session dir on overwrite: ${existing.sessionDir}`, e);
+        }
       }, 30000);
       this.continuousSessions.delete(sessionId);
     }
@@ -421,7 +425,9 @@ class FFmpegService {
          this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, session);
          try { session.process.kill('SIGKILL'); } catch (e) {}
          setTimeout(() => {
-           try { fs.rmSync(session.sessionDir, { recursive: true, force: true }); } catch (e) {}
+           try { fs.rmSync(session.sessionDir, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+             console.error(`[Continuous HLS] Failed to delete session dir on restart: ${session.sessionDir}`, e);
+           }
          }, 30000);
          this.continuousSessions.delete(sessionId);
        }
@@ -449,7 +455,9 @@ class FFmpegService {
       this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, session);
       try { session.process.kill('SIGKILL'); } catch (e) {}
       setTimeout(() => {
-        try { fs.rmSync(session.sessionDir, { recursive: true, force: true }); } catch (e) {}
+        try { fs.rmSync(session.sessionDir, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+          console.error(`[Continuous HLS] Failed to delete session dir: ${session.sessionDir}`, e);
+        }
       }, 30000);
       this.continuousSessions.delete(sessionId);
     }
