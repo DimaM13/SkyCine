@@ -230,7 +230,8 @@ class FFmpegService {
       args.push(
         '-c:a', 'aac',
         '-b:a', '320k',
-        '-ac', '2'
+        '-ac', '2',
+        '-af', 'aresample=async=1'
       );
     }
 
