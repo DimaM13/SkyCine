@@ -171,10 +171,9 @@ class FFmpegService {
     }
 
     if (cleanStartTime > 0) {
-      args.push('-ss', cleanStartTime.toString());
+      args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
     }
     args.push('-i', media.filePath);
-    args.push('-copyts');
 
     args.push('-map', '0:v:0');
     if (audioIndex > 0) {
