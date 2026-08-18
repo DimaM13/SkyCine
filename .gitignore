@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+data/
+server/data/transcodes/
+server/data/logs/
+server/data/db/
+*.log
+.DS_Store

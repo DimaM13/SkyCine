@@ -1,0 +1,23 @@
+{
+  "name": "myplex-watch-together",
+  "version": "1.0.0",
+  "description": "Self-hosted media server with ultra-precise Watch Together synchronization and universal format playback",
+  "private": true,
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "tunnel": ".\\cloudflared.exe tunnel --url http://localhost:3000",
+    "dev:online": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run tunnel\"",
+    "build:server": "npm --prefix server run build",
+    "build:client": "npm --prefix client run build",
+    "build": "npm run build:server && npm run build:client",
+    "start": "npm --prefix server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "nat-upnp": "^1.1.1"
+  }
+}
