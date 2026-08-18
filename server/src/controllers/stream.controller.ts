@@ -239,11 +239,27 @@ export class StreamController {
         return;
       }
 
-      const { sessionId } = await ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple);
+      const deviceSuffix = isApple ? 'apple' : 'pc';
+      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
     } catch (err) {
       console.error('startHlsSession error:', err);
       res.status(500).json({ error: 'Ошибка запуска сессии HLS' });
+    }
+  }
+
+  public static async endHlsSession(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { mediaId, quality, audioIndex, isApple } = req.body;
+      if (mediaId && quality && audioIndex !== undefined) {
+        const deviceSuffix = isApple ? 'apple' : 'pc';
+        const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}`;
+        ffmpegService.killSession(sessionId);
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('endHlsSession error:', err);
+      res.status(500).json({ error: 'Ошибка завершения сессии HLS' });
     }
   }
 
@@ -272,32 +288,10 @@ export class StreamController {
         return;
       }
 
-      let isClosed = false;
-      req.on('close', () => { isClosed = true; });
+      const deviceSuffix = isApple ? 'apple' : 'pc';
+      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
 
-      const { sessionId } = await ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple);
-      if (isClosed) return;
-
-      let playlist = ffmpegService.getHlsPlaylist(sessionId, token);
-
-      if (!playlist) {
-        for (let i = 0; i < 15; i++) {
-          if (isClosed || !ffmpegService.hasSession(sessionId)) break;
-          await new Promise(r => setTimeout(r, 80));
-          playlist = ffmpegService.getHlsPlaylist(sessionId, token);
-          if (playlist) break;
-        }
-      }
-
-      if (isClosed) return;
-
-      if (!playlist) {
-        console.warn(`[Continuous HLS] ⚠️ Playlist not available for session: ${sessionId} (closed or superseded)`);
-        if (!res.headersSent) {
-          res.status(503).json({ error: 'Плейлист временно недоступен или перезапущен' });
-        }
-        return;
-      }
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');
@@ -316,11 +310,16 @@ export class StreamController {
       const authHeader = req.headers.authorization;
       const token = (req.query.token as string) || (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '') : '');
 
-      const playlist = ffmpegService.getHlsPlaylist(sessionId, token);
-      if (!playlist) {
-        res.status(404).send('Playlist not found');
+      // Parse mediaId from sessionId
+      const mediaId = sessionId.split('_')[0];
+      const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaId) as MediaItem | undefined;
+      
+      if (!media) {
+        res.status(404).send('Media not found');
         return;
       }
+
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');
@@ -336,20 +335,15 @@ export class StreamController {
       const sessionOrMediaId = String(req.params.sessionId || req.params.mediaId || req.params.id || '');
       const segmentName = String(req.params.segmentName || '');
 
-      let segmentPath = ffmpegService.getHlsSegmentPath(sessionOrMediaId, segmentName);
-      
-      // If segment is not found immediately, retry a few times (up to 2-3 seconds)
-      // This solves race conditions where the player requests a segment right before FFmpeg finishes writing it.
-      if (!segmentPath || !fs.existsSync(segmentPath)) {
-        for (let i = 0; i < 15; i++) {
-          await new Promise(r => setTimeout(r, 200));
-          segmentPath = ffmpegService.getHlsSegmentPath(sessionOrMediaId, segmentName);
-          if (segmentPath && fs.existsSync(segmentPath)) {
-            break;
-          }
-        }
+      const mediaId = sessionOrMediaId.split('_')[0];
+      const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaId) as MediaItem | undefined;
+      if (!media) {
+         res.status(404).send('Media not found');
+         return;
       }
 
+      const segmentPath = await ffmpegService.ensureSegmentReady(sessionOrMediaId, segmentName, media);
+      
       if (!segmentPath || !fs.existsSync(segmentPath)) {
         console.warn(`[Continuous HLS] ⚠️ Segment not found after wait: ${segmentName} for ${sessionOrMediaId}`);
         res.status(404).send('Segment not found');

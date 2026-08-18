@@ -16,6 +16,7 @@ interface ContinuousHlsSession {
   audioIndex: number;
   startTime: number;
   isReady: boolean;
+  latestSegmentIndex: number;
 }
 
 class FFmpegService {
@@ -95,18 +96,24 @@ class FFmpegService {
     const cleanStartTime = Math.max(0, Math.floor(startTime));
     const deviceSuffix = isApple ? 'apple' : 'pc';
 
-    // Deterministic session ID based on stream parameters so concurrent requests from multiple users in a room share the exact same FFmpeg process.
-    const sessionId = `${media.id}_q${quality}_a${audioIndex}_s${cleanStartTime}_${deviceSuffix}`;
+    // JIT VOD: Session ID is deterministic based only on format/quality/device, NO startTime!
+    const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
 
     const existing = this.continuousSessions.get(sessionId);
     if (existing && existing.process && !existing.process.killed) {
       existing.lastAccess = Date.now();
-      if (existing.isReady) {
+      const currentStart = existing.startTime;
+      if (cleanStartTime >= currentStart && cleanStartTime < currentStart + 120) {
         return { sessionId };
       }
+      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, existing);
+      try { existing.process.kill('SIGKILL'); } catch (e) {}
+      setTimeout(() => {
+        try { fs.rmSync(existing.sessionDir, { recursive: true, force: true }); } catch (e) {}
+      }, 30000);
+      this.continuousSessions.delete(sessionId);
     }
 
-    // If an initialization promise is already in-flight for this session, wait for it!
     const inFlight = this.sessionCreationPromises.get(sessionId);
     if (inFlight) {
       return inFlight;
@@ -139,11 +146,13 @@ class FFmpegService {
       fs.mkdirSync(baseTempDir, { recursive: true });
     }
 
-    const sessionDir = path.join(baseTempDir, 'hls_sessions', sessionId);
-    if (fs.existsSync(sessionDir)) {
-      try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+    const uniqueId = Date.now().toString() + '_' + Math.random().toString(36).substring(7);
+    const sessionDir = path.join(baseTempDir, 'hls_sessions', `${sessionId}_${uniqueId}`);
+
+    // Ensure the base directory exists
+    if (!fs.existsSync(sessionDir)) {
+      fs.mkdirSync(sessionDir, { recursive: true });
     }
-    fs.mkdirSync(sessionDir, { recursive: true });
 
     // FFmpeg requires forward slashes on Windows
     const ffmpegSessionDir = sessionDir.replace(/\\/g, '/');
@@ -225,11 +234,11 @@ class FFmpegService {
       '-muxpreload', '0',
       '-avoid_negative_ts', 'make_zero',
       '-f', 'hls',
-      '-hls_init_time', '2',
       '-hls_time', '4',
       '-hls_list_size', '0',
       '-hls_playlist_type', 'event',
-      '-hls_flags', 'independent_segments'
+      '-hls_flags', 'independent_segments+temp_file',
+      '-start_number', Math.floor(cleanStartTime / 4).toString()
     );
 
     const isHevcDirect = canCopyVideo && (media.videoCodec === 'hevc' || media.videoCodec === 'h265');
@@ -263,6 +272,7 @@ class FFmpegService {
       audioIndex,
       startTime: cleanStartTime,
       isReady: false,
+      latestSegmentIndex: Math.floor(cleanStartTime / 4)
     };
     this.continuousSessions.set(sessionId, sessionObj);
 
@@ -281,9 +291,13 @@ class FFmpegService {
       console.log(`[Continuous HLS] session ${sessionId} exited (code: ${code})`);
     });
 
-    // Wait until playlist and at least seg_0000.ts exist and ready (typically ~50-150ms)
+    // Wait until at least the first requested segment is ready
+    const startNumber = Math.floor(cleanStartTime / 4);
+    const startNumStr = startNumber.toString().padStart(4, '0');
+    
     const playlistPath = path.join(sessionDir, 'playlist.m3u8');
-    const firstSegPath = path.join(sessionDir, 'seg_0000.ts');
+    const firstSegPathTs = path.join(sessionDir, `seg_${startNumStr}.ts`);
+    const firstSegPathM4s = path.join(sessionDir, `seg_${startNumStr}.m4s`);
 
     const maxWaitMs = 15000; // Increased to 15s to allow for deep seeks in large HEVC/MKV files
     const startWait = Date.now();
@@ -294,16 +308,13 @@ class FFmpegService {
         break;
       }
       if (isHevcDirect) {
-        if (fs.existsSync(playlistPath) && fs.existsSync(path.join(sessionDir, 'init.mp4'))) {
-          const m4sPath = path.join(sessionDir, 'seg_0000.m4s');
-          if (fs.existsSync(m4sPath) && fs.statSync(m4sPath).size > 100) {
-            sessionObj.isReady = true;
-            console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
-            break;
-          }
+        if (fs.existsSync(firstSegPathM4s) && fs.statSync(firstSegPathM4s).size > 100) {
+          sessionObj.isReady = true;
+          console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
+          break;
         }
       } else {
-        if (fs.existsSync(playlistPath) && fs.existsSync(firstSegPath) && fs.statSync(firstSegPath).size > 100) {
+        if (fs.existsSync(firstSegPathTs) && fs.statSync(firstSegPathTs).size > 100) {
           sessionObj.isReady = true;
           console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
           break;
@@ -335,6 +346,124 @@ class FFmpegService {
 
   public hasSession(sessionId: string): boolean {
     return this.continuousSessions.has(sessionId) || this.closingSessions.has(sessionId);
+  }
+
+  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string): string {
+    const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200; // fallback 2h
+    const segmentDuration = 4;
+    const totalSegments = Math.ceil(duration / segmentDuration);
+
+    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isApple = sessionId.endsWith('_apple');
+    const canCopyVideo = sessionId.includes('_qoriginal_');
+    const isHevcDirect = canCopyVideo && isHevc;
+    const ext = isHevcDirect ? '.m4s' : '.ts';
+
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+
+    let m3u8 = `#EXTM3U\n`;
+    m3u8 += `#EXT-X-VERSION:${isHevcDirect ? '7' : '3'}\n`;
+    m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
+    m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
+    m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
+    
+    if (isHevcDirect) {
+      m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
+    }
+
+    for (let i = 0; i < totalSegments; i++) {
+      const numStr = i.toString().padStart(4, '0');
+      m3u8 += `#EXTINF:${segmentDuration.toFixed(6)},\n`;
+      m3u8 += `/api/stream/hls/session/${sessionId}/seg_${numStr}${ext}${tokenParam}\n`;
+    }
+
+    m3u8 += `#EXT-X-ENDLIST\n`;
+    return m3u8;
+  }
+
+  public async ensureSegmentReady(sessionId: string, segmentName: string, media: MediaItem): Promise<string | null> {
+    const isInit = segmentName === 'init.mp4';
+    let segmentIndex = 0;
+    
+    if (!isInit) {
+      const match = segmentName.match(/seg_(\d+)\.(ts|m4s)/);
+      if (!match) return null;
+      segmentIndex = parseInt(match[1], 10);
+    }
+
+    const session = this.continuousSessions.get(sessionId);
+    const targetStartTime = segmentIndex * 4;
+
+    if (session) {
+       const segPath = path.join(session.sessionDir, segmentName);
+       if (fs.existsSync(segPath) && fs.statSync(segPath).size > 100) {
+         session.lastAccess = Date.now();
+         session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
+         return segPath;
+       }
+       
+       if (isInit) {
+         // Never kill the process for init.mp4, just wait for it to be generated or rewritten
+         return this.waitForSegment(session.sessionDir, segmentName);
+       }
+       
+       // Use latestSegmentIndex (the player's current read head) to determine if this is just buffering or a jump.
+       // Allow buffering up to 15 segments (1 minute) ahead.
+       if (segmentIndex >= session.latestSegmentIndex - 2 && segmentIndex <= session.latestSegmentIndex + 15) {
+         const foundPath = await this.waitForSegment(session.sessionDir, segmentName);
+         if (foundPath) {
+           session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
+         }
+         return foundPath;
+       } else {
+         console.log(`[JIT HLS] Segment ${segmentIndex} far from read head (${session.latestSegmentIndex}). Restarting FFmpeg...`);
+         // Move to closing to allow in-flight downloads to finish
+         this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, session);
+         try { session.process.kill('SIGKILL'); } catch (e) {}
+         setTimeout(() => {
+           try { fs.rmSync(session.sessionDir, { recursive: true, force: true }); } catch (e) {}
+         }, 30000);
+         this.continuousSessions.delete(sessionId);
+       }
+    }
+
+    // FFmpeg needs to start
+    const parts = sessionId.split('_');
+    const qualityStr = parts[1].replace('q', '');
+    const audioIndex = parseInt(parts[2].replace('a', ''), 10);
+    const deviceSuffix = parts[3];
+    const isApple = deviceSuffix === 'apple';
+
+    await this.startContinuousHlsSession(media, qualityStr, audioIndex, targetStartTime, isApple);
+    
+    const newSession = this.continuousSessions.get(sessionId);
+    if (!newSession) return null;
+    
+    return this.waitForSegment(newSession.sessionDir, segmentName);
+  }
+
+  public killSession(sessionId: string): void {
+    const session = this.continuousSessions.get(sessionId);
+    if (session) {
+      console.log(`[Continuous HLS] 🛑 Manual kill requested for session: ${sessionId}`);
+      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, session);
+      try { session.process.kill('SIGKILL'); } catch (e) {}
+      setTimeout(() => {
+        try { fs.rmSync(session.sessionDir, { recursive: true, force: true }); } catch (e) {}
+      }, 30000);
+      this.continuousSessions.delete(sessionId);
+    }
+  }
+
+  private async waitForSegment(sessionDir: string, segmentName: string): Promise<string | null> {
+    const segPath = path.join(sessionDir, segmentName);
+    for (let i = 0; i < 50; i++) {
+      if (fs.existsSync(segPath) && fs.statSync(segPath).size > 100) {
+        return segPath;
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return null;
   }
 
   public getHlsPlaylist(sessionId: string, token?: string): string | null {

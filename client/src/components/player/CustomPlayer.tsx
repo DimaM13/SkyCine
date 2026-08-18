@@ -73,7 +73,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const gainNodeRef = useRef<GainNode | null>(null);
 
   const isInternalSeekRef = useRef<boolean>(false);
-  const seekBaseTimeRef = useRef<number>(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -241,7 +240,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
   const hlsRef = useRef<Hls | null>(null);
 
-  const loadStreamSource = useCallback((url: string, isDirect: boolean, shouldPlay: boolean = false) => {
+  const loadStreamSource = useCallback((url: string, isDirect: boolean, shouldPlay: boolean = false, startPos: number = 0) => {
     const video = videoRef.current;
     if (!video) return;
 
@@ -266,9 +265,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
-      try { video.currentTime = 0; } catch (e) {}
       video.src = url;
       video.load();
+      video.currentTime = startPos;
       if (shouldPlay) {
         video.play().then(() => {
           setIsPlaying(true);
@@ -307,7 +306,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         });
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          try { video.currentTime = 0; } catch (e) {}
+          try { video.currentTime = startPos; } catch (e) {}
           if (shouldPlay) {
             video.play().then(() => {
               setIsPlaying(true);
@@ -340,15 +339,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         hlsRef.current = hls;
       }
 
-      // Reset currentTime to 0 so the video decoder immediately starts with the new stream's first segment
-      try { video.currentTime = 0; } catch (e) {}
+      // Reset currentTime to startPos
+      try { video.currentTime = startPos; } catch (e) {}
       hls.loadSource(url);
       hls.startLoad(0);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       // Native Apple Safari fallback
-      try { video.currentTime = 0; } catch (e) {}
       video.src = url;
       video.load();
+      try { video.currentTime = startPos; } catch (e) {}
       if (shouldPlay) {
         video.play().then(() => {
           setIsPlaying(true);
@@ -367,6 +366,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
   }, [videoRef]);
 
+  const streamInfoRef = useRef({ mediaId: media.id, quality: selectedQuality, audioIndex: selectedAudioTrack, isApple: isAppleDevice, isDirectPlay });
+
+  useEffect(() => {
+    streamInfoRef.current = { mediaId: media.id, quality: selectedQuality, audioIndex: selectedAudioTrack, isApple: isAppleDevice, isDirectPlay };
+  }, [media.id, selectedQuality, selectedAudioTrack, isAppleDevice, isDirectPlay]);
+
   // Clean up Hls on unmount
   useEffect(() => {
     return () => {
@@ -374,18 +379,32 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      
+      const { mediaId, quality, audioIndex, isApple, isDirectPlay } = streamInfoRef.current;
+      if (!isDirectPlay) {
+        const token = localStorage.getItem('myplex_token');
+        fetch('/api/stream/hls/session/end', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({ mediaId, quality, audioIndex, isApple }),
+          keepalive: true
+        }).catch(() => {});
+      }
     };
   }, []);
 
-  const buildStreamUrl = useCallback((startTime: number, quality: string, audioIndex: number) => {
+  const buildStreamUrl = useCallback((quality: string, audioIndex: number) => {
     const token = localStorage.getItem('myplex_token');
     const tokenParam = token ? `token=${encodeURIComponent(token)}` : '';
     if (isDirectPlay) {
       return `/api/stream/${media.id}/direct${tokenParam ? `?${tokenParam}` : ''}`;
     }
-    // Continuous HLS for ALL non-direct streams (100% exact PTS audio/video sync on PC & iPad)
+    // JIT VOD HLS for ALL non-direct streams
     const isAppleParam = isAppleDevice ? '1' : '0';
-    return `/api/stream/${media.id}/master.m3u8?quality=${quality}&audioIndex=${audioIndex}&startTime=${Math.max(0, startTime)}&isApple=${isAppleParam}${tokenParam ? `&${tokenParam}` : ''}`;
+    return `/api/stream/${media.id}/master.m3u8?quality=${quality}&audioIndex=${audioIndex}&isApple=${isAppleParam}${tokenParam ? `&${tokenParam}` : ''}`;
   }, [media.id, isDirectPlay, isAppleDevice]);
 
   // Perform seek
@@ -398,44 +417,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     setCurrentTime(safePos);
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
-    if (isDirectPlay) {
-      video.currentTime = safePos;
-      if (shouldPlay) {
-        video.play().catch(() => {});
-      } else {
-        video.pause();
-      }
+    console.log(`[Player] ⚡ Seeking: target=${safePos.toFixed(1)}s`);
+    video.currentTime = safePos;
+    if (shouldPlay) {
+      video.play().catch(() => {});
     } else {
-      // Continuous HLS on all platforms (Safari & Hls.js on PC)
-      const base = seekBaseTimeRef.current;
-      const relativeTarget = safePos - base;
-
-      let isWithinBuffer = false;
-      if (relativeTarget >= 0 && video.buffered.length > 0) {
-        const maxBuffered = video.buffered.end(video.buffered.length - 1);
-        // Only consider within buffer if there is at least 3.0s of solid buffered data ahead
-        if (relativeTarget <= maxBuffered - 3.0) {
-          isWithinBuffer = true;
-        }
-      }
-
-      if (isWithinBuffer) {
-        console.log(`[Player] ⚡ In-buffer instant seek: target=${relativeTarget.toFixed(1)}s (buffered to ${video.buffered.end(video.buffered.length - 1).toFixed(1)}s)`);
-        video.currentTime = Math.max(0, relativeTarget);
-        if (shouldPlay) {
-          video.play().catch(() => {});
-        } else {
-          video.pause();
-        }
-      } else {
-        setIsBuffering(true);
-        console.log(`[Player] 🚀 Seeking via server stream chunk: target=${safePos.toFixed(1)}s (prev seek base: ${base.toFixed(1)}s)`);
-        seekBaseTimeRef.current = safePos;
-        const newUrl = buildStreamUrl(safePos, selectedQuality, selectedAudioTrack);
-        loadStreamSource(newUrl, false, shouldPlay);
-      }
+      video.pause();
     }
-  }, [isDirectPlay, effectiveDuration, buildStreamUrl, loadStreamSource, selectedQuality, selectedAudioTrack]);
+  }, [effectiveDuration]);
 
   // Lazy Web Audio Gain Booster
   const setupAudioGain = useCallback(() => {
@@ -478,9 +467,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     onAttachGetCurrentTime?.(() => {
       const video = videoRef.current;
       if (!video) return 0;
-      return isDirectPlay ? (video.currentTime || 0) : (seekBaseTimeRef.current + (video.currentTime || 0));
+      return video.currentTime || 0;
     });
-  }, [isDirectPlay, onAttachGetCurrentTime]);
+  }, [onAttachGetCurrentTime]);
 
   const prevMediaIdRef = useRef<string>('');
 
@@ -495,13 +484,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const shouldStartPlay = isWatchTogether ? (roomState === 'PLAYING' || !!initialPlaying) : true;
 
     prevMediaIdRef.current = media.id;
-    seekBaseTimeRef.current = startPos;
     setCurrentTime(startPos);
     setBufferedTime(startPos);
     isInitialMount.current = false;
 
-    const url = buildStreamUrl(startPos, selectedQuality, selectedAudioTrack);
-    loadStreamSource(url, isDirectPlay, shouldStartPlay);
+    const url = buildStreamUrl(selectedQuality, selectedAudioTrack);
+    loadStreamSource(url, isDirectPlay, shouldStartPlay, startPos);
   }, [media.id]);
 
   // Track switching (Quality or Audio track change) without resetting position
@@ -519,14 +507,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
-    const currentPos = isDirectPlay
-      ? (video.currentTime || 0)
-      : (seekBaseTimeRef.current + (video.currentTime || 0));
-
+    const currentPos = video.currentTime || 0;
     const wasPlaying = !video.paused;
-    seekBaseTimeRef.current = currentPos;
-    const url = buildStreamUrl(currentPos, selectedQuality, selectedAudioTrack);
-    loadStreamSource(url, isDirectPlay, wasPlaying);
+    const url = buildStreamUrl(selectedQuality, selectedAudioTrack);
+    loadStreamSource(url, isDirectPlay, wasPlaying, currentPos);
   }, [selectedQuality, selectedAudioTrack]);
 
   // Video Events
@@ -540,9 +524,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setIsPlaying(actualIsPlaying);
     }
 
-    const totalPos = isDirectPlay
-      ? video.currentTime
-      : (seekBaseTimeRef.current + video.currentTime);
+    const totalPos = video.currentTime;
 
     if (!isScrubbing) {
       setCurrentTime(totalPos);
@@ -554,8 +536,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     if (video.buffered.length > 0) {
       const bufEnd = video.buffered.end(video.buffered.length - 1);
-      const totalBuf = isDirectPlay ? bufEnd : (seekBaseTimeRef.current + bufEnd);
-      setBufferedTime(totalBuf);
+      setBufferedTime(bufEnd);
     }
   };
 
@@ -706,7 +687,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (!video) return;
     const base = pendingSeekTargetRef.current !== null
       ? pendingSeekTargetRef.current
-      : (isDirectPlay ? video.currentTime : (seekBaseTimeRef.current + video.currentTime));
+      : video.currentTime;
     const newPos = Math.max(0, Math.min(effectiveDuration, base + seconds));
     triggerSeek(newPos);
   };
@@ -780,7 +761,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             const paused = videoRef.current.paused;
             setIsPlaying(!paused);
             if (isWatchTogether && !isInternalSeekRef.current) {
-              const currentPos = isDirectPlay ? (videoRef.current.currentTime || 0) : (seekBaseTimeRef.current + (videoRef.current.currentTime || 0));
+              const currentPos = videoRef.current.currentTime || 0;
               // Debounce native seek to avoid spamming room
               triggerSeek(currentPos);
             }
