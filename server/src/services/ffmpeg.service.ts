@@ -245,6 +245,10 @@ class FFmpegService {
       '-start_number', Math.floor(cleanStartTime / 4).toString()
     );
 
+    if (cleanStartTime > 0) {
+      args.push('-output_ts_offset', cleanStartTime.toString());
+    }
+
     const isHevcDirect = canCopyVideo && (media.videoCodec === 'hevc' || media.videoCodec === 'h265');
     if (isHevcDirect) {
       args.push(
