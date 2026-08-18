@@ -17,6 +17,7 @@ interface ContinuousHlsSession {
   startTime: number;
   isReady: boolean;
   latestSegmentIndex: number;
+  _createdAt: number;
 }
 
 class FFmpegService {
@@ -93,13 +94,14 @@ class FFmpegService {
     quality: string = 'original',
     audioIndex: number = 0,
     startTime: number = 0,
-    isApple: boolean = false
+    isApple: boolean = false,
+    sessionIdOverride?: string
   ): Promise<{ sessionId: string }> {
     const cleanStartTime = Math.max(0, Math.floor(startTime));
     const deviceSuffix = isApple ? 'apple' : 'pc';
 
     // JIT VOD: Session ID is deterministic based only on format/quality/device, NO startTime!
-    const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
+    const sessionId = sessionIdOverride || `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
 
     const existing = this.continuousSessions.get(sessionId);
     if (existing && existing.process && !existing.process.killed) {
@@ -108,11 +110,13 @@ class FFmpegService {
       if (cleanStartTime >= currentStart && cleanStartTime < currentStart + 120) {
         return { sessionId };
       }
-      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, existing);
-      try { existing.process.kill('SIGKILL'); } catch (e) {}
+      const sessionToClose = existing;
+      const dirToDelete = existing.sessionDir;
+      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
+      try { sessionToClose.process.kill('SIGKILL'); } catch (e) {}
       setTimeout(() => {
-        try { fs.rmSync(existing.sessionDir, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
-          console.error(`[Continuous HLS] Failed to delete session dir on overwrite: ${existing.sessionDir}`, e);
+        try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+          console.error(`[Continuous HLS] Failed to delete session dir on overwrite: ${dirToDelete}`, e);
         }
       }, 30000);
       this.continuousSessions.delete(sessionId);
@@ -235,8 +239,14 @@ class FFmpegService {
 
     args.push(
       '-muxdelay', '0',
-      '-muxpreload', '0',
-      '-avoid_negative_ts', 'make_zero',
+      '-muxpreload', '0'
+    );
+
+    if (cleanStartTime === 0) {
+      args.push('-avoid_negative_ts', 'make_zero');
+    }
+
+    args.push(
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '0',
@@ -245,12 +255,31 @@ class FFmpegService {
       '-start_number', Math.floor(cleanStartTime / 4).toString()
     );
 
+    // MATRIX OF TRUTH:
+    // Hls.js (PC) strictly requires fmp4 (CMAF) with tfdt=0 to prevent Continuity Counter jumping.
+    // Apple Native (iPad) strictly requires mpegts for H.264 (it handles TS discontinuities natively). 
+    // Apple Native strictly requires fmp4 for HEVC (but might need offset, keeping as is for now since user didn't complain).
+    //
+    // WATCH TOGETHER OVERRIDE:
+    // In Watch Together, fmp4 and mpegts produce slightly different PTS alignments when using
+    // -c:v copy with -noaccurate_seek. To guarantee frame-identical streams across devices,
+    // we force BOTH iPad and PC to use the SAME container format (mpegts for H.264).
+    // Hls.js on PC supports mpegts perfectly fine.
+    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
+    let useFmp4: boolean;
+    if (isRoomSession && !isHevc) {
+      // Watch Together + H.264: force mpegts for ALL devices to ensure identical PTS
+      useFmp4 = false;
+    } else {
+      useFmp4 = !isApple || isHevc; // Normal: PC gets fmp4, iPad gets mpegts (except HEVC)
+    }
+
     if (cleanStartTime > 0) {
       args.push('-output_ts_offset', cleanStartTime.toString());
     }
 
-    const isHevcDirect = canCopyVideo && (media.videoCodec === 'hevc' || media.videoCodec === 'h265');
-    if (isHevcDirect) {
+    if (useFmp4) {
       args.push(
         '-hls_segment_type', 'fmp4',
         '-hls_fmp4_init_filename', 'init.mp4',
@@ -280,7 +309,8 @@ class FFmpegService {
       audioIndex,
       startTime: cleanStartTime,
       isReady: false,
-      latestSegmentIndex: Math.floor(cleanStartTime / 4)
+      latestSegmentIndex: Math.floor(cleanStartTime / 4),
+      _createdAt: Date.now()
     };
     this.continuousSessions.set(sessionId, sessionObj);
 
@@ -303,7 +333,6 @@ class FFmpegService {
     const startNumber = Math.floor(cleanStartTime / 4);
     const startNumStr = startNumber.toString().padStart(4, '0');
     
-    const playlistPath = path.join(sessionDir, 'playlist.m3u8');
     const firstSegPathTs = path.join(sessionDir, `seg_${startNumStr}.ts`);
     const firstSegPathM4s = path.join(sessionDir, `seg_${startNumStr}.m4s`);
 
@@ -315,7 +344,12 @@ class FFmpegService {
         console.log(`[Continuous HLS] 🛑 Session ${sessionId} superseded/cancelled during startup`);
         break;
       }
-      if (isHevcDirect) {
+      const isApple = sessionId.includes('_apple');
+      const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+      const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
+      const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || isHevc);
+
+      if (useFmp4) {
         if (fs.existsSync(firstSegPathM4s) && fs.statSync(firstSegPathM4s).size > 100) {
           sessionObj.isReady = true;
           console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
@@ -337,14 +371,15 @@ class FFmpegService {
     // 1. Immediately kill old FFmpeg process so it stops saturating disk I/O and CPU
     // 2. Keep session directory for 5 seconds so in-flight segment downloads finish cleanly with HTTP 200
     for (const [sId, sess] of this.continuousSessions.entries()) {
-      if (sess.mediaId === media.id && sId.endsWith(`_${deviceSuffix}`) && sId !== sessionId) {
+      if (sess.mediaId === media.id && sId.includes(`_${deviceSuffix}`) && sId !== sessionId) {
         console.log(`[Continuous HLS] 🧹 Graceful retirement for previous seek session: ${sId}`);
         this.continuousSessions.delete(sId);
+        const dirToDelete = sess.sessionDir;
         this.closingSessions.set(sId, sess);
         try { sess.process.kill(); } catch (e) {}
         setTimeout(() => {
           this.closingSessions.delete(sId);
-          try { fs.rmSync(sess.sessionDir, { recursive: true, force: true }); } catch (e) {}
+          try { fs.rmSync(dirToDelete, { recursive: true, force: true }); } catch (e) {}
         }, 30000);
       }
     }
@@ -362,20 +397,27 @@ class FFmpegService {
     const totalSegments = Math.ceil(duration / segmentDuration);
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isApple = sessionId.endsWith('_apple');
+    const isApple = sessionId.includes('_apple');
+    const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
     const canCopyVideo = sessionId.includes('_qoriginal_');
-    const isHevcDirect = canCopyVideo && isHevc;
-    const ext = isHevcDirect ? '.m4s' : '.ts';
+    let useFmp4: boolean;
+    if (isRoomSession && !isHevc) {
+      // Watch Together + H.264: mpegts for ALL devices (matches FFmpeg output)
+      useFmp4 = false;
+    } else {
+      useFmp4 = !isApple || isHevc;
+    }
+    const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
 
     let m3u8 = `#EXTM3U\n`;
-    m3u8 += `#EXT-X-VERSION:${isHevcDirect ? '7' : '3'}\n`;
+    m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
     m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
     m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
     
-    if (isHevcDirect) {
+    if (useFmp4) {
       m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
     }
 
@@ -399,7 +441,7 @@ class FFmpegService {
       segmentIndex = parseInt(match[1], 10);
     }
 
-    const session = this.continuousSessions.get(sessionId);
+    let session = this.continuousSessions.get(sessionId);
     const targetStartTime = segmentIndex * 4;
 
     if (session) {
@@ -416,51 +458,60 @@ class FFmpegService {
        }
        
        // Use latestSegmentIndex (the player's current read head) to determine if this is just buffering or a jump.
-       // Allow buffering up to 15 segments (1 minute) ahead.
+       // Allow buffering up to 15 segments (1 minute) ahead and 2 behind.
        if (segmentIndex >= session.latestSegmentIndex - 2 && segmentIndex <= session.latestSegmentIndex + 15) {
          const foundPath = await this.waitForSegment(session.sessionDir, segmentName);
          if (foundPath) {
            session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
          }
          return foundPath;
-       } else {
-         console.log(`[JIT HLS] Segment ${segmentIndex} far from read head (${session.latestSegmentIndex}). Restarting FFmpeg...`);
-         // Move to closing to allow in-flight downloads to finish
-         this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, session);
-         try { session.process.kill('SIGKILL'); } catch (e) {}
-         setTimeout(() => {
-           try { fs.rmSync(session.sessionDir, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
-             console.error(`[Continuous HLS] Failed to delete session dir on restart: ${session.sessionDir}`, e);
-           }
-         }, 30000);
-         this.continuousSessions.delete(sessionId);
        }
+       
+       console.log(`[JIT HLS] Segment ${segmentIndex} far from read head (${session.latestSegmentIndex}). Restarting FFmpeg...`);
+       // Move to closing to allow in-flight downloads to finish
+       const sessionToClose = session;
+       const dirToDelete = session.sessionDir;
+       this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
+       try { sessionToClose.process.kill('SIGKILL'); } catch (e) {}
+       setTimeout(() => {
+         try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+           console.error(`[Continuous HLS] Failed to delete session dir on restart: ${dirToDelete}`, e);
+         }
+       }, 30000);
+       this.continuousSessions.delete(sessionId);
+       session = undefined as any;
     }
 
-    // FFmpeg needs to start
-    const parts = sessionId.split('_');
-    const qualityStr = parts[1].replace('q', '');
-    const audioIndex = parseInt(parts[2].replace('a', ''), 10);
-    const deviceSuffix = parts[3];
-    const isApple = deviceSuffix === 'apple';
-
-    await this.startContinuousHlsSession(media, qualityStr, audioIndex, targetStartTime, isApple);
+    if (!session) {
+      // Start from the calculated targetStartTime
+      const isApple = sessionId.includes('_apple');
+      const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
+      const audioMatch = sessionId.match(/_a(\d+)_/);
+      const quality = qualityMatch ? qualityMatch[1] : 'original';
+      const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
+      
+      console.log(`[Continuous HLS] No session found, starting new session at ${targetStartTime}s`);
+      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
+      
+      const newSession = this.continuousSessions.get(sessionId);
+      if (!newSession) return null;
+      return this.waitForSegment(newSession.sessionDir, segmentName);
+    }
     
-    const newSession = this.continuousSessions.get(sessionId);
-    if (!newSession) return null;
-    
-    return this.waitForSegment(newSession.sessionDir, segmentName);
+    return null;
   }
 
   public killSession(sessionId: string): void {
     const session = this.continuousSessions.get(sessionId);
     if (session) {
       console.log(`[Continuous HLS] 🛑 Manual kill requested for session: ${sessionId}`);
-      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, session);
-      try { session.process.kill('SIGKILL'); } catch (e) {}
+      const sessionToClose = session;
+      const dirToDelete = session.sessionDir;
+      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
+      try { sessionToClose.process.kill('SIGKILL'); } catch (e) {}
       setTimeout(() => {
-        try { fs.rmSync(session.sessionDir, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
-          console.error(`[Continuous HLS] Failed to delete session dir: ${session.sessionDir}`, e);
+        try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+          console.error(`[Continuous HLS] Failed to delete session dir: ${dirToDelete}`, e);
         }
       }, 30000);
       this.continuousSessions.delete(sessionId);

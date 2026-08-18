@@ -232,6 +232,7 @@ export class StreamController {
       const startTime = parseFloat(req.query.startTime as string || '0');
       const userAgent = req.headers['user-agent'] || '';
       const isApple = req.query.isApple === '1' || /iPad|iPhone|iPod|Macintosh/i.test(userAgent);
+      const roomId = req.query.roomId as string || '';
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
@@ -240,7 +241,8 @@ export class StreamController {
       }
 
       const deviceSuffix = isApple ? 'apple' : 'pc';
-      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
+      const roomSuffix = roomId ? `_r${roomId}` : '';
+      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
     } catch (err) {
       console.error('startHlsSession error:', err);
@@ -250,10 +252,11 @@ export class StreamController {
 
   public static async endHlsSession(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { mediaId, quality, audioIndex, isApple } = req.body;
+      const { mediaId, quality, audioIndex, isApple, roomId } = req.body;
       if (mediaId && quality && audioIndex !== undefined) {
         const deviceSuffix = isApple ? 'apple' : 'pc';
-        const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}`;
+        const roomSuffix = roomId ? `_r${roomId}` : '';
+        const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
         ffmpegService.killSession(sessionId);
       }
       res.json({ success: true });
@@ -281,6 +284,7 @@ export class StreamController {
       const isApple = req.query.isApple === '1' || /iPad|iPhone|iPod|Macintosh/i.test(userAgent);
       const authHeader = req.headers.authorization;
       const token = (req.query.token as string) || (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '') : '');
+      const roomId = req.query.roomId as string || '';
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
@@ -289,7 +293,8 @@ export class StreamController {
       }
 
       const deviceSuffix = isApple ? 'apple' : 'pc';
-      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
+      const roomSuffix = roomId ? `_r${roomId}` : '';
+      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
 
       const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
 

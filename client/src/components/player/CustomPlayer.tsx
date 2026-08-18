@@ -11,6 +11,7 @@ import { ReactionOverlay } from './ReactionOverlay';
 
 interface CustomPlayerProps {
   media: MediaItem;
+  room?: any;
   roomState?: RoomState;
   syncDiffMs?: number;
   syncQuality?: 'perfect' | 'good' | 'adjusting' | 'seeking';
@@ -39,6 +40,7 @@ interface CustomPlayerProps {
 
 export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   media,
+  room,
   roomState,
   syncDiffMs = 0,
   syncQuality = 'perfect',
@@ -72,7 +74,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
 
-  const isInternalSeekRef = useRef<boolean>(false);
+  const lastInternalSeekPosRef = useRef<number>(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -287,7 +289,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           backBufferLength: 60,
           maxBufferLength: 60,
           maxMaxBufferLength: 120,
-          autoStartLoad: true,
+          autoStartLoad: false,
           maxBufferHole: 1.0,
           nudgeOffset: 0.1,
           nudgeMaxRetry: 5,
@@ -296,25 +298,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         hls.attachMedia(video);
 
         hls.on(Hls.Events.BUFFER_APPENDED, () => {
-          // Instant start: if media timestamp starts with a small gap (e.g. at 0.5s or 1.4s), jump directly to the buffer start!
+          // If video is stuck because currentTime is slightly behind the buffer start
+          // (which happens often when seeking to 0s if the audio track has a priming delay)
           if (video.buffered.length > 0) {
             const bufStart = video.buffered.start(0);
-            if (video.currentTime < bufStart) {
+            if (video.currentTime < bufStart && (bufStart - video.currentTime) < 2.0) {
               video.currentTime = bufStart;
             }
-          }
-        });
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          try { video.currentTime = startPos; } catch (e) {}
-          if (shouldPlay) {
-            video.play().then(() => {
-              setIsPlaying(true);
-              setIsBuffering(false);
-            }).catch(() => {
-              setIsPlaying(false);
-              setIsBuffering(false);
-            });
           }
         });
 
@@ -339,10 +329,25 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         hlsRef.current = hls;
       }
 
+      // We use .once so it only fires for this specific load event,
+      // and closure over the CORRECT startPos!
+      hls.once(Hls.Events.MANIFEST_PARSED, () => {
+        try { video.currentTime = startPos; } catch (e) {}
+        if (shouldPlay) {
+          video.play().then(() => {
+            setIsPlaying(true);
+            setIsBuffering(false);
+          }).catch(() => {
+            setIsPlaying(false);
+            setIsBuffering(false);
+          });
+        }
+      });
+
       // Reset currentTime to startPos
       try { video.currentTime = startPos; } catch (e) {}
       hls.loadSource(url);
-      hls.startLoad(0);
+      hls.startLoad(startPos);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       // Native Apple Safari fallback
       video.src = url;
@@ -389,7 +394,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {})
           },
-          body: JSON.stringify({ mediaId, quality, audioIndex, isApple }),
+          body: JSON.stringify({ mediaId, quality, audioIndex, isApple, roomId: room?.id }),
           keepalive: true
         }).catch(() => {});
       }
@@ -399,32 +404,62 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const buildStreamUrl = useCallback((quality: string, audioIndex: number) => {
     const token = localStorage.getItem('myplex_token');
     const tokenParam = token ? `token=${encodeURIComponent(token)}` : '';
+    const roomParam = isWatchTogether && room?.id ? `roomId=${room.id}` : '';
+    
     if (isDirectPlay) {
-      return `/api/stream/${media.id}/direct${tokenParam ? `?${tokenParam}` : ''}`;
+      const params = [tokenParam, roomParam].filter(Boolean).join('&');
+      return `/api/stream/${media.id}/direct${params ? `?${params}` : ''}`;
     }
     // JIT VOD HLS for ALL non-direct streams
     const isAppleParam = isAppleDevice ? '1' : '0';
-    return `/api/stream/${media.id}/master.m3u8?quality=${quality}&audioIndex=${audioIndex}&isApple=${isAppleParam}${tokenParam ? `&${tokenParam}` : ''}`;
-  }, [media.id, isDirectPlay, isAppleDevice]);
+    const params = [`quality=${quality}`, `audioIndex=${audioIndex}`, `isApple=${isAppleParam}`, tokenParam, roomParam].filter(Boolean).join('&');
+    return `/api/stream/${media.id}/master.m3u8?${params}`;
+  }, [media.id, isDirectPlay, isAppleDevice, isWatchTogether, room?.id]);
 
   // Perform seek
   const doSeek = useCallback((targetTime: number, forcePlayState?: boolean) => {
     const video = videoRef.current;
     if (!video) return;
 
-    isInternalSeekRef.current = true;
     const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
+    lastInternalSeekPosRef.current = safePos;
     setCurrentTime(safePos);
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
     console.log(`[Player] ⚡ Seeking: target=${safePos.toFixed(1)}s`);
-    video.currentTime = safePos;
-    if (shouldPlay) {
-      video.play().catch(() => {});
+
+    if (isWatchTogether && !isDirectPlay) {
+      // FORCE A COMPLETE STREAM RESTART FOR WATCH TOGETHER
+      console.log('[Player] Watch Together: Restarting stream on seek for perfect sync');
+      const url = buildStreamUrl(selectedQuality, selectedAudioTrack);
+      
+      // Tell server to kill the current session to guarantee a fresh start
+      const token = localStorage.getItem('myplex_token');
+      const { mediaId, quality, audioIndex, isApple } = streamInfoRef.current;
+      fetch('/api/stream/hls/session/end', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ mediaId, quality, audioIndex, isApple, roomId: room?.id })
+      }).catch(() => {});
+
+      // Destroy HLS and reload from new position
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      loadStreamSource(url, false, shouldPlay, safePos);
     } else {
-      video.pause();
+      video.currentTime = safePos;
+      if (shouldPlay) {
+        video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
     }
-  }, [effectiveDuration]);
+  }, [effectiveDuration, isWatchTogether, isDirectPlay, buildStreamUrl, selectedQuality, selectedAudioTrack, loadStreamSource]);
 
   // Lazy Web Audio Gain Booster
   const setupAudioGain = useCallback(() => {
@@ -760,18 +795,20 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           if (videoRef.current) {
             const paused = videoRef.current.paused;
             setIsPlaying(!paused);
-            if (isWatchTogether && !isInternalSeekRef.current) {
+            
+            if (isWatchTogether) {
               const currentPos = videoRef.current.currentTime || 0;
-              // Debounce native seek to avoid spamming room
-              triggerSeek(currentPos);
+              // Ignore seeked events that are caused by our internal programmatic seeks
+              if (Math.abs(currentPos - lastInternalSeekPosRef.current) > 1.0) {
+                // Debounce native seek to avoid spamming room
+                triggerSeek(currentPos);
+              }
             }
-            isInternalSeekRef.current = false;
           }
         }}
         onLoadedData={() => {
           setIsBuffering(false);
           if (videoRef.current) setIsPlaying(!videoRef.current.paused);
-          isInternalSeekRef.current = false;
         }}
         onPlay={() => {
           setIsPlaying(true);

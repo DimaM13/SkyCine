@@ -116,6 +116,7 @@ export const RoomPage: React.FC = () => {
         <div className="flex-1 w-full h-full">
           <CustomPlayer
             media={media}
+            room={room}
             roomState={roomState}
             syncDiffMs={syncDiffMs}
             syncQuality={syncQuality}
