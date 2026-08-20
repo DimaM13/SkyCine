@@ -185,6 +185,7 @@ class FFmpegService {
 
     const encoder = await this.detectHardwareEncoder();
     const args: string[] = [
+      '-err_detect', 'ignore_err',
       '-fflags', '+genpts+discardcorrupt+nobuffer',
     ];
 
@@ -332,8 +333,14 @@ class FFmpegService {
 
     proc.stderr?.on('data', (d) => {
       const msg = d.toString();
-      if (msg.includes('Error') || msg.includes('failed')) {
-        console.error(`[Continuous HLS stderr] ${sessionId}:`, msg);
+      const isDecoderNoise = msg.includes('Not all references are available') || 
+                             msg.includes('Error submitting packet to decoder') || 
+                             msg.includes('zero_bit out of range') || 
+                             msg.includes('Failed to read frame header') ||
+                             msg.includes('Failed to read unit') ||
+                             msg.includes('Decoding error: Invalid data');
+      if (!isDecoderNoise && (msg.includes('Fatal') || msg.includes('Conversion failed') || msg.includes('Cannot allocate'))) {
+        console.error(`[Continuous HLS stderr] ${sessionId}:`, msg.trim());
       }
     });
 
