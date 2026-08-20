@@ -74,7 +74,7 @@ export const EpisodeModal: React.FC<EpisodeModalProps> = ({
     }
   };
 
-  const episodePoster = episode.stillPath || episode.posterPath || `/api/media/item/${episode.id}/thumbnail`;
+  const episodePoster = episode.stillPath || `/api/media/item/${episode.id}/thumbnail`;
 
   return (
     <div

@@ -318,11 +318,32 @@ class ScannerService {
     // Sort files to preserve episode order
     files.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
 
+    // Pre-fetch TMDB episodes cache for all seasons of this show
+    const seasonEpisodeCache = new Map<number, Map<number, any>>();
+    if (showMetadata?.tmdbId) {
+      const seasonsFound = new Set<number>();
+      for (const f of files) {
+        const sMatch = path.normalize(f).match(/[\\/](?:season|сезон|s)\s*(\d{1,2})[\\/]/i) ||
+                       path.basename(f).match(/[sS](\d{1,2})[eE]\d{1,3}/i);
+        seasonsFound.add(sMatch ? parseInt(sMatch[1], 10) : 1);
+      }
+      for (const sNum of seasonsFound) {
+        try {
+          const eps = await tmdbService.fetchSeasonEpisodes(showMetadata.tmdbId, sNum);
+          const epMap = new Map<number, any>();
+          for (const ep of eps) {
+            epMap.set(ep.episodeNumber, ep);
+          }
+          seasonEpisodeCache.set(sNum, epMap);
+        } catch (e) {}
+      }
+    }
+
     let count = 0;
     for (let i = 0; i < files.length; i++) {
       const filePath = files[i];
       try {
-        await this.processEpisodeFile(filePath, library, finalShowTitle, showMetadata, i + 1);
+        await this.processEpisodeFile(filePath, library, finalShowTitle, showMetadata, i + 1, seasonEpisodeCache);
         count++;
       } catch (err: any) {
         console.warn(`[Scanner] Could not process episode file ${filePath}:`, err.message);
@@ -341,7 +362,8 @@ class ScannerService {
     library: Library,
     showTitle: string,
     showMetadata: any,
-    fallbackIndex: number
+    fallbackIndex: number,
+    seasonEpisodeCache?: Map<number, Map<number, any>>
   ): Promise<void> {
     const stat = fs.statSync(filePath);
     const fileName = path.basename(filePath);
@@ -365,12 +387,14 @@ class ScannerService {
       episodeNumber = parseInt(epMatch[1], 10);
     }
 
-    const title = `${showTitle} - S${seasonNumber < 10 ? '0' : ''}${seasonNumber}E${episodeNumber < 10 ? '0' : ''}${episodeNumber}`;
+    const epData = seasonEpisodeCache?.get(seasonNumber)?.get(episodeNumber);
+    const title = epData?.title || `${showTitle} - S${seasonNumber < 10 ? '0' : ''}${seasonNumber}E${episodeNumber < 10 ? '0' : ''}${episodeNumber}`;
     const year = showMetadata?.year || null;
-    const overview = showMetadata?.overview || '';
+    const overview = epData?.overview || '';
     const posterPath = showMetadata?.posterPath || '';
     const backdropPath = showMetadata?.backdropPath || '';
-    const rating = showMetadata?.rating || 0;
+    const stillPath = epData?.stillPath || null;
+    const rating = epData?.rating || showMetadata?.rating || 0;
     const genres = showMetadata?.genres ? JSON.stringify(showMetadata.genres) : '';
 
     const probeData = await this.probeFile(filePath);
@@ -387,7 +411,7 @@ class ScannerService {
       db.prepare(`
         UPDATE media_items SET
           title = ?, originalTitle = ?, type = 'EPISODE', year = ?, overview = ?,
-          posterPath = ?, backdropPath = ?, rating = ?, genres = ?,
+          posterPath = ?, backdropPath = ?, stillPath = ?, rating = ?, genres = ?,
           durationSeconds = ?, fileSize = ?, resolution = ?,
           videoCodec = ?, audioCodec = ?, showTitle = ?,
           seasonNumber = ?, episodeNumber = ?, streamDetails = ?,
@@ -395,7 +419,7 @@ class ScannerService {
         WHERE id = ?
       `).run(
         title, showMetadata?.originalTitle || '', year, overview,
-        posterPath, backdropPath, rating, genres,
+        posterPath, backdropPath, stillPath, rating, genres,
         durationSeconds, stat.size, resolution,
         videoCodec, audioCodec, showTitle,
         seasonNumber, episodeNumber, streamDetails,
@@ -407,14 +431,14 @@ class ScannerService {
       db.prepare(`
         INSERT INTO media_items (
           id, libraryId, title, originalTitle, type, year, overview,
-          posterPath, backdropPath, rating, genres, durationSeconds,
+          posterPath, backdropPath, stillPath, rating, genres, durationSeconds,
           filePath, fileSize, resolution, videoCodec, audioCodec,
           showTitle, seasonNumber, episodeNumber, streamDetails
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         mediaId, library.id, title, showMetadata?.originalTitle || '',
         'EPISODE', year, overview,
-        posterPath, backdropPath, rating, genres, durationSeconds,
+        posterPath, backdropPath, stillPath, rating, genres, durationSeconds,
         filePath, stat.size, resolution, videoCodec, audioCodec,
         showTitle, seasonNumber, episodeNumber, streamDetails
       );

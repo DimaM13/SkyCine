@@ -751,7 +751,7 @@ export const LibraryPage: React.FC = () => {
                         const progressPercent = (ep as any).userProgress && ep.durationSeconds
                           ? Math.min(100, Math.round(((ep as any).userProgress / ep.durationSeconds) * 100))
                           : 0;
-                        const posterUrl = ep.stillPath || ep.posterPath || `/api/media/item/${ep.id}/thumbnail`;
+                        const posterUrl = ep.stillPath || `/api/media/item/${ep.id}/thumbnail`;
 
                         return (
                           <div

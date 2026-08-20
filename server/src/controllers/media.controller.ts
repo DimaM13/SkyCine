@@ -356,7 +356,6 @@ export class MediaController {
           posterPath = ?,
           backdropPath = ?,
           rating = ?,
-          overview = COALESCE(?, overview),
           updatedAt = CURRENT_TIMESTAMP
         WHERE showTitle = ? AND type = 'EPISODE'
       `).run(
@@ -366,7 +365,6 @@ export class MediaController {
         posterPath || '',
         backdropPath || '',
         rating || 0,
-        overview || null,
         showTitle
       );
 
@@ -387,13 +385,13 @@ export class MediaController {
               UPDATE media_items SET
                 title = ?,
                 stillPath = ?,
-                overview = COALESCE(?, overview),
+                overview = ?,
                 rating = COALESCE(?, rating)
               WHERE showTitle = ? AND seasonNumber = ? AND episodeNumber = ? AND type = 'EPISODE'
             `).run(
               epTitle,
               ep.stillPath || null,
-              ep.overview || null,
+              ep.overview || '',
               ep.rating || rating || null,
               title,
               sNum,

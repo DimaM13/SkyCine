@@ -129,7 +129,7 @@ class TMDBService {
 
     try {
       // First try Russian
-      const res = await axios.get(`${TMDB_BASE_URL}/tv/${tmdbShowId}/season/${seasonNumber}`, {
+      const ruRes = await axios.get(`${TMDB_BASE_URL}/tv/${tmdbShowId}/season/${seasonNumber}`, {
         params: {
           api_key: apiKey,
           language: 'ru-RU',
@@ -137,17 +137,43 @@ class TMDBService {
         timeout: 7000,
       });
 
-      const episodes = res.data?.episodes || [];
-      return episodes.map((ep: any) => ({
-        seasonNumber: ep.season_number,
-        episodeNumber: ep.episode_number,
-        title: ep.name ? ep.name.trim() : `Серия ${ep.episode_number}`,
-        overview: ep.overview ? ep.overview.trim() : undefined,
-        stillPath: ep.still_path ? `${TMDB_IMAGE_BASE}/w500${ep.still_path}` : undefined,
-        rating: ep.vote_average || undefined,
-      }));
+      const ruEpisodes = ruRes.data?.episodes || [];
+
+      // Also fetch English in background for missing overviews/titles
+      let enEpisodes: any[] = [];
+      try {
+        const enRes = await axios.get(`${TMDB_BASE_URL}/tv/${tmdbShowId}/season/${seasonNumber}`, {
+          params: {
+            api_key: apiKey,
+            language: 'en-US',
+          },
+          timeout: 5000,
+        });
+        enEpisodes = enRes.data?.episodes || [];
+      } catch (e) {}
+
+      return ruEpisodes.map((ep: any, idx: number) => {
+        const enEp = enEpisodes.find((e: any) => e.episode_number === ep.episode_number) || enEpisodes[idx];
+        const rawName = ep.name?.trim();
+        const enName = enEp?.name?.trim();
+        const isGenericName = !rawName || /^Episode \d+$/i.test(rawName) || /^Серия \d+$/i.test(rawName) || /^Эпизод \d+$/i.test(rawName);
+
+        const title = (!isGenericName && rawName) ? rawName : (enName || rawName || `Серия ${ep.episode_number}`);
+        const overview = ep.overview?.trim() || enEp?.overview?.trim() || '';
+        const rawStill = ep.still_path || enEp?.still_path;
+        const stillPath = rawStill ? `${TMDB_IMAGE_BASE}/w500${rawStill}` : undefined;
+
+        return {
+          seasonNumber: ep.season_number,
+          episodeNumber: ep.episode_number,
+          title,
+          overview,
+          stillPath,
+          rating: ep.vote_average || enEp?.vote_average || undefined,
+        };
+      });
     } catch (err) {
-      // Try English fallback if Russian failed
+      // Try English fallback if Russian failed completely
       try {
         const enRes = await axios.get(`${TMDB_BASE_URL}/tv/${tmdbShowId}/season/${seasonNumber}`, {
           params: {
@@ -161,7 +187,7 @@ class TMDBService {
           seasonNumber: ep.season_number,
           episodeNumber: ep.episode_number,
           title: ep.name ? ep.name.trim() : `Серия ${ep.episode_number}`,
-          overview: ep.overview ? ep.overview.trim() : undefined,
+          overview: ep.overview ? ep.overview.trim() : '',
           stillPath: ep.still_path ? `${TMDB_IMAGE_BASE}/w500${ep.still_path}` : undefined,
           rating: ep.vote_average || undefined,
         }));
