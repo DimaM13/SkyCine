@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX,
   Maximize, Minimize, ArrowLeft, Users, Share2,
-  RefreshCw, Video, AlertCircle, X, Clock, ExternalLink, Zap
+  RefreshCw, Video, AlertCircle, X, Clock, ExternalLink, Zap, Loader2
 } from 'lucide-react';
 import { useSocket } from '../../context/SocketContext';
 import { Room, RoomMember, RoomReaction, RoomState } from '../../types';
@@ -82,10 +82,13 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const playerRef = useRef<any>(null);
   const videoStreamRef = useRef<HTMLVideoElement>(null);
   const targetSeekPosRef = useRef<number>(room.currentPosition || 0);
+  const isSeekingRef = useRef<boolean>(false);
 
-  // Playback engine: 'iframe' (official embed) or 'server_stream' (yt-dlp fallback for 18+/restricted videos)
+  // Playback engine: 'iframe' or 'server_stream'
   const [engine, setEngine] = useState<'iframe' | 'server_stream'>('iframe');
   const [streamSrc, setStreamSrc] = useState<string>('');
+  const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
+  const [downloadPercent, setDownloadPercent] = useState<number>(0);
 
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(roomState === 'PLAYING');
@@ -110,34 +113,23 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Helper to switch to server_stream engine and broadcast to all room members
-  const switchToServerStream = useCallback((startPos?: number) => {
+  const switchToServerStream = useCallback(() => {
     if (!currentYtId) return;
-    const pos = startPos !== undefined ? startPos : currentTime;
     setEngine('server_stream');
-    setStreamSrc(`/api/stream/youtube/${currentYtId}?start=${Math.floor(pos)}`);
     setFallbackToast(true);
     setTimeout(() => setFallbackToast(false), 5000);
 
     if (socket && room?.id) {
       socket.emit('room:set_youtube_engine', { roomId: room.id, engine: 'server_stream' });
     }
-
-    // Fetch video info in background
-    apiClient.get(`/stream/youtube/info/${currentYtId}`)
-      .then((res) => {
-        if (res.data?.duration) setDuration(res.data.duration);
-        if (res.data?.title) setVideoTitle(res.data.title);
-      })
-      .catch(() => {});
-  }, [currentYtId, currentTime, socket, room?.id]);
+  }, [currentYtId, socket, room?.id]);
 
   // Synchronize engine switch from socket
   useEffect(() => {
     if (!socket) return;
     const handleEngine = (data: { engine: 'iframe' | 'server_stream' }) => {
-      if (data.engine === 'server_stream' && currentYtId) {
+      if (data.engine === 'server_stream') {
         setEngine('server_stream');
-        setStreamSrc(`/api/stream/youtube/${currentYtId}?start=${Math.floor(currentTime)}`);
       } else if (data.engine === 'iframe') {
         setEngine('iframe');
       }
@@ -146,7 +138,40 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     return () => {
       socket.off('room:youtube_engine', handleEngine);
     };
-  }, [socket, currentYtId, currentTime]);
+  }, [socket]);
+
+  // Poll 1080p download status when in server_stream mode
+  useEffect(() => {
+    if (engine !== 'server_stream' || !currentYtId) return;
+
+    let isMounted = true;
+    const pollStatus = async () => {
+      try {
+        const res = await apiClient.get(`/stream/youtube/download-status/${currentYtId}`);
+        if (!isMounted) return;
+
+        if (res.data?.status === 'ready') {
+          setDownloadStatus('ready');
+          setDownloadPercent(100);
+          setStreamSrc(`/api/stream/youtube/${currentYtId}`);
+        } else {
+          setDownloadStatus(res.data?.status || 'downloading');
+          setDownloadPercent(res.data?.percent || 10);
+        }
+      } catch (e) {
+        if (!isMounted) return;
+        setDownloadStatus('downloading');
+      }
+    };
+
+    pollStatus();
+    const interval = setInterval(pollStatus, 1500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [engine, currentYtId]);
 
   // Helper to suppress YouTube captions completely
   const disableCaptions = useCallback((player: any) => {
@@ -168,14 +193,11 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
       targetSeekPosRef.current = pos;
+      isSeekingRef.current = true;
+
       if (engine === 'server_stream') {
         if (videoStreamRef.current) {
-          const diff = Math.abs((videoStreamRef.current.currentTime || 0) - pos);
-          if (diff > 15) {
-            setStreamSrc(`/api/stream/youtube/${currentYtId}?start=${Math.floor(pos)}`);
-          } else {
-            videoStreamRef.current.currentTime = pos;
-          }
+          videoStreamRef.current.currentTime = pos;
           if (shouldPlay) {
             videoStreamRef.current.play().catch(() => {});
             setIsPlaying(true);
@@ -308,10 +330,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             const d = event.target.getDuration();
             if (d && d > 0) setDuration(d);
 
-            // Disable subtitles explicitly
             disableCaptions(event.target);
 
-            // Seek to initial position if any
             if (room.currentPosition && room.currentPosition > 0) {
               targetSeekPosRef.current = room.currentPosition;
               event.target.seekTo(room.currentPosition, true);
@@ -328,9 +348,9 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           onStateChange: (event: any) => {
             disableCaptions(event.target);
 
-            // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
             if (event.data === 1) {
               setIsPlaying(true);
+              isSeekingRef.current = false;
               const d = event.target.getDuration();
               if (d && d > 0) setDuration(d);
             } else if (event.data === 2 || event.data === 0) {
@@ -339,7 +359,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           },
           onError: (event: any) => {
             if (event.data === 101 || event.data === 150 || event.data === 100 || event.data === 2 || event.data === 5) {
-              switchToServerStream(room.currentPosition || currentTime);
+              switchToServerStream();
             }
           },
         },
@@ -353,7 +373,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         createYTPlayer();
       };
     }
-  }, [room.currentPosition, roomState, disableCaptions, switchToServerStream, currentTime]);
+  }, [room.currentPosition, roomState, disableCaptions, switchToServerStream]);
 
   useEffect(() => {
     if (currentYtId && engine === 'iframe') {
@@ -381,6 +401,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         targetSeekPosRef.current = 0;
         setIsPlaying(false);
         setEngine('iframe');
+        setDownloadStatus('idle');
 
         if (playerRef.current && isPlayerReady) {
           try {
@@ -398,10 +419,15 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
   }, [socket, isPlayerReady, disableCaptions]);
 
-  // 5. Periodic Time Tracker & Accurate Buffer Reporter
+  // 5. Periodic Time Tracker & True Buffer Reporter
   useEffect(() => {
     const interval = setInterval(() => {
       if (engine === 'server_stream') {
+        if (downloadStatus !== 'ready') {
+          onBufferStatusChange(false, 0, 0, downloadPercent || 15);
+          return;
+        }
+
         const video = videoStreamRef.current;
         if (!video) return;
 
@@ -415,7 +441,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        const isReady = (video.readyState >= 1) || (bufSec > 0);
+        const isReady = (video.readyState >= 2) || (bufSec > cur + 1);
         const bufferPercent = isReady ? 100 : Math.min(99, Math.round((bufSec / dur) * 100));
         onBufferStatusChange(isReady, bufSec, cur, bufferPercent);
         return;
@@ -434,16 +460,23 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        const isBufferingYT = ytState === 3;
+        // Check if seek is pending
+        if (isSeekingRef.current) {
+          if (Math.abs(cur - targetSeekPosRef.current) < 1.2 && ytState !== 3 && ytState !== -1) {
+            isSeekingRef.current = false;
+          }
+        }
+
+        const isBufferingYT = ytState === 3 || ytState === -1 || isSeekingRef.current;
         const isReady = isPlayerReady && !isBufferingYT;
 
-        const bufferPercent = isReady ? 100 : Math.max(10, Math.min(99, Math.round(fraction * 100)));
+        const bufferPercent = isReady ? 100 : isSeekingRef.current ? 45 : Math.max(10, Math.min(99, Math.round(fraction * 100)));
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
-    }, 400);
+    }, 350);
 
     return () => clearInterval(interval);
-  }, [engine, isPlayerReady, duration, onBufferStatusChange]);
+  }, [engine, downloadStatus, downloadPercent, isPlayerReady, duration, onBufferStatusChange]);
 
   // 6. Auto-hide Controls
   const resetControlsTimeout = () => {
@@ -471,16 +504,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const handleSeek = (seconds: number) => {
     const target = Math.max(0, Math.min(duration, seconds));
     targetSeekPosRef.current = target;
+    isSeekingRef.current = true;
     setCurrentTime(target);
 
     if (engine === 'server_stream') {
       if (videoStreamRef.current) {
-        const diff = Math.abs((videoStreamRef.current.currentTime || 0) - target);
-        if (diff > 15) {
-          setStreamSrc(`/api/stream/youtube/${currentYtId}?start=${Math.floor(target)}`);
-        } else {
-          videoStreamRef.current.currentTime = target;
-        }
+        videoStreamRef.current.currentTime = target;
         videoStreamRef.current.pause();
         setIsPlaying(false);
       }
@@ -586,33 +615,52 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         </div>
       )}
 
-      {/* 2. HTML5 Video Stream (yt-dlp 18+ Fallback Engine) */}
+      {/* 2. HTML5 Video Stream (1080p Local Stream Fallback Engine) */}
       {engine === 'server_stream' && (
         <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-black">
-          <video
-            ref={videoStreamRef}
-            src={streamSrc}
-            playsInline
-            preload="auto"
-            className="w-full h-full object-contain pointer-events-none"
-            onLoadedMetadata={() => {
-              setIsPlayerReady(true);
-              if (videoStreamRef.current?.duration) {
-                setDuration(videoStreamRef.current.duration);
-              }
-              onBufferStatusChange(true, 5, currentTime, 100);
-              if (roomState === 'PLAYING') {
-                videoStreamRef.current?.play().catch(() => {});
-                setIsPlaying(true);
-              }
-            }}
-            onCanPlay={() => {
-              setIsPlayerReady(true);
-              onBufferStatusChange(true, 5, currentTime, 100);
-            }}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-          />
+          {downloadStatus === 'ready' && streamSrc ? (
+            <video
+              ref={videoStreamRef}
+              src={streamSrc}
+              playsInline
+              preload="auto"
+              className="w-full h-full object-contain pointer-events-none"
+              onLoadedMetadata={() => {
+                setIsPlayerReady(true);
+                if (videoStreamRef.current?.duration) {
+                  setDuration(videoStreamRef.current.duration);
+                }
+                if (roomState === 'PLAYING') {
+                  videoStreamRef.current?.play().catch(() => {});
+                  setIsPlaying(true);
+                }
+              }}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-4 p-6 text-center max-w-md animate-fade-in z-20">
+              <div className="relative">
+                <Loader2 className="w-12 h-12 text-cinema-gold animate-spin" />
+                <Zap className="w-5 h-5 text-amber-400 absolute inset-0 m-auto fill-current animate-pulse" />
+              </div>
+              <div className="flex flex-col gap-1">
+                <h3 className="text-white font-bold text-base">Подготовка видео в 1080p Full HD</h3>
+                <p className="text-slate-400 text-xs">
+                  Загружаем видео без возрастных ограничений на сервер SkyCine...
+                </p>
+              </div>
+              <div className="w-full bg-white/10 h-2.5 rounded-full overflow-hidden p-0.5 border border-white/10">
+                <div
+                  className="bg-gradient-to-r from-amber-500 to-cinema-gold h-full rounded-full transition-all duration-300"
+                  style={{ width: `${downloadPercent}%` }}
+                />
+              </div>
+              <span className="text-cinema-gold font-mono font-bold text-xs">
+                {downloadPercent}% готово
+              </span>
+            </div>
+          )}
         </div>
       )}
 
@@ -641,7 +689,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       {fallbackToast && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-red-600/90 text-white border border-red-400/40 rounded-2xl px-4 py-2 text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-fade-in pointer-events-none">
           <Zap className="w-4 h-4 text-yellow-300 fill-current animate-bounce" />
-          <span>Возрастное ограничение 18+ — включён прямой серверный поток SkyCine ⚡</span>
+          <span>Возрастное ограничение 18+ — включён прямой серверный 1080p поток SkyCine ⚡</span>
         </div>
       )}
 
@@ -670,7 +718,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
               {engine === 'server_stream' && (
                 <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1 shrink-0">
                   <Zap className="w-2.5 h-2.5 fill-current" />
-                  18+ Bypass
+                  1080p Bypass
                 </span>
               )}
               <span className="bg-cinema-gold/15 text-cinema-gold font-mono text-[10px] font-bold px-2 py-0.5 rounded-md border border-cinema-gold/30 shrink-0">
@@ -692,10 +740,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
                 switchToServerStream();
               }}
               className="px-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold transition-all hidden sm:flex items-center gap-1.5 cursor-pointer"
-              title="Переключить на прямой серверный стрим"
+              title="Переключить на серверный 1080p поток"
             >
               <Zap className="w-3.5 h-3.5 text-amber-400" />
-              <span>Серверный стрим</span>
+              <span>1080p Стрим</span>
             </button>
           )}
 

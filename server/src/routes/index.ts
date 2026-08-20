@@ -53,6 +53,7 @@ router.post('/media/:id/match-apply', requireAdmin, MediaController.applyMatch);
 router.delete('/media/:id', requireAdmin, MediaController.deleteMedia);
 
 // --- YouTube Direct Stream Routes (yt-dlp fallback) ---
+router.get('/stream/youtube/download-status/:videoId', YouTubeController.getDownloadStatus);
 router.get('/stream/youtube/info/:videoId', YouTubeController.getInfo);
 router.get('/stream/youtube/:videoId', YouTubeController.stream);
 

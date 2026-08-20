@@ -257,7 +257,8 @@ export function useSyncPlayer({
         const now = getSyncedServerTime();
         const delay = Math.max(0, data.serverTimestamp - now);
 
-        if (Math.abs(cur - data.currentPosition) > 1.5) {
+        // Only seek if significantly out of position (avoid resetting mobile iframe buffer)
+        if (Math.abs(cur - data.currentPosition) > 2.5) {
           executeSeek(data.currentPosition, false);
         }
 
@@ -479,13 +480,15 @@ export function useSyncPlayer({
       return; // Block play request until everyone is ready
     }
     const cur = getRealPos();
+    const scheduledStart = getSyncedServerTime() + 450;
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PLAY',
       position: cur,
       playbackRate: playbackRateRef.current,
+      timestamp: scheduledStart,
     });
-  }, [socket, room?.id, members, getRealPos]);
+  }, [socket, room?.id, members, getRealPos, getSyncedServerTime]);
 
   const sendPause = useCallback(() => {
     if (!socket || !room?.id) return;

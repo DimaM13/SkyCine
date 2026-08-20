@@ -3,32 +3,34 @@ import { spawn, execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { promisify } from 'util';
-import axios from 'axios';
 
 const execFileAsync = promisify(execFile);
 
-interface CachedYtStream {
-  videoUrl: string;
-  audioUrl?: string;
-  isCombined: boolean;
+interface DownloadProgress {
+  videoId: string;
+  status: 'downloading' | 'ready' | 'error';
+  percent: number;
   title: string;
   duration: number;
-  expiresAt: number;
+  filePath?: string;
+  error?: string;
 }
 
-const streamCache = new Map<string, CachedYtStream>();
+const activeDownloads = new Map<string, DownloadProgress>();
+const cacheDir = path.resolve(__dirname, '../../uploads/youtube_cache');
+
+if (!fs.existsSync(cacheDir)) {
+  fs.mkdirSync(cacheDir, { recursive: true });
+}
 
 export class YouTubeController {
   private static getYtDlpPath(): string {
-    // 1. Check virtual env on D: drive
     const venvYtDlp = 'd:\\DowloadAiAll\\.venv\\Scripts\\yt-dlp.exe';
     if (fs.existsSync(venvYtDlp)) return venvYtDlp;
 
-    // 2. Check local server bin directory
     const localBin = path.join(__dirname, '../../bin/yt-dlp.exe');
     if (fs.existsSync(localBin)) return localBin;
 
-    // 3. Fallback to global command
     return 'yt-dlp';
   }
 
@@ -43,71 +45,132 @@ export class YouTubeController {
   }
 
   /**
-   * Extract direct GoogleVideo URLs for a YouTube video using yt-dlp
+   * Start 1080p background download of a YouTube video to uploads/youtube_cache
    */
-  public static async extractStreamUrls(videoId: string): Promise<CachedYtStream> {
-    const cached = streamCache.get(videoId);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached;
+  public static startDownload(videoId: string): DownloadProgress {
+    const filePath = path.join(cacheDir, `${videoId}.mp4`);
+
+    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1024 * 1024) {
+      const progress: DownloadProgress = {
+        videoId,
+        status: 'ready',
+        percent: 100,
+        title: 'YouTube Video',
+        duration: 0,
+        filePath,
+      };
+      activeDownloads.set(videoId, progress);
+      return progress;
     }
+
+    const existing = activeDownloads.get(videoId);
+    if (existing && existing.status === 'downloading') {
+      return existing;
+    }
+
+    const progress: DownloadProgress = {
+      videoId,
+      status: 'downloading',
+      percent: 5,
+      title: 'YouTube Video',
+      duration: 0,
+      filePath,
+    };
+    activeDownloads.set(videoId, progress);
 
     const ytdlpPath = YouTubeController.getYtDlpPath();
     const cookiesPath = YouTubeController.getCookiesPath();
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    // Prefer progressive combined MP4 (format 18 / best[acodec!=none]) for 100% native iOS Safari Range support
     const args = [
-      '--dump-single-json',
-      '--no-playlist',
+      '--newline',
       '--js-runtimes', 'node',
       '--remote-components', 'ejs:github',
-      '--format', '18/best[ext=mp4][acodec!=none]/best[acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+      '--format', 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best',
+      '--merge-output-format', 'mp4',
+      '--http-chunk-size', '5242880',
+      '--retries', '25',
+      '--fragment-retries', '25',
       ...(cookiesPath ? ['--cookies', cookiesPath] : []),
+      '-o', filePath,
       videoUrl,
     ];
 
+    console.log(`[YouTubeController] Starting 1080p download for ${videoId}`);
+
+    const process = spawn(ytdlpPath, args);
+
+    process.stdout.on('data', (data) => {
+      const line = data.toString();
+      // Match "[download]  45.6% of ..."
+      const match = line.match(/\[download\]\s+([\d\.]+)%/);
+      if (match && match[1]) {
+        const pct = Math.min(99, Math.round(parseFloat(match[1])));
+        progress.percent = Math.max(progress.percent, pct);
+      }
+    });
+
+    process.stderr.on('data', (data) => {
+      const line = data.toString();
+      if (line.includes('ERROR:')) {
+        console.error(`[YouTubeController] Download error for ${videoId}:`, line.trim());
+      }
+    });
+
+    process.on('close', (code) => {
+      if (code === 0 && fs.existsSync(filePath) && fs.statSync(filePath).size > 1024 * 1024) {
+        progress.status = 'ready';
+        progress.percent = 100;
+        console.log(`[YouTubeController] 1080p download completed for ${videoId}`);
+      } else {
+        progress.status = 'error';
+        progress.error = `yt-dlp exited with code ${code}`;
+        console.error(`[YouTubeController] 1080p download failed for ${videoId} (code ${code})`);
+      }
+    });
+
+    return progress;
+  }
+
+  /**
+   * GET /api/stream/youtube/download-status/:videoId
+   */
+  public static async getDownloadStatus(req: Request, res: Response): Promise<void> {
     try {
-      const { stdout } = await execFileAsync(ytdlpPath, args, { maxBuffer: 10 * 1024 * 1024, timeout: 25000 });
-      const info = JSON.parse(stdout);
-
-      const title = info.title || 'YouTube Video';
-      const duration = info.duration || 0;
-
-      let vUrl = '';
-      let aUrl = '';
-      let isCombined = false;
-
-      if (info.url && info.acodec && info.acodec !== 'none' && info.vcodec && info.vcodec !== 'none') {
-        // Combined stream with both audio and video
-        vUrl = info.url;
-        isCombined = true;
-      } else if (info.requested_formats && info.requested_formats.length >= 2) {
-        vUrl = info.requested_formats[0].url;
-        aUrl = info.requested_formats[1].url;
-        isCombined = false;
-      } else if (info.url) {
-        vUrl = info.url;
-        isCombined = true;
+      const videoId = req.params.videoId as string;
+      if (!videoId) {
+        res.status(400).json({ error: 'videoId is required' });
+        return;
       }
 
-      if (!vUrl) {
-        throw new Error('No stream URL extracted from YouTube');
+      const filePath = path.join(cacheDir, `${videoId}.mp4`);
+      if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1024 * 1024) {
+        res.json({
+          success: true,
+          videoId,
+          status: 'ready',
+          percent: 100,
+        });
+        return;
       }
 
-      const streamData: CachedYtStream = {
-        videoUrl: vUrl,
-        audioUrl: aUrl || undefined,
-        isCombined,
-        title,
-        duration,
-        expiresAt: Date.now() + 3.5 * 60 * 60 * 1000, // 3.5 hours
-      };
+      let progress = activeDownloads.get(videoId);
+      if (!progress || progress.status === 'error') {
+        progress = YouTubeController.startDownload(videoId);
+      }
 
-      streamCache.set(videoId, streamData);
-      return streamData;
+      res.json({
+        success: true,
+        videoId,
+        status: progress.status,
+        percent: progress.percent,
+        error: progress.error,
+      });
     } catch (err: any) {
-      console.error(`[YouTubeController] Failed to extract streams for ${videoId}:`, err.message);
-      throw err;
+      res.status(500).json({
+        error: 'Failed to retrieve download status',
+        message: err.message,
+      });
     }
   }
 
@@ -122,13 +185,17 @@ export class YouTubeController {
         return;
       }
 
-      const info = await YouTubeController.extractStreamUrls(videoId);
+      const filePath = path.join(cacheDir, `${videoId}.mp4`);
+      const isReady = fs.existsSync(filePath) && fs.statSync(filePath).size > 1024 * 1024;
+
+      if (!isReady) {
+        YouTubeController.startDownload(videoId);
+      }
+
       res.json({
         success: true,
         videoId,
-        title: info.title,
-        duration: info.duration,
-        isCombined: info.isCombined,
+        isReady,
       });
     } catch (err: any) {
       res.status(500).json({
@@ -140,7 +207,7 @@ export class YouTubeController {
 
   /**
    * GET /api/stream/youtube/:videoId
-   * Streams progressive MP4 with full HTTP 206 Range request support for iOS/iPadOS Safari & Chrome
+   * Serves 1080p MP4 file with native HTTP 206 Range headers for iOS Safari and all browsers
    */
   public static async stream(req: Request, res: Response): Promise<void> {
     try {
@@ -150,111 +217,26 @@ export class YouTubeController {
         return;
       }
 
-      const streamInfo = await YouTubeController.extractStreamUrls(videoId);
-      const { videoUrl, audioUrl, isCombined } = streamInfo;
+      const filePath = path.join(cacheDir, `${videoId}.mp4`);
 
-      // 1. If combined stream, proxy directly with native HTTP Range support (perfect for iOS/iPadOS Safari)
-      if (isCombined || !audioUrl) {
-        const range = req.headers.range;
-
-        const proxyHeaders: Record<string, string> = {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Accept': '*/*',
-        };
-        if (range) {
-          proxyHeaders['Range'] = range;
-        }
-
-        const upstream = await axios({
-          method: 'get',
-          url: videoUrl,
-          headers: proxyHeaders,
-          responseType: 'stream',
-          validateStatus: () => true,
+      // If already downloaded, serve with standard Range headers support
+      if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1024 * 1024) {
+        res.sendFile(filePath, {
+          acceptRanges: true,
+          headers: {
+            'Content-Type': 'video/mp4',
+            'Access-Control-Allow-Origin': '*',
+          },
         });
-
-        const responseHeaders: Record<string, any> = {
-          'Content-Type': upstream.headers['content-type'] || 'video/mp4',
-          'Accept-Ranges': 'bytes',
-          'Access-Control-Allow-Origin': '*',
-        };
-
-        if (upstream.headers['content-length']) {
-          responseHeaders['Content-Length'] = upstream.headers['content-length'];
-        }
-        if (upstream.headers['content-range']) {
-          responseHeaders['Content-Range'] = upstream.headers['content-range'];
-        }
-
-        res.writeHead(upstream.status, responseHeaders);
-        upstream.data.pipe(res);
-
-        const cleanup = () => {
-          try {
-            upstream.data?.destroy?.();
-          } catch (e) {}
-        };
-        req.on('close', cleanup);
-        res.on('close', cleanup);
         return;
       }
 
-      // 2. Separate video + audio streams: remux on-the-fly via ffmpeg
-      const startSec = Math.max(0, parseFloat(req.query.start as string) || 0);
-      const ffmpegArgs: string[] = [];
-
-      if (startSec > 0) {
-        ffmpegArgs.push('-ss', startSec.toString());
-      }
-      ffmpegArgs.push(
-        '-reconnect', '1',
-        '-reconnect_at_eof', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5',
-        '-i', videoUrl
-      );
-
-      if (audioUrl) {
-        if (startSec > 0) {
-          ffmpegArgs.push('-ss', startSec.toString());
-        }
-        ffmpegArgs.push(
-          '-reconnect', '1',
-          '-reconnect_at_eof', '1',
-          '-reconnect_streamed', '1',
-          '-reconnect_delay_max', '5',
-          '-i', audioUrl
-        );
-      }
-
-      ffmpegArgs.push(
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-        '-f', 'mp4',
-        'pipe:1'
-      );
-
-      res.writeHead(200, {
-        'Content-Type': 'video/mp4',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'Access-Control-Allow-Origin': '*',
+      // If not yet downloaded, start download and notify client
+      YouTubeController.startDownload(videoId);
+      res.status(202).json({
+        status: 'downloading',
+        message: 'Video is being downloaded in 1080p quality. Please wait.',
       });
-
-      const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-      ffmpeg.stdout.pipe(res);
-
-      const cleanup = () => {
-        try {
-          ffmpeg.kill('SIGKILL');
-        } catch (e) {}
-      };
-
-      req.on('close', cleanup);
-      res.on('close', cleanup);
     } catch (err: any) {
       console.error(`[YouTubeController] Streaming error:`, err.message);
       if (!res.headersSent) {
