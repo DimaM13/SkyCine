@@ -146,6 +146,28 @@ export function initDatabase() {
     db.exec('ALTER TABLE media_items ADD COLUMN stillPath TEXT;');
   } catch (e) {}
 
+  try {
+    const tableInfo = db.prepare('PRAGMA table_info(libraries)').all() as any[];
+    const pathCol = tableInfo.find((col) => col.name === 'path');
+    if (pathCol && pathCol.notnull === 1) {
+      db.exec(`
+        PRAGMA foreign_keys=off;
+        CREATE TABLE IF NOT EXISTS libraries_migration (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          path TEXT,
+          lastScannedAt DATETIME,
+          createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO libraries_migration SELECT id, name, type, path, lastScannedAt, createdAt FROM libraries;
+        DROP TABLE libraries;
+        ALTER TABLE libraries_migration RENAME TO libraries;
+        PRAGMA foreign_keys=on;
+      `);
+    }
+  } catch (e) {}
+
   // Default server settings
   const insertSetting = db.prepare(`
     INSERT OR IGNORE INTO server_settings (key, value) VALUES (?, ?)
