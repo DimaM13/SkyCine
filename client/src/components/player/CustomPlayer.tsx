@@ -846,10 +846,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setIsPlaying(false);
       reportProgress();
     } else {
-      if (isWatchTogether && !allMembersReady && members.length > 1) {
-        // Block play until all participants are ready
-        return;
-      }
       const p = video.play();
       if (p) {
         p.then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));

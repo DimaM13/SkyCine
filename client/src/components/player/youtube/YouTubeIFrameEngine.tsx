@@ -298,9 +298,8 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
         }
         onTimeUpdate(cur, dur);
 
-        const isBufferingYT = ytState === 3 || isSeekingRef.current;
-        const isReady = isReadyRef.current && !isBufferingYT;
-        const bufferPercent = isReady ? 100 : isSeekingRef.current ? 75 : 50;
+        const isReady = isReadyRef.current;
+        const bufferPercent = isReady ? 100 : (loadedSec > 0 ? Math.min(99, Math.round((loadedSec / (dur || 1)) * 100)) : 50);
 
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}

@@ -111,8 +111,20 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
 
     onAttachPlayHandler?.(() => {
       if (videoRef.current) {
-        videoRef.current.play().catch(() => {});
-        onPlayingChange(true);
+        const p = videoRef.current.play();
+        if (p !== undefined) {
+          p.then(() => {
+            onPlayingChange(true);
+          }).catch((err) => {
+            console.warn('[YouTubeStreamEngine] Autoplay prevented, playing muted to stay in sync:', err);
+            if (videoRef.current) {
+              videoRef.current.muted = true;
+              videoRef.current.play().then(() => {
+                onPlayingChange(true);
+              }).catch(() => {});
+            }
+          });
+        }
       }
     });
 
@@ -166,8 +178,8 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
       }
       onTimeUpdate(cur, dur);
 
-      const ready = isReady || (video.readyState >= 1) || (bufSec > 0) || !video.paused;
-      const bufferPercent = ready ? 100 : Math.min(99, Math.round((bufSec / dur) * 100));
+      const ready = isReady || (video.readyState >= 1);
+      const bufferPercent = ready ? 100 : Math.min(99, Math.round((bufSec / (dur || 1)) * 100));
 
       onBufferStatusChange(ready, bufSec, cur, bufferPercent);
     }, 350);
@@ -196,8 +208,15 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
             }
             onBufferStatusChange(true, 5, initialPosition || 0, 100);
             if (roomState === 'PLAYING') {
-              videoRef.current?.play().catch(() => {});
-              onPlayingChange(true);
+              const p = videoRef.current?.play();
+              if (p !== undefined) {
+                p.then(() => onPlayingChange(true)).catch(() => {
+                  if (videoRef.current) {
+                    videoRef.current.muted = true;
+                    videoRef.current.play().then(() => onPlayingChange(true)).catch(() => {});
+                  }
+                });
+              }
             } else {
               videoRef.current?.pause();
               onPlayingChange(false);
