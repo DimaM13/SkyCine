@@ -13,10 +13,20 @@ export class LibraryController {
 
       if (userRole === 'ADMIN') {
         const libraries = db.prepare(`
-          SELECT l.*, COUNT(m.id) as itemCount
+          SELECT l.*,
+                 CASE 
+                   WHEN l.type = 'SHOWS' THEN (
+                     SELECT COUNT(DISTINCT m.showTitle)
+                     FROM media_items m
+                     WHERE m.libraryId = l.id AND m.type = 'EPISODE' AND m.showTitle IS NOT NULL
+                   )
+                   ELSE (
+                     SELECT COUNT(m.id)
+                     FROM media_items m
+                     WHERE m.libraryId = l.id AND m.type = 'MOVIE'
+                   )
+                 END as itemCount
           FROM libraries l
-          LEFT JOIN media_items m ON l.id = m.libraryId
-          GROUP BY l.id
           ORDER BY l.name ASC
         `).all();
         res.json({ libraries });
@@ -26,21 +36,32 @@ export class LibraryController {
       // For regular users: only show libraries they have access to or have shared items in
       const libraries = db.prepare(`
         SELECT l.*,
-               (
-                 SELECT COUNT(m.id)
-                 FROM media_items m
-                 WHERE m.libraryId = l.id
-                   AND (
-                     l.id IN (SELECT libraryId FROM user_library_access WHERE userId = ?)
-                     OR m.id IN (SELECT mediaItemId FROM user_media_access WHERE userId = ?)
-                   )
-               ) as itemCount
+               CASE 
+                 WHEN l.type = 'SHOWS' THEN (
+                   SELECT COUNT(DISTINCT m.showTitle)
+                   FROM media_items m
+                   WHERE m.libraryId = l.id AND m.type = 'EPISODE' AND m.showTitle IS NOT NULL
+                     AND (
+                       l.id IN (SELECT libraryId FROM user_library_access WHERE userId = ?)
+                       OR m.id IN (SELECT mediaItemId FROM user_media_access WHERE userId = ?)
+                     )
+                 )
+                 ELSE (
+                   SELECT COUNT(m.id)
+                   FROM media_items m
+                   WHERE m.libraryId = l.id AND m.type = 'MOVIE'
+                     AND (
+                       l.id IN (SELECT libraryId FROM user_library_access WHERE userId = ?)
+                       OR m.id IN (SELECT mediaItemId FROM user_media_access WHERE userId = ?)
+                     )
+                 )
+               END as itemCount
         FROM libraries l
         WHERE l.id IN (SELECT libraryId FROM user_library_access WHERE userId = ?)
            OR l.id IN (SELECT libraryId FROM media_items WHERE id IN (SELECT mediaItemId FROM user_media_access WHERE userId = ?))
         GROUP BY l.id
         ORDER BY l.name ASC
-      `).all(userId, userId, userId, userId);
+      `).all(userId, userId, userId, userId, userId, userId);
 
       res.json({ libraries });
     } catch (err) {

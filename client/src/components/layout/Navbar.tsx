@@ -1,17 +1,20 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
-  Film, Tv, Users, Shield, LogOut, User as UserIcon,
-  Play, Sparkles, Menu, X, Radio
+  Users, Shield, LogOut, User as UserIcon,
+  Play, Menu, Radio
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
-export const Navbar: React.FC = () => {
+interface NavbarProps {
+  onToggleSidebar?: () => void;
+}
+
+export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
   const { user, logout, isAdmin } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const isPlayerScreen =
     location.pathname.startsWith('/watch') ||
@@ -24,9 +27,6 @@ export const Navbar: React.FC = () => {
   const isActive = (path: string) => location.pathname === path;
 
   const navLinks = [
-    { path: '/', label: 'Главная', icon: Film },
-    { path: '/movies', label: 'Фильмы', icon: Film },
-    { path: '/shows', label: 'Сериалы', icon: Tv },
     { path: '/rooms', label: 'Комнаты', icon: Radio },
     { path: '/friends', label: 'Друзья', icon: Users },
   ];
@@ -41,49 +41,62 @@ export const Navbar: React.FC = () => {
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-cinema-950/80 backdrop-blur-xl border-b border-white/10">
-      <div className="max-w-7xl mx-auto px-4 md:px-8 h-20 flex items-center justify-between">
-        {/* Brand Logo */}
-        <Link to="/" className="flex items-center gap-3 group">
-          <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-cinema-gold to-yellow-300 flex items-center justify-center shadow-glow-gold transform group-hover:scale-105 transition-transform">
-            <Play className="w-5 h-5 text-black fill-black ml-0.5" />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-xl font-extrabold text-white tracking-wider flex items-center gap-1 font-['Outfit']">
-              Sky<span className="text-cinema-gold">Cine</span>
-            </span>
-            <span className="text-[10px] text-cinema-gold font-semibold uppercase tracking-widest -mt-1">
-              Personal Cinema & Sync
-            </span>
-          </div>
-        </Link>
-
-        {/* Desktop Navigation */}
-        {user && (
-          <nav className="hidden md:flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded-2xl">
-            {navLinks.map((link) => {
-              const Icon = link.icon;
-              const active = isActive(link.path);
-              return (
-                <Link
-                  key={link.path}
-                  to={link.path}
-                  className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
-                    active
-                      ? 'bg-cinema-gold text-black shadow-glow-gold'
-                      : 'text-slate-300 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  <Icon className="w-4 h-4" />
-                  <span>{link.label}</span>
-                </Link>
-              );
-            })}
-          </nav>
-        )}
-
-        {/* Right User Profile / Auth Area */}
+    <header className="sticky top-0 z-40 bg-cinema-950/80 backdrop-blur-xl border-b border-white/10 h-20">
+      <div className="w-full px-4 md:px-8 h-full flex items-center justify-between">
+        {/* Left: Mobile Toggle & Brand Logo */}
         <div className="flex items-center gap-3">
+          {user && (
+            <button
+              onClick={onToggleSidebar}
+              className="md:hidden p-2 rounded-xl bg-white/5 border border-white/10 text-white hover:bg-white/10 transition-colors"
+              title="Открыть меню библиотек"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+          )}
+
+          <Link to="/" className="flex items-center gap-3 group">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-cinema-gold to-yellow-300 flex items-center justify-center shadow-glow-gold transform group-hover:scale-105 transition-transform">
+              <Play className="w-5 h-5 text-black fill-black ml-0.5" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-xl font-extrabold text-white tracking-wider flex items-center gap-1 font-['Outfit']">
+                Sky<span className="text-cinema-gold">Cine</span>
+              </span>
+              <span className="text-[10px] text-cinema-gold font-semibold uppercase tracking-widest -mt-1 hidden sm:block">
+                Personal Cinema & Sync
+              </span>
+            </div>
+          </Link>
+        </div>
+
+        {/* Right Nav & User Area */}
+        <div className="flex items-center gap-3 md:gap-4">
+          {/* Desktop Navigation */}
+          {user && (
+            <nav className="hidden md:flex items-center gap-1 bg-white/5 border border-white/5 p-1 rounded-2xl">
+              {navLinks.map((link) => {
+                const Icon = link.icon;
+                const active = isActive(link.path);
+                return (
+                  <Link
+                    key={link.path}
+                    to={link.path}
+                    className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
+                      active
+                        ? 'bg-cinema-gold text-black shadow-glow-gold'
+                        : 'text-slate-300 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span>{link.label}</span>
+                  </Link>
+                );
+              })}
+            </nav>
+          )}
+
+          {/* User Profile / Auth Area */}
           {user ? (
             <div className="relative">
               <button
@@ -146,39 +159,8 @@ export const Navbar: React.FC = () => {
               Войти / Регистрация
             </Link>
           )}
-
-          {/* Mobile Menu Toggle */}
-          <button
-            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="md:hidden p-2 rounded-xl bg-white/5 border border-white/10 text-white"
-          >
-            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
         </div>
       </div>
-
-      {/* Mobile Navigation Drawer */}
-      {mobileMenuOpen && (
-        <div className="md:hidden p-4 bg-cinema-950 border-b border-white/10 flex flex-col gap-2">
-          {navLinks.map((link) => {
-            const Icon = link.icon;
-            const active = isActive(link.path);
-            return (
-              <Link
-                key={link.path}
-                to={link.path}
-                onClick={() => setMobileMenuOpen(false)}
-                className={`p-3 rounded-xl text-xs font-semibold flex items-center gap-3 ${
-                  active ? 'bg-cinema-gold text-black font-bold' : 'text-slate-300 hover:bg-white/5'
-                }`}
-              >
-                <Icon className="w-4 h-4" />
-                <span>{link.label}</span>
-              </Link>
-            );
-          })}
-        </div>
-      )}
     </header>
   );
 };

@@ -56,6 +56,7 @@ export function initDatabase() {
       overview TEXT,
       posterPath TEXT,
       backdropPath TEXT,
+      stillPath TEXT,
       rating REAL,
       genres TEXT,
       durationSeconds REAL DEFAULT 0,
@@ -140,6 +141,10 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_watch_user ON watch_history(userId);
     CREATE INDEX IF NOT EXISTS idx_friendship_users ON friendships(requesterId, addresseeId);
   `);
+
+  try {
+    db.exec('ALTER TABLE media_items ADD COLUMN stillPath TEXT;');
+  } catch (e) {}
 
   // Default server settings
   const insertSetting = db.prepare(`

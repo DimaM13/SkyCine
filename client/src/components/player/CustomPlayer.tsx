@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
+import { apiClient } from '../../api/client';
 
 interface CustomPlayerProps {
   media: MediaItem;
@@ -159,16 +160,30 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Direct Play eligibility check
+  // Direct Play eligibility check:
+  // Direct Play is used for native MP4/M4V/WebM with 1 audio track.
+  // Files with multiple audio tracks MUST use Direct Stream (HLS with direct stream copy)
+  // to isolate the selected audio track and avoid browser multi-track audio playback/mixing.
   const isDirectPlay = useMemo(() => {
     const ext = (media.filePath || '').toLowerCase();
     const isNativeContainer = ext.endsWith('.mp4') || ext.endsWith('.m4v') || ext.endsWith('.webm');
-    const isNativeAudio = media.audioCodec === 'aac' || media.audioCodec === 'mp3' || media.audioCodec === 'opus';
-    return selectedQuality === 'original' &&
-      isNativeContainer &&
-      isNativeAudio &&
-      selectedAudioTrack === (audioTracks[0]?.streamIndex ?? 0);
-  }, [media.filePath, media.audioCodec, selectedQuality, selectedAudioTrack, audioTracks]);
+    if (!isNativeContainer || selectedQuality !== 'original') return false;
+
+    // Multi-track audio files must use HLS so FFmpeg delivers exactly one isolated audio track
+    if (audioTracks.length > 1) {
+      return false;
+    }
+
+    if (isAppleDevice) {
+      const selectedTrack = audioTracks[0];
+      const codec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
+      const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac'].some(c => codec.includes(c));
+      return isNativeAppleAudio;
+    } else {
+      const isNativeAudio = media.audioCodec === 'aac' || media.audioCodec === 'mp3' || media.audioCodec === 'opus';
+      return isNativeAudio;
+    }
+  }, [media.filePath, media.audioCodec, selectedQuality, audioTracks, isAppleDevice]);
 
   // Stream mode status for user transparency
   const streamMode = useMemo(() => {
@@ -252,6 +267,33 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         hlsRef.current = null;
       }
       video.src = url;
+
+      // Select correct audio track via AudioTrack API (Safari/iPad)
+      const selectAudioTrack = () => {
+        const at = (video as any).audioTracks;
+        if (at && at.length > 1) {
+          // Find which track index in the file matches selectedAudioTrack streamIndex
+          // audioTracks from props are ordered by streamIndex; file tracks are ordered sequentially
+          const audioTracksList = audioTracks;
+          const selectedIdx = audioTracksList.findIndex((t: any) => t.streamIndex === selectedAudioTrack);
+          for (let i = 0; i < at.length; i++) {
+            at[i].enabled = (i === (selectedIdx >= 0 ? selectedIdx : 0));
+          }
+        }
+      };
+      // Seek to initial start position if resuming
+      if (startPos > 0) {
+        const applyInitialSeek = () => {
+          try {
+            if (video.currentTime < startPos - 1 || video.currentTime === 0) {
+              video.currentTime = startPos;
+            }
+          } catch (e) {}
+        };
+        video.addEventListener('loadedmetadata', applyInitialSeek, { once: true });
+        video.addEventListener('canplay', applyInitialSeek, { once: true });
+      }
+
       if (shouldPlay) {
         video.play().then(() => {
           setIsPlaying(true);
@@ -536,17 +578,33 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (prevQualityRef.current === selectedQuality && prevAudioTrackRef.current === selectedAudioTrack) {
       return;
     }
+
+    const qualityChanged = prevQualityRef.current !== selectedQuality;
+    const audioChanged = prevAudioTrackRef.current !== selectedAudioTrack;
     prevQualityRef.current = selectedQuality;
     prevAudioTrackRef.current = selectedAudioTrack;
 
     const video = videoRef.current;
     if (!video) return;
 
+    // Apple Direct Play: switch audio track instantly via AudioTrack API (no reload needed)
+    if (isDirectPlay && isAppleDevice && audioChanged && !qualityChanged) {
+      const at = (video as any).audioTracks;
+      if (at && at.length > 1) {
+        const selectedIdx = audioTracks.findIndex((t: any) => t.streamIndex === selectedAudioTrack);
+        for (let i = 0; i < at.length; i++) {
+          at[i].enabled = (i === (selectedIdx >= 0 ? selectedIdx : 0));
+        }
+        console.log(`[Player] 🔊 Switched audio track via AudioTrack API (index=${selectedIdx})`);
+        return; // No stream reload needed
+      }
+    }
+
     const currentPos = video.currentTime || 0;
     const wasPlaying = !video.paused;
     const url = buildStreamUrl(selectedQuality, selectedAudioTrack);
     loadStreamSource(url, isDirectPlay, wasPlaying, currentPos);
-  }, [selectedQuality, selectedAudioTrack]);
+  }, [selectedQuality, selectedAudioTrack, isDirectPlay, buildStreamUrl, loadStreamSource]);
 
   // Video Events
   const handleTimeUpdate = () => {
@@ -574,6 +632,58 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setBufferedTime(bufEnd);
     }
   };
+
+  // Live Watch Progress Reporting (every 6 seconds while playing, on pause, and on unmount)
+  const lastReportedProgressRef = useRef<number>(0);
+
+  const reportProgress = useCallback((overridePos?: number) => {
+    const video = videoRef.current;
+    if (!video || !media?.id) return;
+    const pos = overridePos !== undefined ? overridePos : video.currentTime;
+    const dur = video.duration || media.durationSeconds || duration || 0;
+
+    if (pos > 5 && dur > 0) {
+      lastReportedProgressRef.current = pos;
+      apiClient.post('/media/progress', {
+        mediaItemId: media.id,
+        progressSeconds: Math.floor(pos),
+        durationSeconds: Math.floor(dur)
+      }).catch(() => {});
+    }
+  }, [media.id, media.durationSeconds, duration]);
+
+  // Periodic progress sync while playing
+  useEffect(() => {
+    if (!isPlaying) return;
+    const timer = setInterval(() => {
+      reportProgress();
+    }, 6000);
+    return () => clearInterval(timer);
+  }, [isPlaying, reportProgress]);
+
+  // Sync progress on window unload or component unmount
+  useEffect(() => {
+    const handleUnload = () => {
+      const video = videoRef.current;
+      if (video && video.currentTime > 5 && media?.id) {
+        const dur = video.duration || media.durationSeconds || duration || 0;
+        const payload = JSON.stringify({
+          mediaItemId: media.id,
+          progressSeconds: Math.floor(video.currentTime),
+          durationSeconds: Math.floor(dur)
+        });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon('/api/media/progress', new Blob([payload], { type: 'application/json' }));
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      reportProgress();
+    };
+  }, [media.id, media.durationSeconds, duration, reportProgress]);
 
   const stallCheckTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -639,7 +749,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         case 'volumeup':
         case 'volumedown':
         case 'volumemute':
-          // Let OS handle master volume without interrupting video playback
+          // Strictly prevent Chrome internal media player from intercepting volume keys when focused
+          e.preventDefault();
+          e.stopPropagation();
           return;
         case 'arrowright':
         case 'l':
@@ -672,7 +784,38 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, volume]);
+  }, []);
+
+  // System Media Session API integration (Windows SMTC / macOS Now Playing)
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: media.title,
+          artist: media.showTitle || 'SkyCine',
+          album: 'SkyCine Cinema Server',
+          artwork: media.posterPath ? [{ src: media.posterPath, sizes: '512x512', type: 'image/jpeg' }] : []
+        });
+
+        navigator.mediaSession.setActionHandler('play', () => {
+          const video = videoRef.current;
+          if (video && video.paused) {
+            video.play().catch(() => {});
+            setIsPlaying(true);
+          }
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {
+          const video = videoRef.current;
+          if (video && !video.paused) {
+            video.pause();
+            setIsPlaying(false);
+          }
+        });
+        navigator.mediaSession.setActionHandler('seekbackward', () => skip(-10));
+        navigator.mediaSession.setActionHandler('seekforward', () => skip(10));
+      } catch (e) {}
+    }
+  }, [media.id, media.title, media.showTitle, media.posterPath]);
 
   const togglePlay = () => {
     const video = videoRef.current;
@@ -683,6 +826,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (actualIsPlaying) {
       video.pause();
       setIsPlaying(false);
+      reportProgress();
     } else {
       const p = video.play();
       if (p) {
@@ -782,7 +926,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="relative w-full h-full bg-black flex items-center justify-center select-none overflow-hidden group font-sans touch-none"
+      onPointerDown={(e) => {
+        const el = document.activeElement as HTMLElement;
+        if (el && typeof el.blur === 'function' && el.tagName !== 'TEXTAREA') {
+          el.blur();
+        }
+      }}
+      className="relative w-full h-full bg-black flex items-center justify-center select-none overflow-hidden group font-sans touch-none focus:outline-none"
+      style={{ contain: 'layout paint', transform: 'translateZ(0)' }}
+      tabIndex={-1}
     >
       <video
         ref={videoRef}
@@ -824,8 +976,18 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           if (isWatchTogether && roomState !== 'PAUSED') onPauseRequest?.();
         }}
         onEnded={() => setIsPlaying(false)}
-        onClick={togglePlay}
-        className="w-full h-full object-contain cursor-pointer"
+        onClick={(e) => {
+          (e.currentTarget as HTMLElement).blur();
+          togglePlay();
+        }}
+        onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
+        className="w-full h-full object-contain cursor-pointer focus:outline-none"
+        style={{
+          transform: 'translateZ(0)',
+          willChange: 'transform',
+          backfaceVisibility: 'hidden'
+        }}
+        tabIndex={-1}
         playsInline
         preload="auto"
       >
@@ -1201,9 +1363,20 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               handleSeekInput(e);
               triggerSeek(parseFloat(e.target.value));
             }}
-            onMouseUp={handleSeekCommit}
-            onTouchEnd={handleSeekCommit}
-            onKeyUp={handleSeekCommit}
+            onMouseUp={(e) => {
+              handleSeekCommit(e);
+              (e.currentTarget as HTMLElement).blur();
+            }}
+            onTouchEnd={(e) => {
+              handleSeekCommit(e);
+              (e.currentTarget as HTMLElement).blur();
+            }}
+            onKeyUp={(e) => {
+              handleSeekCommit(e);
+              (e.currentTarget as HTMLElement).blur();
+            }}
+            onPointerUp={(e) => (e.currentTarget as HTMLElement).blur()}
+            tabIndex={-1}
             className="w-full h-1.5 bg-transparent appearance-none cursor-pointer focus:outline-none relative z-10 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cinema-gold [&::-webkit-slider-thumb]:shadow-glow-gold [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-125"
           />
         </div>
@@ -1215,9 +1388,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                (e.currentTarget as HTMLElement).blur();
                 togglePlay();
               }}
-              className="p-2.5 rounded-full bg-white/10 hover:bg-cinema-gold hover:text-black text-white transition-all transform active:scale-95 cursor-pointer"
+              onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
+              tabIndex={-1}
+              className="p-2.5 rounded-full bg-white/10 hover:bg-cinema-gold hover:text-black text-white transition-all transform active:scale-95 cursor-pointer focus:outline-none"
             >
               {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
             </button>
@@ -1225,9 +1401,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                (e.currentTarget as HTMLElement).blur();
                 skip(-10);
               }}
-              className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
+              tabIndex={-1}
+              className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer focus:outline-none"
               title="Назад на 10 секунд"
             >
               <RotateCcw className="w-4 h-4" />
@@ -1236,9 +1415,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                (e.currentTarget as HTMLElement).blur();
                 skip(10);
               }}
-              className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
+              tabIndex={-1}
+              className="p-2 text-slate-300 hover:text-white transition-colors cursor-pointer focus:outline-none"
               title="Вперед на 10 секунд"
             >
               <RotateCw className="w-4 h-4" />
@@ -1249,9 +1431,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  (e.currentTarget as HTMLElement).blur();
                   toggleMute();
                 }}
-                className="text-slate-300 hover:text-white transition-colors cursor-pointer"
+                onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
+                tabIndex={-1}
+                className="text-slate-300 hover:text-white transition-colors cursor-pointer focus:outline-none"
               >
                 {isMuted || volume === 0 ? (
                   <VolumeX className="w-5 h-5 text-red-400" />
@@ -1269,7 +1454,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 step={0.02}
                 value={isMuted ? 0 : volume}
                 onChange={(e) => changeVolume(parseFloat(e.target.value))}
-                className="w-16 h-1 bg-white/20 accent-cinema-gold rounded-full cursor-pointer opacity-80 group-hover/volume:opacity-100 transition-opacity"
+                onPointerUp={(e) => (e.currentTarget as HTMLElement).blur()}
+                onMouseUp={(e) => (e.currentTarget as HTMLElement).blur()}
+                onTouchEnd={(e) => (e.currentTarget as HTMLElement).blur()}
+                tabIndex={-1}
+                className="w-16 h-1 bg-white/20 accent-cinema-gold rounded-full cursor-pointer opacity-80 group-hover/volume:opacity-100 transition-opacity focus:outline-none"
               />
 
               {/* Volume Percentage Display */}

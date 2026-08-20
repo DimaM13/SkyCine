@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider } from './context/SocketContext';
 import { Navbar } from './components/layout/Navbar';
+import { Sidebar } from './components/layout/Sidebar';
 import { InviteToast } from './components/layout/InviteToast';
 import { HomePage } from './pages/HomePage';
+import { LibraryPage } from './pages/LibraryPage';
 import { MoviesPage } from './pages/MoviesPage';
 import { ShowsPage } from './pages/ShowsPage';
 import { RoomsPage } from './pages/RoomsPage';
@@ -35,6 +37,9 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
 const MainLayout: React.FC = () => {
   const location = useLocation();
+  const { user } = useAuth();
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
   const isPlayerScreen =
     location.pathname.startsWith('/watch') ||
     (/^\/rooms\/[a-zA-Z0-9_-]+$/.test(location.pathname) && location.pathname !== '/rooms');
@@ -54,20 +59,31 @@ const MainLayout: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-cinema-950 text-slate-100 flex flex-col">
-      <Navbar />
+      <Navbar onToggleSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)} />
       <InviteToast />
-      <main className="flex-1">
-        <Routes>
-          <Route path="/auth" element={<AuthPage />} />
-          <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
-          <Route path="/movies" element={<ProtectedRoute><MoviesPage /></ProtectedRoute>} />
-          <Route path="/shows" element={<ProtectedRoute><ShowsPage /></ProtectedRoute>} />
-          <Route path="/rooms" element={<ProtectedRoute><RoomsPage /></ProtectedRoute>} />
-          <Route path="/friends" element={<ProtectedRoute><FriendsPage /></ProtectedRoute>} />
-          <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
+
+      <div className="flex-1 flex w-full">
+        {user && (
+          <Sidebar
+            mobileOpen={mobileSidebarOpen}
+            onCloseMobile={() => setMobileSidebarOpen(false)}
+          />
+        )}
+
+        <main className="flex-1 min-w-0 overflow-x-hidden">
+          <Routes>
+            <Route path="/auth" element={<AuthPage />} />
+            <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
+            <Route path="/library/:id" element={<ProtectedRoute><LibraryPage /></ProtectedRoute>} />
+            <Route path="/movies" element={<ProtectedRoute><MoviesPage /></ProtectedRoute>} />
+            <Route path="/shows" element={<ProtectedRoute><ShowsPage /></ProtectedRoute>} />
+            <Route path="/rooms" element={<ProtectedRoute><RoomsPage /></ProtectedRoute>} />
+            <Route path="/friends" element={<ProtectedRoute><FriendsPage /></ProtectedRoute>} />
+            <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
     </div>
   );
 };
@@ -83,4 +99,5 @@ export const App: React.FC = () => {
     </AuthProvider>
   );
 };
+
 export default App;

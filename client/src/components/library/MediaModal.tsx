@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Play, Users, Star, Clock, Disc3, Subtitles, Film, HardDrive, Sparkles, Search, Check, Trash2, Edit3, Lock } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { X, Play, Users, Star, Clock, Disc3, Subtitles, Film, HardDrive, Sparkles, Search, Check, Trash2, Edit3, Lock, RotateCcw } from 'lucide-react';
 import { apiClient } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { MediaItem } from '../../types';
@@ -22,6 +23,7 @@ export const MediaModal: React.FC<MediaModalProps> = ({
   onCreateRoom,
   onMediaUpdated,
 }) => {
+  const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const [media, setMedia] = useState<MediaItem | null>(null);
   const [loading, setLoading] = useState(false);
@@ -186,28 +188,77 @@ export const MediaModal: React.FC<MediaModalProps> = ({
 
             {/* Body Info */}
             <div className="p-6 md:p-8 flex flex-col gap-6">
+              {/* Progress Indicator Card if watched */}
+              {media.userProgress && media.userProgress > 15 && (
+                <div className="p-3.5 rounded-2xl bg-cinema-gold/10 border border-cinema-gold/25 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <Clock className="w-4 h-4 text-cinema-gold shrink-0" />
+                    <div className="text-xs">
+                      <span className="text-white font-bold block">
+                        Вы остановились на {formatDuration(media.userProgress)}
+                      </span>
+                      <span className="text-slate-400 text-[11px]">
+                        {media.durationSeconds > media.userProgress && (
+                          `Осталось ${Math.max(1, Math.round((media.durationSeconds - media.userProgress) / 60))} мин (${Math.min(100, Math.round((media.userProgress / media.durationSeconds) * 100))}%)`
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-mono font-bold text-cinema-gold bg-cinema-gold/20 px-2 py-0.5 rounded-md">
+                    В процессе
+                  </span>
+                </div>
+              )}
+
               {/* Actions */}
               <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={() => {
-                    onClose();
-                    onPlayDirect(media);
-                  }}
-                  className="px-6 py-3 rounded-2xl bg-cinema-gold text-black font-bold text-xs md:text-sm flex items-center gap-2 shadow-glow-gold hover:bg-yellow-400 transition-all"
-                >
-                  <Play className="w-4 h-4 fill-current ml-0.5" />
-                  <span>Смотреть</span>
-                </button>
+                {media.userProgress && media.userProgress > 15 ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        onClose();
+                        onPlayDirect(media);
+                      }}
+                      className="px-6 py-3 rounded-2xl bg-cinema-gold text-black font-extrabold text-xs md:text-sm flex items-center gap-2 shadow-glow-gold hover:bg-yellow-400 transition-all active:scale-95 cursor-pointer"
+                    >
+                      <Play className="w-4 h-4 fill-current ml-0.5" />
+                      <span>Продолжить с {formatDuration(media.userProgress)}</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        onClose();
+                        navigate(`/watch/${media.id}?start=0`);
+                      }}
+                      className="px-4 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs md:text-sm flex items-center gap-2 border border-white/15 transition-all cursor-pointer"
+                      title="Начать фильм с самого начала"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      <span>С начала</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => {
+                      onClose();
+                      onPlayDirect(media);
+                    }}
+                    className="px-6 py-3 rounded-2xl bg-cinema-gold text-black font-extrabold text-xs md:text-sm flex items-center gap-2 shadow-glow-gold hover:bg-yellow-400 transition-all active:scale-95 cursor-pointer"
+                  >
+                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                    <span>Смотреть</span>
+                  </button>
+                )}
 
                 <button
                   onClick={() => {
                     onClose();
                     onCreateRoom(media);
                   }}
-                  className="px-6 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-semibold text-xs md:text-sm flex items-center gap-2 border border-white/10 backdrop-blur-md transition-all"
+                  className="px-6 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-semibold text-xs md:text-sm flex items-center gap-2 border border-white/10 backdrop-blur-md transition-all cursor-pointer"
                 >
                   <Users className="w-4 h-4 text-cinema-gold" />
-                  <span>Создать комнату совместного просмотра</span>
+                  <span>Смотреть вместе с друзьями</span>
                 </button>
 
                 {isAdmin && (

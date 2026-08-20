@@ -63,6 +63,7 @@ export interface MediaItem {
   overview?: string;
   posterPath?: string;
   backdropPath?: string;
+  stillPath?: string;
   rating?: number;
   genres?: string;
   durationSeconds: number;

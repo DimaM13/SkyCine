@@ -5,6 +5,7 @@ const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 
 export interface TMDBMetadata {
+  tmdbId?: number;
   title: string;
   originalTitle?: string;
   overview?: string;
@@ -13,6 +14,15 @@ export interface TMDBMetadata {
   rating?: number;
   genres?: string[];
   year?: number;
+}
+
+export interface TMDBEpisodeMetadata {
+  seasonNumber: number;
+  episodeNumber: number;
+  title: string;
+  overview?: string;
+  stillPath?: string;
+  rating?: number;
 }
 
 class TMDBService {
@@ -24,10 +34,9 @@ class TMDBService {
   public async searchMovie(title: string, year?: number): Promise<TMDBMetadata | null> {
     const apiKey = this.getApiKey();
     if (!apiKey) {
-      // Fallback if no API key is provided
       return {
         title,
-        overview: 'Локальный фильм из библиотеки. Настройте TMDB API ключ в админ-панели для автоматической загрузки постеров и описаний.',
+        overview: 'Локальный фильм из библиотеки.',
         year,
       };
     }
@@ -89,22 +98,77 @@ class TMDBService {
         timeout: 6000,
       });
 
-      const results = response.data?.results;
+      let results = response.data?.results;
+      if (!results || results.length === 0) {
+        // Try English query fallback
+        const enRes = await axios.get(`${TMDB_BASE_URL}/search/tv`, {
+          params: {
+            api_key: apiKey,
+            query: title,
+            first_air_date_year: year || undefined,
+            language: 'en-US',
+          },
+          timeout: 6000,
+        });
+        results = enRes.data?.results;
+      }
+
       if (!results || results.length === 0) return null;
 
       const item = results[0];
-      return {
-        title: item.name || title,
-        originalTitle: item.original_name,
-        overview: item.overview,
-        posterPath: item.poster_path ? `${TMDB_IMAGE_BASE}/w500${item.poster_path}` : undefined,
-        backdropPath: item.backdrop_path ? `${TMDB_IMAGE_BASE}/original${item.backdrop_path}` : undefined,
-        rating: item.vote_average,
-        year: item.first_air_date ? parseInt(item.first_air_date.substring(0, 4), 10) : year,
-      };
+      return this.formatShowResult(item);
     } catch (error) {
       console.error('TMDB TV Search Error:', (error as Error).message);
       return null;
+    }
+  }
+
+  public async fetchSeasonEpisodes(tmdbShowId: number, seasonNumber: number): Promise<TMDBEpisodeMetadata[]> {
+    const apiKey = this.getApiKey();
+    if (!apiKey || !tmdbShowId) return [];
+
+    try {
+      // First try Russian
+      const res = await axios.get(`${TMDB_BASE_URL}/tv/${tmdbShowId}/season/${seasonNumber}`, {
+        params: {
+          api_key: apiKey,
+          language: 'ru-RU',
+        },
+        timeout: 7000,
+      });
+
+      const episodes = res.data?.episodes || [];
+      return episodes.map((ep: any) => ({
+        seasonNumber: ep.season_number,
+        episodeNumber: ep.episode_number,
+        title: ep.name ? ep.name.trim() : `Серия ${ep.episode_number}`,
+        overview: ep.overview ? ep.overview.trim() : undefined,
+        stillPath: ep.still_path ? `${TMDB_IMAGE_BASE}/w500${ep.still_path}` : undefined,
+        rating: ep.vote_average || undefined,
+      }));
+    } catch (err) {
+      // Try English fallback if Russian failed
+      try {
+        const enRes = await axios.get(`${TMDB_BASE_URL}/tv/${tmdbShowId}/season/${seasonNumber}`, {
+          params: {
+            api_key: apiKey,
+            language: 'en-US',
+          },
+          timeout: 7000,
+        });
+        const episodes = enRes.data?.episodes || [];
+        return episodes.map((ep: any) => ({
+          seasonNumber: ep.season_number,
+          episodeNumber: ep.episode_number,
+          title: ep.name ? ep.name.trim() : `Серия ${ep.episode_number}`,
+          overview: ep.overview ? ep.overview.trim() : undefined,
+          stillPath: ep.still_path ? `${TMDB_IMAGE_BASE}/w500${ep.still_path}` : undefined,
+          rating: ep.vote_average || undefined,
+        }));
+      } catch (e) {
+        console.warn(`TMDB fetchSeasonEpisodes S${seasonNumber} error:`, (e as Error).message);
+        return [];
+      }
     }
   }
 
@@ -150,6 +214,7 @@ class TMDBService {
 
   private formatMovieResult(item: any): TMDBMetadata {
     return {
+      tmdbId: item.id,
       title: item.title,
       originalTitle: item.original_title,
       overview: item.overview,
@@ -162,6 +227,7 @@ class TMDBService {
 
   private formatShowResult(item: any): TMDBMetadata {
     return {
+      tmdbId: item.id,
       title: item.name,
       originalTitle: item.original_name,
       overview: item.overview,

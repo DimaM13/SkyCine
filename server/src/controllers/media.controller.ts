@@ -1,4 +1,7 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { exec } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
@@ -11,6 +14,7 @@ export class MediaController {
     try {
       const search = (req.query.search as string || '').trim();
       const genre = (req.query.genre as string || '').trim();
+      const libraryId = (req.query.libraryId as string || '').trim();
       const sortBy = (req.query.sortBy as string) || 'recent'; // 'recent', 'rating', 'title', 'year'
       const userId = req.user?.id || '';
       const userRole = req.user?.role || 'USER';
@@ -28,6 +32,11 @@ export class MediaController {
       `;
       const params: any[] = [userId, ...filter.params];
 
+      if (libraryId) {
+        query += ` AND m.libraryId = ?`;
+        params.push(libraryId);
+      }
+
       if (search) {
         query += ` AND (m.title LIKE ? OR m.originalTitle LIKE ? OR m.overview LIKE ?)`;
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
@@ -38,20 +47,37 @@ export class MediaController {
         params.push(`%${genre}%`);
       }
 
-      if (sortBy === 'rating') {
-        query += ` ORDER BY m.rating DESC, m.createdAt DESC`;
-      } else if (sortBy === 'title') {
-        query += ` ORDER BY m.title ASC`;
-      } else if (sortBy === 'year') {
-        query += ` ORDER BY m.year DESC`;
-      } else {
-        query += ` ORDER BY m.createdAt DESC`;
+      switch (sortBy) {
+        case 'rating':
+          query += ` ORDER BY m.rating DESC`;
+          break;
+        case 'title':
+          query += ` ORDER BY m.title ASC`;
+          break;
+        case 'year':
+          query += ` ORDER BY m.year DESC`;
+          break;
+        case 'recent':
+        default:
+          query += ` ORDER BY m.createdAt DESC`;
+          break;
       }
 
       const movies = db.prepare(query).all(...params);
-      res.json({ movies });
+
+      // Parse JSON tracks for each movie
+      const parsedMovies = movies.map((m: any) => {
+        let tracks = [];
+        if (typeof m.tracks === 'string') {
+          try { tracks = JSON.parse(m.tracks); } catch {}
+        } else if (Array.isArray(m.tracks)) {
+          tracks = m.tracks;
+        }
+        return { ...m, tracks };
+      });
+
+      res.json({ movies: parsedMovies });
     } catch (err) {
-      console.error('getMovies error:', err);
       res.status(500).json({ error: 'Ошибка получения списка фильмов' });
     }
   }
@@ -60,10 +86,13 @@ export class MediaController {
     try {
       const userId = req.user?.id || '';
       const userRole = req.user?.role || 'USER';
+      const libraryId = (req.query.libraryId as string || '').trim();
+
       const filter = permissionService.getMediaFilter(userId, userRole, 'm');
 
-      const shows = db.prepare(`
+      let query = `
         SELECT m.showTitle,
+               m.libraryId,
                COUNT(m.id) as totalEpisodes,
                COUNT(DISTINCT m.seasonNumber) as totalSeasons,
                MIN(m.posterPath) as posterPath,
@@ -73,10 +102,20 @@ export class MediaController {
                MIN(m.overview) as overview
         FROM media_items m
         WHERE m.type = 'EPISODE' AND m.showTitle IS NOT NULL AND ${filter.sql}
+      `;
+      const params: any[] = [...filter.params];
+
+      if (libraryId) {
+        query += ` AND m.libraryId = ?`;
+        params.push(libraryId);
+      }
+
+      query += `
         GROUP BY m.showTitle
         ORDER BY m.showTitle ASC
-      `).all(...filter.params);
+      `;
 
+      const shows = db.prepare(query).all(...params);
       res.json({ shows });
     } catch (err) {
       res.status(500).json({ error: 'Ошибка получения списка сериалов' });
@@ -92,7 +131,8 @@ export class MediaController {
 
       const episodes = db.prepare(`
         SELECT m.*, l.name as libraryName,
-               wh.progressSeconds as userProgress, wh.isCompleted as userCompleted
+               wh.progressSeconds as userProgress, wh.isCompleted as userCompleted,
+               wh.lastWatchedAt as userLastWatchedAt
         FROM media_items m
         JOIN libraries l ON m.libraryId = l.id
         LEFT JOIN watch_history wh ON (wh.mediaItemId = m.id AND wh.userId = ?)
@@ -131,7 +171,9 @@ export class MediaController {
       const media = db.prepare(`
         SELECT m.*, l.name as libraryName,
                wh.progressSeconds as userProgress,
-               wh.isCompleted as userCompleted
+               wh.durationSeconds as userProgressDuration,
+               wh.isCompleted as userCompleted,
+               wh.lastWatchedAt as userLastWatchedAt
         FROM media_items m
         JOIN libraries l ON m.libraryId = l.id
         LEFT JOIN watch_history wh ON (wh.mediaItemId = m.id AND wh.userId = ?)
@@ -221,14 +263,16 @@ export class MediaController {
       const { id } = req.params;
       const query = (req.query.query as string || '').trim();
       const year = req.query.year ? parseInt(req.query.year as string, 10) : undefined;
-      const type = (req.query.type as 'MOVIE' | 'SHOW') || 'MOVIE';
 
-      if (!query) {
-        res.status(400).json({ error: 'Поисковый запрос обязателен' });
+      const media = db.prepare('SELECT title, type FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
+      if (!media) {
+        res.status(404).json({ error: 'Медиафайл не найден' });
         return;
       }
 
-      const candidates = await tmdbService.searchCandidates(query, type, year);
+      const searchQuery = query || media.title;
+      const candidates = await tmdbService.searchCandidates(searchQuery, media.type === 'EPISODE' ? 'SHOW' : 'MOVIE', year);
+
       res.json({ candidates });
     } catch (err: any) {
       console.error('searchMatch error:', err);
@@ -268,11 +312,142 @@ export class MediaController {
         id
       );
 
-      const updated = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id);
-      res.json({ message: 'Сопоставление успешно обновлено', media: updated });
+      res.json({ message: 'Сопоставление успешно обновлено' });
     } catch (err: any) {
       console.error('applyMatch error:', err);
       res.status(500).json({ error: err.message || 'Ошибка применения сопоставления' });
+    }
+  }
+
+  public static async searchShowMatch(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const query = (req.query.query as string || '').trim();
+      const year = req.query.year ? parseInt(req.query.year as string, 10) : undefined;
+
+      if (!query) {
+        res.status(400).json({ error: 'Поисковый запрос обязателен' });
+        return;
+      }
+
+      const candidates = await tmdbService.searchCandidates(query, 'SHOW', year);
+      res.json({ candidates });
+    } catch (err: any) {
+      console.error('searchShowMatch error:', err);
+      res.status(500).json({ error: err.message || 'Ошибка поиска сериала в TMDB' });
+    }
+  }
+
+  public static async applyShowMatch(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const showTitle = decodeURIComponent(req.params.showTitle as string);
+      const { title, originalTitle, year, overview, posterPath, backdropPath, rating, tmdbId } = req.body;
+
+      if (!title) {
+        res.status(400).json({ error: 'Название обязательно' });
+        return;
+      }
+
+      // Update show base fields (including vertical show poster and backdrop)
+      db.prepare(`
+        UPDATE media_items SET
+          showTitle = ?,
+          originalTitle = ?,
+          year = ?,
+          posterPath = ?,
+          backdropPath = ?,
+          rating = ?,
+          overview = COALESCE(?, overview),
+          updatedAt = CURRENT_TIMESTAMP
+        WHERE showTitle = ? AND type = 'EPISODE'
+      `).run(
+        title,
+        originalTitle || '',
+        year || null,
+        posterPath || '',
+        backdropPath || '',
+        rating || 0,
+        overview || null,
+        showTitle
+      );
+
+      // If TMDB ID is provided, fetch detailed episode names, overviews, stills, and ratings!
+      if (tmdbId) {
+        const seasons = db.prepare(`
+          SELECT DISTINCT seasonNumber
+          FROM media_items
+          WHERE showTitle = ? AND type = 'EPISODE'
+        `).all(title) as { seasonNumber: number }[];
+
+        for (const s of seasons) {
+          const sNum = s.seasonNumber || 1;
+          const episodesList = await tmdbService.fetchSeasonEpisodes(tmdbId, sNum);
+          for (const ep of episodesList) {
+            const epTitle = ep.title || `Серия ${ep.episodeNumber}`;
+            db.prepare(`
+              UPDATE media_items SET
+                title = ?,
+                stillPath = ?,
+                overview = COALESCE(?, overview),
+                rating = COALESCE(?, rating)
+              WHERE showTitle = ? AND seasonNumber = ? AND episodeNumber = ? AND type = 'EPISODE'
+            `).run(
+              epTitle,
+              ep.stillPath || null,
+              ep.overview || null,
+              ep.rating || rating || null,
+              title,
+              sNum,
+              ep.episodeNumber
+            );
+          }
+        }
+      }
+
+      res.json({ message: 'Сопоставление сериала и всех серий успешно обновлено', newShowTitle: title });
+    } catch (err: any) {
+      console.error('applyShowMatch error:', err);
+      res.status(500).json({ error: err.message || 'Ошибка применения сопоставления сериала' });
+    }
+  }
+
+  public static async getThumbnail(req: Request, res: Response): Promise<void> {
+    try {
+      const { id } = req.params;
+      const media = db.prepare('SELECT filePath, posterPath, durationSeconds FROM media_items WHERE id = ?').get(id) as { filePath: string; posterPath: string; durationSeconds: number } | undefined;
+
+      if (!media || !fs.existsSync(media.filePath)) {
+        res.status(404).send('Медиафайл не найден');
+        return;
+      }
+
+      const thumbDir = path.resolve(__dirname, '../../data/thumbnails');
+      if (!fs.existsSync(thumbDir)) {
+        fs.mkdirSync(thumbDir, { recursive: true });
+      }
+
+      const thumbFile = path.join(thumbDir, `${id}.jpg`);
+      if (fs.existsSync(thumbFile)) {
+        res.sendFile(thumbFile);
+        return;
+      }
+
+      // Generate video frame thumbnail using ffmpeg
+      const seekSec = Math.min(120, Math.max(10, Math.floor((media.durationSeconds || 300) * 0.15)));
+      const ffmpegCmd = `ffmpeg -y -ss ${seekSec} -i "${media.filePath}" -vframes 1 -q:v 3 -vf "scale=640:-1" "${thumbFile}"`;
+
+      exec(ffmpegCmd, (err) => {
+        if (err || !fs.existsSync(thumbFile)) {
+          if (media.posterPath) {
+            res.redirect(media.posterPath);
+          } else {
+            res.status(404).send('Не удалось создать миниатюру');
+          }
+        } else {
+          res.sendFile(thumbFile);
+        }
+      });
+    } catch (err) {
+      res.status(500).send('Ошибка генерации миниатюры');
     }
   }
 
