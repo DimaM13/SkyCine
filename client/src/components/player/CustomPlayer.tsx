@@ -435,7 +435,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
       
       const { mediaId, quality, audioIndex, isApple, isDirectPlay } = streamInfoRef.current;
-      if (!isDirectPlay) {
+      // Only kill private solo sessions (do NOT kill shared room sessions where others might be watching)
+      if (!isDirectPlay && !isWatchTogether) {
         const token = localStorage.getItem('myplex_token');
         fetch('/api/stream/hls/session/end', {
           method: 'POST',
@@ -443,12 +444,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {})
           },
-          body: JSON.stringify({ mediaId, quality, audioIndex, isApple, roomId: room?.id }),
+          body: JSON.stringify({ mediaId, quality, audioIndex, isApple }),
           keepalive: true
         }).catch(() => {});
       }
     };
-  }, []);
+  }, [isWatchTogether]);
 
   const buildStreamUrl = useCallback((quality: string, audioIndex: number) => {
     const token = localStorage.getItem('myplex_token');
@@ -477,38 +478,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     console.log(`[Player] ⚡ Seeking: target=${safePos.toFixed(1)}s`);
 
-    if (isWatchTogether && !isDirectPlay) {
-      // FORCE A COMPLETE STREAM RESTART FOR WATCH TOGETHER
-      console.log('[Player] Watch Together: Restarting stream on seek for perfect sync');
-      const url = buildStreamUrl(selectedQuality, selectedAudioTrack);
-      
-      // Tell server to kill the current session to guarantee a fresh start
-      const token = localStorage.getItem('myplex_token');
-      const { mediaId, quality, audioIndex, isApple } = streamInfoRef.current;
-      fetch('/api/stream/hls/session/end', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify({ mediaId, quality, audioIndex, isApple, roomId: room?.id })
-      }).catch(() => {});
-
-      // Destroy HLS and reload from new position
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-      loadStreamSource(url, false, shouldPlay, safePos);
+    video.currentTime = safePos;
+    if (shouldPlay) {
+      video.play().catch(() => {});
+      setIsPlaying(true);
     } else {
-      video.currentTime = safePos;
-      if (shouldPlay) {
-        video.play().catch(() => {});
-      } else {
-        video.pause();
-      }
+      video.pause();
+      setIsPlaying(false);
     }
-  }, [effectiveDuration, isWatchTogether, isDirectPlay, buildStreamUrl, selectedQuality, selectedAudioTrack, loadStreamSource]);
+  }, [effectiveDuration]);
 
   // Lazy Web Audio Gain Booster
   const setupAudioGain = useCallback(() => {

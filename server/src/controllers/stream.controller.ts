@@ -253,6 +253,15 @@ export class StreamController {
   public static async endHlsSession(req: AuthRequest, res: Response): Promise<void> {
     try {
       const { mediaId, quality, audioIndex, isApple, roomId } = req.body;
+      if (roomId) {
+        const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(roomId);
+        if (room) {
+          // Room is still active with participants, do not abruptly kill transcode session!
+          res.json({ success: true, message: 'Room session kept alive for active participants' });
+          return;
+        }
+      }
+
       if (mediaId && quality && audioIndex !== undefined) {
         const deviceSuffix = isApple ? 'apple' : 'pc';
         const roomSuffix = roomId ? `_r${roomId}` : '';
