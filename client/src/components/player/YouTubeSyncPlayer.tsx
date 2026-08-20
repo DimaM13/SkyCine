@@ -102,6 +102,22 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Helper to suppress YouTube captions completely
+  const disableCaptions = useCallback((player: any) => {
+    if (!player) return;
+    try {
+      if (player.unloadModule) {
+        player.unloadModule('captions');
+        player.unloadModule('cc');
+      }
+      if (player.setOption) {
+        player.setOption('captions', 'track', {});
+        player.setOption('cc', 'track', {});
+        player.setOption('captions', 'fontSize', 0);
+      }
+    } catch (e) {}
+  }, []);
+
   // 1. Attach callbacks to parent hook
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
@@ -116,6 +132,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             playerRef.current.pauseVideo();
             setIsPlaying(false);
           }
+          disableCaptions(playerRef.current);
         } catch (e) {}
       }
     });
@@ -125,6 +142,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         try {
           playerRef.current.playVideo();
           setIsPlaying(true);
+          disableCaptions(playerRef.current);
         } catch (e) {}
       }
     });
@@ -160,6 +178,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     isPlayerReady,
     isPlaying,
     currentTime,
+    disableCaptions,
     onAttachSeekHandler,
     onAttachPlayHandler,
     onAttachPauseHandler,
@@ -210,10 +229,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             if (d && d > 0) setDuration(d);
 
             // Disable subtitles explicitly
-            try {
-              event.target.unloadModule('captions');
-              event.target.unloadModule('cc');
-            } catch (e) {}
+            disableCaptions(event.target);
 
             // Seek to initial position if any
             if (room.currentPosition && room.currentPosition > 0) {
@@ -230,11 +246,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             }
           },
           onStateChange: (event: any) => {
-            // Disable subtitles if loaded dynamically
-            try {
-              event.target.unloadModule('captions');
-              event.target.unloadModule('cc');
-            } catch (e) {}
+            disableCaptions(event.target);
 
             // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
             if (event.data === 1) {
@@ -256,7 +268,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         createYTPlayer();
       };
     }
-  }, [room.currentPosition, roomState]);
+  }, [room.currentPosition, roomState, disableCaptions]);
 
   useEffect(() => {
     if (currentYtId) {
@@ -287,8 +299,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           try {
             playerRef.current.loadVideoById(data.youtubeId, 0);
             playerRef.current.pauseVideo();
-            playerRef.current.unloadModule('captions');
-            playerRef.current.unloadModule('cc');
+            disableCaptions(playerRef.current);
           } catch (e) {}
         }
       }
@@ -298,7 +309,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     return () => {
       socket.off('room:youtube_changed', handleYtChanged);
     };
-  }, [socket, isPlayerReady]);
+  }, [socket, isPlayerReady, disableCaptions]);
 
   // 5. Periodic Time Tracker & Accurate Buffer Reporter
   useEffect(() => {
@@ -315,12 +326,11 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        // YT state: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (cued)
-        const isBufferingYT = ytState === 3 || ytState === -1;
-        const isCloseToSeek = Math.abs(cur - targetSeekPosRef.current) < 2.5 || targetSeekPosRef.current === 0;
-        const isReady = isPlayerReady && !isBufferingYT && isCloseToSeek;
+        // Player is buffering ONLY when YouTube explicitly says state === 3 (BUFFERING)
+        const isBufferingYT = ytState === 3;
+        const isReady = isPlayerReady && !isBufferingYT;
 
-        const bufferPercent = isReady ? 100 : Math.min(99, Math.round(fraction * 100));
+        const bufferPercent = isReady ? 100 : Math.max(10, Math.min(99, Math.round(fraction * 100)));
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
     }, 400);
@@ -361,6 +371,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         playerRef.current.seekTo(target, true);
         playerRef.current.pauseVideo();
         setIsPlaying(false);
+        disableCaptions(playerRef.current);
       } catch (e) {}
     }
     onSeekRequest(target);
