@@ -74,9 +74,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   onAttachGetCurrentTime,
   onAttachGetIsPaused,
 }) => {
-  const { socket, getSyncedServerTime } = useSocket();
+  const { socket } = useSocket();
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
+  const targetSeekPosRef = useRef<number>(room.currentPosition || 0);
 
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(roomState === 'PLAYING');
@@ -102,12 +103,16 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   // 1. Attach callbacks to parent hook
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
+      targetSeekPosRef.current = pos;
       if (playerRef.current && isPlayerReady) {
         try {
           playerRef.current.seekTo(pos, true);
           if (shouldPlay) {
             playerRef.current.playVideo();
             setIsPlaying(true);
+          } else {
+            playerRef.current.pauseVideo();
+            setIsPlaying(false);
           }
         } catch (e) {}
       }
@@ -210,6 +215,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
             // Seek to initial position if any
             if (room.currentPosition && room.currentPosition > 0) {
+              targetSeekPosRef.current = room.currentPosition;
               event.target.seekTo(room.currentPosition, true);
             }
 
@@ -273,6 +279,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentYtId(data.youtubeId);
         setVideoTitle(data.youtubeTitle || data.title);
         setCurrentTime(0);
+        targetSeekPosRef.current = 0;
         setIsPlaying(false);
         if (playerRef.current && isPlayerReady) {
           try {
@@ -291,7 +298,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
   }, [socket, isPlayerReady]);
 
-  // 5. Periodic Time Tracker & Buffer Reporter
+  // 5. Periodic Time Tracker & Accurate Buffer Reporter
   useEffect(() => {
     const interval = setInterval(() => {
       if (!playerRef.current || !isPlayerReady) return;
@@ -301,15 +308,20 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         const dur = playerRef.current.getDuration() || 0;
         const fraction = playerRef.current.getVideoLoadedFraction() || 0;
         const loadedSec = fraction * dur;
-        const bufferPercent = Math.min(100, Math.round(fraction * 100));
+        const ytState = playerRef.current.getPlayerState();
 
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        const isReady = (loadedSec >= cur + 1.2) || (playerRef.current.getPlayerState() === 2) || (fraction > 0.05);
+        // YT state: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (cued)
+        const isBufferingYT = ytState === 3 || ytState === -1;
+        const isCloseToSeek = Math.abs(cur - targetSeekPosRef.current) < 2.5 || targetSeekPosRef.current === 0;
+        const isReady = isPlayerReady && !isBufferingYT && isCloseToSeek;
+
+        const bufferPercent = isReady ? 100 : Math.min(99, Math.round(fraction * 100));
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
-    }, 500);
+    }, 400);
 
     return () => clearInterval(interval);
   }, [isPlayerReady, duration, onBufferStatusChange]);
@@ -341,10 +353,13 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
   const handleSeek = (seconds: number) => {
     const target = Math.max(0, Math.min(duration, seconds));
+    targetSeekPosRef.current = target;
     setCurrentTime(target);
     if (playerRef.current && isPlayerReady) {
       try {
         playerRef.current.seekTo(target, true);
+        playerRef.current.pauseVideo();
+        setIsPlaying(false);
       } catch (e) {}
     }
     onSeekRequest(target);

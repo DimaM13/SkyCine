@@ -241,21 +241,25 @@ export function useSyncPlayer({
         scheduledPlayTimer.current = null;
       }
 
-      const shouldPlay = data.state === 'PLAYING';
       isInternalAction.current = true;
 
       if (data.action === 'SEEK') {
-        executeSeek(data.currentPosition, shouldPlay);
+        executeSeek(data.currentPosition, false);
+        executePause();
       } else if (data.action === 'PAUSE') {
         executePause();
         const cur = getRealPos();
-        if (Math.abs(cur - data.currentPosition) > 0.5) {
+        if (Math.abs(cur - data.currentPosition) > 1.0) {
           executeSeek(data.currentPosition, false);
         }
       } else if (data.action === 'PLAY') {
         const cur = getRealPos();
         const now = getSyncedServerTime();
         const delay = Math.max(0, data.serverTimestamp - now);
+
+        if (Math.abs(cur - data.currentPosition) > 1.5) {
+          executeSeek(data.currentPosition, false);
+        }
 
         if (delay > 0) {
           scheduledPlayTimer.current = setTimeout(() => {
@@ -264,11 +268,7 @@ export function useSyncPlayer({
             setTimeout(() => { isInternalAction.current = false; }, 150);
           }, delay);
         } else {
-          if (Math.abs(cur - data.currentPosition) > 1.0) {
-            executeSeek(data.currentPosition, true);
-          } else {
-            executePlay();
-          }
+          executePlay();
         }
       }
       setTimeout(() => { isInternalAction.current = false; }, 200);
@@ -284,14 +284,15 @@ export function useSyncPlayer({
       serverTimestampRef.current = data.serverTimestamp;
       
       isInternalAction.current = true;
-      executeSeek(data.position);
+      executeSeek(data.position, false);
+      executePause();
 
       if (scheduledPlayTimer.current) {
         clearTimeout(scheduledPlayTimer.current);
         scheduledPlayTimer.current = null;
       }
 
-      if (data.isPlaying || roomStateRef.current === 'PLAYING') {
+      if (data.isPlaying) {
         const now = getSyncedServerTime();
         const delay = Math.max(0, data.serverTimestamp - now);
 
@@ -304,21 +305,12 @@ export function useSyncPlayer({
         } else {
           executePlay();
         }
-      } else {
-        executePause();
       }
-      setTimeout(() => { isInternalAction.current = false; }, 200);
 
+      setTimeout(() => { isInternalAction.current = false; }, 200);
       smoothedDiffRef.current = 0;
       setSyncDiffMs(0);
       setSyncQuality('perfect');
-
-      // Automatic 2-second secondary align for everyone EXCEPT the host who initiated forceSyncAll
-      if (data.initiatedByUserId && userRef.current?.id !== data.initiatedByUserId) {
-        setTimeout(() => {
-          syncToHostRef.current?.();
-        }, 2000);
-      }
     });
 
     socket.on('room:chat_message', (msg: RoomChatMessage) => {
@@ -363,7 +355,7 @@ export function useSyncPlayer({
     };
   }, [socket, room?.id, user?.id, executePlay, executePause, executeSeek, getRealPaused, getRealPos, getSyncedServerTime]);
 
-  // Host Continuous Heartbeat Anchor (broadcast real position every 2 seconds while playing)
+  // Host Continuous Heartbeat Anchor (broadcast real position every 2.5 seconds while playing)
   useEffect(() => {
     if (!isHost || !socket || !room?.id || roomState !== 'PLAYING' || isBufferingBarrier) return;
 
@@ -375,14 +367,14 @@ export function useSyncPlayer({
           position: cur,
         });
       }
-    }, 2000);
+    }, 2500);
 
     return () => clearInterval(interval);
   }, [isHost, socket, room?.id, roomState, isBufferingBarrier, getRealPaused, getRealPos]);
 
   const smoothedDiffRef = useRef<number>(0);
 
-  // Pure Tracking / Drift calculation
+  // Pure Tracking / Drift calculation (Clean informational indicator, NO disruptive auto-seek loops)
   useEffect(() => {
     const interval = setInterval(() => {
       if (roomStateRef.current !== 'PLAYING' || isBufferingBarrier) {
@@ -402,32 +394,19 @@ export function useSyncPlayer({
 
       const absDiffMs = Math.abs(smoothedDiffRef.current);
 
-      if (absDiffMs < 300) {
+      if (absDiffMs < 500) {
         setSyncQuality('perfect');
-      } else if (absDiffMs < 800) {
+      } else if (absDiffMs < 1200) {
         setSyncQuality('good');
       } else {
         setSyncQuality('adjusting');
       }
-
-      // If desync is huge (> 1.5 seconds) on non-host, hard seek directly to host target position
-      if (absDiffMs > 1500 && !isInternalAction.current && userRef.current?.id !== room?.hostUserId) {
-        isInternalAction.current = true;
-        setSyncQuality('seeking');
-        executeSeek(targetTime, true);
-        if (getRealPaused()) {
-          executePlay();
-        }
-        setTimeout(() => {
-          isInternalAction.current = false;
-        }, 300);
-      }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [getSyncedServerTime, getRealPos, getRealPaused, executeSeek, executePlay, isBufferingBarrier, room?.hostUserId]);
+  }, [getSyncedServerTime, getRealPos, isBufferingBarrier]);
 
-  // Synchronize To Host Query Button
+  // Synchronize To Host Query Button (Manual User Action)
   const syncToHost = useCallback(() => {
     if (!socket || !room?.id) return;
 
@@ -516,14 +495,15 @@ export function useSyncPlayer({
   const sendSeek = useCallback((pos: number) => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    const isPlayingNow = !getRealPaused();
+    executeSeek(pos, false);
+    executePause();
     socket.emit('room:action', {
       roomId: room.id,
       action: 'SEEK',
       position: pos,
-      isPlaying: isPlayingNow,
+      isPlaying: false,
     });
-  }, [socket, room?.id, getRealPaused]);
+  }, [socket, room?.id, executeSeek, executePause]);
 
   const sendMessage = useCallback((text: string) => {
     if (!socket || !room?.id || !text.trim()) return;

@@ -201,8 +201,8 @@ class SocketService {
           this.pendingBarriers.delete(roomId);
         }
 
-        if (action === 'PAUSE') {
-          // Immediate Pause
+        if (action === 'PAUSE' || action === 'SEEK') {
+          // Immediate Pause or Seek (Seek always stays in PAUSED state until user presses PLAY)
           db.prepare(`
             UPDATE rooms SET
               state = 'PAUSED',
@@ -218,77 +218,65 @@ class SocketService {
             currentPosition: position,
             serverTimestamp: now,
             playbackRate,
-            action: 'PAUSE',
+            action,
             initiatedBy: user?.username || 'Host',
             initiatedByUserId: user?.userId || '',
           });
           return;
         }
 
-        const shouldPlay = action === 'PLAY' || (action === 'SEEK' && (data.isPlaying !== undefined ? !!data.isPlaying : wasPlaying));
-
-        if (memberCount > 1 && shouldPlay) {
-          // Multi-user room: engage Buffer Barrier lockstep!
-          if (roomMap) {
-            for (const member of roomMap.values()) {
-              member.isReady = false;
-              member.currentPosition = position;
+        if (action === 'PLAY') {
+          if (memberCount > 1) {
+            // Multi-user room: engage Buffer Barrier lockstep!
+            if (roomMap) {
+              for (const member of roomMap.values()) {
+                member.isReady = false;
+                member.currentPosition = position;
+              }
+              io.to(roomId).emit('room:members_status', Array.from(roomMap.values()));
             }
-            io.to(roomId).emit('room:members_status', Array.from(roomMap.values()));
+
+            io.to(roomId).emit('room:buffer_barrier', {
+              isBuffering: true,
+              targetPosition: position,
+              initiatedBy: user?.username || 'Host',
+            });
+
+            // Fallback timer (7 seconds maximum)
+            const fallbackTimer = setTimeout(() => {
+              this.startBarrierPlayback(roomId, position, playbackRate, user?.username || 'Host', user?.userId || '');
+            }, 7000);
+
+            this.pendingBarriers.set(roomId, {
+              targetPosition: position,
+              action: 'PLAY',
+              playbackRate,
+              timer: fallbackTimer,
+            });
+          } else {
+            // Single user: start immediately
+            const scheduledPlayAt = now + 50;
+
+            db.prepare(`
+              UPDATE rooms SET
+                state = 'PLAYING',
+                currentPosition = ?,
+                serverTimestamp = ?,
+                playbackRate = ?
+              WHERE id = ?
+            `).run(position, scheduledPlayAt, playbackRate, roomId);
+
+            io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
+            io.to(roomId).emit('room:sync_state', {
+              state: 'PLAYING',
+              currentPosition: position,
+              serverTimestamp: scheduledPlayAt,
+              playbackRate,
+              action: 'PLAY',
+              initiatedBy: user?.username || 'Host',
+              initiatedByUserId: user?.userId || '',
+            });
           }
-
-          // Seek and pause all players first so they buffer from target position
-          io.to(roomId).emit('room:sync_state', {
-            state: 'PAUSED',
-            currentPosition: position,
-            serverTimestamp: now,
-            playbackRate,
-            action: 'SEEK',
-            initiatedBy: user?.username || 'Host',
-            initiatedByUserId: user?.userId || '',
-          });
-
-          io.to(roomId).emit('room:buffer_barrier', {
-            isBuffering: true,
-            targetPosition: position,
-            initiatedBy: user?.username || 'Host',
-          });
-
-          // Fallback timer (6 seconds maximum)
-          const fallbackTimer = setTimeout(() => {
-            this.startBarrierPlayback(roomId, position, playbackRate, user?.username || 'Host', user?.userId || '');
-          }, 6000);
-
-          this.pendingBarriers.set(roomId, {
-            targetPosition: position,
-            action,
-            playbackRate,
-            timer: fallbackTimer,
-          });
-        } else {
-          // Single user OR seek while paused
-          const newState: RoomState = shouldPlay ? 'PLAYING' : 'PAUSED';
-          const scheduledPlayAt = shouldPlay ? now + 50 : now;
-
-          db.prepare(`
-            UPDATE rooms SET
-              state = ?,
-              currentPosition = ?,
-              serverTimestamp = ?,
-              playbackRate = ?
-            WHERE id = ?
-          `).run(newState, position, scheduledPlayAt, playbackRate, roomId);
-
-          io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
-          io.to(roomId).emit('room:sync_state', {
-            state: newState,
-            currentPosition: position,
-            serverTimestamp: scheduledPlayAt,
-            playbackRate,
-            action,
-            initiatedBy: user?.username || 'Host',
-            initiatedByUserId: user?.userId || '',
-          });
         }
       });
 
