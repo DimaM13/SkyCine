@@ -15,6 +15,7 @@ interface ContinuousHlsSession {
   quality: string;
   audioIndex: number;
   startTime: number;
+  startSegmentNumber: number;
   isReady: boolean;
   latestSegmentIndex: number;
   _createdAt: number;
@@ -312,6 +313,7 @@ class FFmpegService {
 
     const proc = spawn('ffmpeg', args, { windowsHide: true });
 
+    const startNumber = Math.floor(cleanStartTime / 4);
     const sessionObj: ContinuousHlsSession = {
       sessionId,
       mediaId: media.id,
@@ -321,8 +323,9 @@ class FFmpegService {
       quality,
       audioIndex,
       startTime: cleanStartTime,
+      startSegmentNumber: startNumber,
       isReady: false,
-      latestSegmentIndex: Math.floor(cleanStartTime / 4),
+      latestSegmentIndex: startNumber,
       _createdAt: Date.now()
     };
     this.continuousSessions.set(sessionId, sessionObj);
@@ -343,7 +346,6 @@ class FFmpegService {
     });
 
     // Wait until at least the first requested segment is ready
-    const startNumber = Math.floor(cleanStartTime / 4);
     const startNumStr = startNumber.toString().padStart(4, '0');
     
     const firstSegPathTs = path.join(sessionDir, `seg_${startNumStr}.ts`);
@@ -459,7 +461,8 @@ class FFmpegService {
     const audioMatch = sessionId.match(/_a(\d+)_/);
     const quality = qualityMatch ? qualityMatch[1] : 'original';
     const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
-    const targetStartTime = segmentIndex * 4;
+    // Align restart target 2 segments (8s) before requested segment for keyframe pre-roll
+    const targetStartTime = Math.max(0, (segmentIndex - 2) * 4);
 
     // 1. If session creation is already in flight, wait for it!
     const inFlight = this.sessionCreationPromises.get(sessionId);
@@ -469,7 +472,7 @@ class FFmpegService {
 
     let session = this.continuousSessions.get(sessionId);
 
-    // 2. If session exists, check if segment is on disk or within buffer window
+    // 2. If session exists, check if segment is on disk or within valid encoding range
     if (session) {
        const segPath = path.join(session.sessionDir, segmentName);
        if (fs.existsSync(segPath) && fs.statSync(segPath).size > 100) {
@@ -482,8 +485,9 @@ class FFmpegService {
          return this.waitForSegment(session.sessionDir, segmentName);
        }
        
-       // Allow buffering up to 25 segments (100 seconds) ahead and 4 behind
-       if (segmentIndex >= session.latestSegmentIndex - 4 && segmentIndex <= session.latestSegmentIndex + 25) {
+       // CRITICAL: The segment must be >= session.startSegmentNumber (cannot wait for past segments before start!)
+       // and <= session.latestSegmentIndex + 25 (future buffer)
+       if (segmentIndex >= session.startSegmentNumber && segmentIndex <= session.latestSegmentIndex + 25) {
          const foundPath = await this.waitForSegment(session.sessionDir, segmentName);
          if (foundPath) {
            session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
@@ -491,7 +495,7 @@ class FFmpegService {
          return foundPath;
        }
        
-       console.log(`[JIT HLS] Segment ${segmentIndex} far from read head (${session.latestSegmentIndex}). Restarting FFmpeg from ${targetStartTime}s...`);
+       console.log(`[JIT HLS] Segment ${segmentIndex} outside session range [${session.startSegmentNumber}..${session.latestSegmentIndex}]. Restarting FFmpeg from ${targetStartTime}s...`);
     }
 
     // 3. If init.mp4 requested when no session exists, briefly wait for a segment request or start at 0s

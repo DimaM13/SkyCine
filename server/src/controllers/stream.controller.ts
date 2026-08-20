@@ -316,7 +316,8 @@ export class StreamController {
       const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
 
       if (startTime > 0 && !ffmpegService.hasSession(sessionId)) {
-        ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
+        const prewarmStart = Math.max(0, startTime - 16);
+        ffmpegService.startContinuousHlsSession(media, quality, audioIndex, prewarmStart, isApple, sessionId).catch(() => {});
       }
 
       const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
