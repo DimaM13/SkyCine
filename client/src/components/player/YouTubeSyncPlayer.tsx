@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX,
-  Maximize, Minimize, ArrowLeft, Users, Share2, Sparkles,
-  RefreshCw, MessageSquare, Flame, Heart, ThumbsUp, Laugh, Clapperboard,
-  CheckCircle2, Video, AlertCircle, X, ExternalLink
+  Maximize, Minimize, ArrowLeft, Users, Share2,
+  RefreshCw, Video, AlertCircle, X
 } from 'lucide-react';
 import { useSocket } from '../../context/SocketContext';
 import { Room, RoomMember, RoomReaction, RoomState } from '../../types';
+import { ReactionOverlay } from './ReactionOverlay';
 
 declare global {
   interface Window {
@@ -63,7 +63,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   isSidebarOpen,
   onBack,
   onInvite,
-  onSendReaction,
   onAttachSeekHandler,
   onAttachPlayHandler,
   onAttachPauseHandler,
@@ -82,7 +81,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [activeFloatingReactions, setActiveFloatingReactions] = useState<RoomReaction[]>([]);
 
   // Change Video Modal
   const [showChangeModal, setShowChangeModal] = useState(false);
@@ -188,6 +186,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           fs: 0,
           disablekb: 1,
           iv_load_policy: 3,
+          cc_load_policy: 0,
+          cc_lang_pref: 'none',
           playsinline: 1,
           origin: window.location.origin,
         },
@@ -196,6 +196,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             setIsPlayerReady(true);
             const d = event.target.getDuration();
             if (d && d > 0) setDuration(d);
+
+            // Disable subtitles explicitly
+            try {
+              event.target.unloadModule('captions');
+              event.target.unloadModule('cc');
+            } catch (e) {}
 
             // Seek to initial position if any
             if (room.currentPosition && room.currentPosition > 0) {
@@ -211,6 +217,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             }
           },
           onStateChange: (event: any) => {
+            // Disable subtitles if loaded dynamically
+            try {
+              event.target.unloadModule('captions');
+              event.target.unloadModule('cc');
+            } catch (e) {}
+
             // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
             if (event.data === 1) {
               setIsPlaying(true);
@@ -261,6 +273,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           try {
             playerRef.current.loadVideoById(data.youtubeId, 0);
             playerRef.current.pauseVideo();
+            playerRef.current.unloadModule('captions');
+            playerRef.current.unloadModule('cc');
           } catch (e) {}
         }
       }
@@ -290,19 +304,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     return () => clearInterval(interval);
   }, [isPlayerReady, duration, onBufferStatusChange]);
 
-  // 6. Floating Reactions
-  useEffect(() => {
-    if (reactions.length > 0) {
-      const latest = reactions[reactions.length - 1];
-      setActiveFloatingReactions((prev) => [...prev.slice(-15), latest]);
-      const timer = setTimeout(() => {
-        setActiveFloatingReactions((prev) => prev.filter((r) => r.id !== latest.id));
-      }, 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [reactions]);
-
-  // 7. Auto-hide Controls
+  // 6. Auto-hide Controls
   const resetControlsTimeout = () => {
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -419,21 +421,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         className="absolute inset-0 z-10 cursor-pointer"
       />
 
-      {/* Floating Reactions Stream */}
-      <div className="absolute inset-0 pointer-events-none z-20 overflow-hidden">
-        {activeFloatingReactions.map((r, i) => (
-          <div
-            key={r.id || i}
-            className="absolute bottom-24 animate-float-up text-3xl md:text-4xl drop-shadow-2xl"
-            style={{
-              left: `${15 + (i % 7) * 11}%`,
-              animationDelay: `${(i % 3) * 0.1}s`,
-            }}
-          >
-            {r.emoji}
-          </div>
-        ))}
-      </div>
+      {/* Synchronized Flying Reactions Overlay */}
+      {reactions && reactions.length > 0 && (
+        <ReactionOverlay reactions={reactions} />
+      )}
 
       {/* TOP BAR OVERLAY */}
       <div
@@ -520,30 +511,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             <Users className="w-4 h-4" />
           </button>
         </div>
-      </div>
-
-      {/* QUICK REACTIONS BAR (Bottom Right) */}
-      <div
-        className={`absolute right-4 bottom-24 z-30 transition-opacity duration-300 flex flex-col gap-2 ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        {onSendReaction && (
-          <div className="flex flex-col gap-1.5 p-1.5 rounded-2xl bg-black/60 backdrop-blur-md border border-white/10 shadow-2xl">
-            {['🔥', '❤️', '😂', '🍿', '👏'].map((emoji) => (
-              <button
-                key={emoji}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSendReaction(emoji);
-                }}
-                className="w-8 h-8 rounded-xl hover:bg-white/20 flex items-center justify-center text-base transition-transform active:scale-125 cursor-pointer"
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* BOTTOM CONTROLS BAR */}
