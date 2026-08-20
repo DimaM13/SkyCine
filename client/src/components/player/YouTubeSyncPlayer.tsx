@@ -85,7 +85,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const isSeekingRef = useRef<boolean>(false);
   const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Playback engine: 'iframe' or 'server_stream'
+  // Playback engine: 'iframe' (default) or 'server_stream' (for 18+ restricted only)
   const [engine, setEngine] = useState<'iframe' | 'server_stream'>('iframe');
   const [streamSrc, setStreamSrc] = useState<string>('');
   const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
@@ -121,17 +121,17 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     }, 800);
   }, []);
 
-  // Helper to switch to server_stream engine and broadcast to all room members
+  // Helper to switch to server_stream engine and broadcast ONLY if host or explicitly triggered
   const switchToServerStream = useCallback(() => {
     if (!currentYtId) return;
     setEngine('server_stream');
     setFallbackToast(true);
     setTimeout(() => setFallbackToast(false), 5000);
 
-    if (socket && room?.id) {
+    if (isHost && socket && room?.id) {
       socket.emit('room:set_youtube_engine', { roomId: room.id, engine: 'server_stream' });
     }
-  }, [currentYtId, socket, room?.id]);
+  }, [currentYtId, isHost, socket, room?.id]);
 
   // Synchronize engine switch from socket
   useEffect(() => {
@@ -149,7 +149,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
   }, [socket]);
 
-  // Poll 1080p download status when in server_stream mode with cache busting
+  // Poll 1080p download status ONLY when in server_stream mode with cache busting
   useEffect(() => {
     if (engine !== 'server_stream' || !currentYtId) return;
 
@@ -373,7 +373,9 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             }
           },
           onError: (event: any) => {
-            if (event.data === 101 || event.data === 150 || event.data === 100 || event.data === 2 || event.data === 5) {
+            // ONLY 101 or 150 = Age restricted / Embed not allowed by owner
+            // (Do NOT trigger fallback on code 2, 5, or 100 which occur normally during mobile lifecycle)
+            if (event.data === 101 || event.data === 150) {
               switchToServerStream();
             }
           },
