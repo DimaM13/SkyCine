@@ -494,9 +494,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
     // JIT VOD HLS for ALL non-direct streams
     const isAppleParam = isAppleDevice ? '1' : '0';
-    const params = [`quality=${quality}`, `audioIndex=${audioIndex}`, `isApple=${isAppleParam}`, tokenParam, roomParam].filter(Boolean).join('&');
+    const startParam = (initialPosition && initialPosition > 0) ? `startTime=${Math.floor(initialPosition)}` : '';
+    const params = [`quality=${quality}`, `audioIndex=${audioIndex}`, `isApple=${isAppleParam}`, startParam, tokenParam, roomParam].filter(Boolean).join('&');
     return `/api/stream/${media.id}/master.m3u8?${params}`;
-  }, [media.id, isDirectPlay, isAppleDevice, isWatchTogether, room?.id]);
+  }, [media.id, isDirectPlay, isAppleDevice, isWatchTogether, room?.id, initialPosition]);
 
   // Perform seek
   const doSeek = useCallback((targetTime: number, forcePlayState?: boolean) => {

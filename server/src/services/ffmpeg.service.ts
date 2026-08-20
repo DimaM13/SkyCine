@@ -118,6 +118,13 @@ class FFmpegService {
     // JIT VOD: Session ID is deterministic based only on format/quality/device, NO startTime!
     const sessionId = sessionIdOverride || `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
 
+    // 1. Check if a session creation for this sessionId is ALREADY in flight
+    const inFlight = this.sessionCreationPromises.get(sessionId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    // 2. Check if an existing active session covers this position
     const existing = this.continuousSessions.get(sessionId);
     if (existing && existing.process && !existing.process.killed) {
       existing.lastAccess = Date.now();
@@ -135,11 +142,6 @@ class FFmpegService {
         }
       }, 10000);
       this.continuousSessions.delete(sessionId);
-    }
-
-    const inFlight = this.sessionCreationPromises.get(sessionId);
-    if (inFlight) {
-      return inFlight;
     }
 
     const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix);
@@ -452,9 +454,22 @@ class FFmpegService {
       segmentIndex = parseInt(match[1], 10);
     }
 
-    let session = this.continuousSessions.get(sessionId);
+    const isApple = sessionId.includes('_apple');
+    const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
+    const audioMatch = sessionId.match(/_a(\d+)_/);
+    const quality = qualityMatch ? qualityMatch[1] : 'original';
+    const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
     const targetStartTime = segmentIndex * 4;
 
+    // 1. If session creation is already in flight, wait for it!
+    const inFlight = this.sessionCreationPromises.get(sessionId);
+    if (inFlight) {
+      await inFlight;
+    }
+
+    let session = this.continuousSessions.get(sessionId);
+
+    // 2. If session exists, check if segment is on disk or within buffer window
     if (session) {
        const segPath = path.join(session.sessionDir, segmentName);
        if (fs.existsSync(segPath) && fs.statSync(segPath).size > 100) {
@@ -464,13 +479,11 @@ class FFmpegService {
        }
        
        if (isInit) {
-         // Never kill the process for init.mp4, just wait for it to be generated or rewritten
          return this.waitForSegment(session.sessionDir, segmentName);
        }
        
-       // Use latestSegmentIndex (the player's current read head) to determine if this is just buffering or a jump.
-       // Allow buffering up to 15 segments (1 minute) ahead and 2 behind.
-       if (segmentIndex >= session.latestSegmentIndex - 2 && segmentIndex <= session.latestSegmentIndex + 15) {
+       // Allow buffering up to 25 segments (100 seconds) ahead and 4 behind
+       if (segmentIndex >= session.latestSegmentIndex - 4 && segmentIndex <= session.latestSegmentIndex + 25) {
          const foundPath = await this.waitForSegment(session.sessionDir, segmentName);
          if (foundPath) {
            session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
@@ -478,38 +491,28 @@ class FFmpegService {
          return foundPath;
        }
        
-       console.log(`[JIT HLS] Segment ${segmentIndex} far from read head (${session.latestSegmentIndex}). Restarting FFmpeg...`);
-       // Move to closing to allow in-flight downloads to finish
-       const sessionToClose = session;
-       const dirToDelete = session.sessionDir;
-       this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
-       this.terminateProcess(sessionToClose.process);
-       setTimeout(() => {
-         try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
-           console.error(`[Continuous HLS] Failed to delete session dir on restart: ${dirToDelete}`, e);
-         }
-       }, 10000);
-       this.continuousSessions.delete(sessionId);
-       session = undefined as any;
+       console.log(`[JIT HLS] Segment ${segmentIndex} far from read head (${session.latestSegmentIndex}). Restarting FFmpeg from ${targetStartTime}s...`);
     }
 
-    if (!session) {
-      // Start from the calculated targetStartTime
-      const isApple = sessionId.includes('_apple');
-      const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
-      const audioMatch = sessionId.match(/_a(\d+)_/);
-      const quality = qualityMatch ? qualityMatch[1] : 'original';
-      const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
-      
-      console.log(`[Continuous HLS] No session found, starting new session at ${targetStartTime}s`);
-      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
-      
-      const newSession = this.continuousSessions.get(sessionId);
-      if (!newSession) return null;
-      return this.waitForSegment(newSession.sessionDir, segmentName);
+    // 3. If init.mp4 requested when no session exists, briefly wait for a segment request or start at 0s
+    if (isInit && !session) {
+      await new Promise(r => setTimeout(r, 300));
+      const inFlightAfter = this.sessionCreationPromises.get(sessionId);
+      if (inFlightAfter) {
+        await inFlightAfter;
+        session = this.continuousSessions.get(sessionId);
+        if (session) {
+          return this.waitForSegment(session.sessionDir, segmentName);
+        }
+      }
     }
+
+    // 4. Start or restart session safely with mutex
+    await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
     
-    return null;
+    const newSession = this.continuousSessions.get(sessionId);
+    if (!newSession) return null;
+    return this.waitForSegment(newSession.sessionDir, segmentName);
   }
 
   public killSession(sessionId: string): void {
