@@ -5,5 +5,7 @@ data/
 server/data/transcodes/
 server/data/logs/
 server/data/db/
+server/uploads/
+uploads/
 *.log
 .DS_Store

@@ -137,6 +137,10 @@ export class YouTubeController {
    */
   public static async getDownloadStatus(req: Request, res: Response): Promise<void> {
     try {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
       const videoId = req.params.videoId as string;
       if (!videoId) {
         res.status(400).json({ error: 'videoId is required' });

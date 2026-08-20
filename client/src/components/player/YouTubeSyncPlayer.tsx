@@ -149,14 +149,14 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
   }, [socket]);
 
-  // Poll 1080p download status when in server_stream mode
+  // Poll 1080p download status when in server_stream mode with cache busting
   useEffect(() => {
     if (engine !== 'server_stream' || !currentYtId) return;
 
     let isMounted = true;
     const pollStatus = async () => {
       try {
-        const res = await apiClient.get(`/stream/youtube/download-status/${currentYtId}`);
+        const res = await apiClient.get(`/stream/youtube/download-status/${currentYtId}?t=${Date.now()}`);
         if (!isMounted) return;
 
         if (res.data?.status === 'ready') {
@@ -445,7 +445,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         }
 
         const video = videoStreamRef.current;
-        if (!video) return;
+        if (!video) {
+          onBufferStatusChange(true, 5, currentTime, 100);
+          return;
+        }
 
         const cur = video.currentTime || 0;
         const dur = video.duration || duration || 1;
@@ -457,7 +460,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        const isReady = (video.readyState >= 2) || (bufSec > cur + 0.5);
+        const isReady = (video.readyState >= 1) || (bufSec > 0) || !video.paused;
         const bufferPercent = isReady ? 100 : Math.min(99, Math.round((bufSec / dur) * 100));
         onBufferStatusChange(isReady, bufSec, cur, bufferPercent);
         return;
@@ -481,11 +484,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         const isReady = isPlayerReady && !isBufferingYT;
 
         const bufferPercent = isReady ? 100 : isSeekingRef.current ? 75 : 50;
-
-        // Debug logging for developer inspection
-        if (isBufferingYT) {
-          console.debug('[YouTube Buffer]', { ytState, isReady, isSeeking: isSeekingRef.current, cur, fraction, bufferPercent });
-        }
 
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
@@ -646,10 +644,19 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
                 if (videoStreamRef.current?.duration) {
                   setDuration(videoStreamRef.current.duration);
                 }
+                onBufferStatusChange(true, 5, currentTime, 100);
                 if (roomState === 'PLAYING') {
                   videoStreamRef.current?.play().catch(() => {});
                   setIsPlaying(true);
                 }
+              }}
+              onLoadedData={() => {
+                setIsPlayerReady(true);
+                onBufferStatusChange(true, 5, currentTime, 100);
+              }}
+              onCanPlay={() => {
+                setIsPlayerReady(true);
+                onBufferStatusChange(true, 5, currentTime, 100);
               }}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
