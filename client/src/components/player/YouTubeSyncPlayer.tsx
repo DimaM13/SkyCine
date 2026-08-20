@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX,
   Maximize, Minimize, ArrowLeft, Users, Share2,
-  RefreshCw, Video, AlertCircle, X, Clock
+  RefreshCw, Video, AlertCircle, X, Clock, ExternalLink
 } from 'lucide-react';
 import { useSocket } from '../../context/SocketContext';
 import { Room, RoomMember, RoomReaction, RoomState } from '../../types';
@@ -89,6 +89,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  const [embedError, setEmbedError] = useState(false);
 
   // Change Video Modal
   const [showChangeModal, setShowChangeModal] = useState(false);
@@ -199,6 +200,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   // 3. Initialize YouTube Player
   const initPlayer = useCallback((videoId: string) => {
     if (!videoId) return;
+    setEmbedError(false);
 
     const createYTPlayer = () => {
       if (playerRef.current) {
@@ -257,6 +259,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
               setIsPlaying(false);
             }
           },
+          onError: (event: any) => {
+            // event.data: 2 (invalid param), 5 (HTML5 error), 100 (not found), 101 or 150 (not allowed in embedded players / age restricted)
+            if (event.data === 101 || event.data === 150 || event.data === 100 || event.data === 2) {
+              setEmbedError(true);
+            }
+          },
         },
       });
     };
@@ -295,6 +303,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(0);
         targetSeekPosRef.current = 0;
         setIsPlaying(false);
+        setEmbedError(false);
         if (playerRef.current && isPlayerReady) {
           try {
             playerRef.current.loadVideoById(data.youtubeId, 0);
@@ -429,6 +438,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       setIsChangingVideo(false);
       setShowChangeModal(false);
       setNewVideoUrl('');
+      setEmbedError(false);
     }, 600);
   };
 
@@ -457,6 +467,41 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       <div className="absolute inset-0 w-full h-full pointer-events-none flex items-center justify-center">
         <div id="yt-sync-iframe-holder" className="w-full h-full scale-[1.01] pointer-events-none" />
       </div>
+
+      {/* Embed / Age Restriction Error Modal */}
+      {embedError && (
+        <div className="absolute inset-0 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-6 z-40 text-center animate-fade-in pointer-events-auto">
+          <div className="w-16 h-16 rounded-3xl bg-red-500/20 border border-red-500/30 text-red-500 flex items-center justify-center mb-4 shadow-xl">
+            <AlertCircle className="w-8 h-8" />
+          </div>
+          <h3 className="text-lg md:text-xl font-black text-white mb-2">
+            Ограничение YouTube (18+ / Запрет встраивания)
+          </h3>
+          <p className="text-xs md:text-sm text-slate-400 max-w-md mb-6 leading-relaxed">
+            YouTube запрещает воспроизводить это видео во встроенном плеере на сторонних сайтах из-за возрастных ограничений (18+) или запрета автора канала.
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            {isHost && (
+              <button
+                onClick={() => setShowChangeModal(true)}
+                className="px-5 py-2.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-lg transition-all active:scale-95 cursor-pointer flex items-center gap-2"
+              >
+                <Video className="w-4 h-4" />
+                <span>Сменить видео для всех</span>
+              </button>
+            )}
+            <a
+              href={`https://www.youtube.com/watch?v=${currentYtId}`}
+              target="_blank"
+              rel="noreferrer"
+              className="px-5 py-2.5 rounded-2xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold border border-white/15 transition-all active:scale-95 cursor-pointer flex items-center gap-2"
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span>Открыть на YouTube</span>
+            </a>
+          </div>
+        </div>
+      )}
 
       {/* Transparent Click Overlay to Intercept Play/Pause */}
       <div
