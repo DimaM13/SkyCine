@@ -467,10 +467,17 @@ export function useSyncPlayer({
     setIsBufferingBarrier(false);
   }, [socket, room?.id]);
 
+  // Check if all participants are ready
+  const allMembersReady = members.length <= 1 || members.every((m) => m.isReady);
+
   // Client Action Triggers
   const sendPlay = useCallback(() => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
+    const allReady = members.length <= 1 || members.every((m) => m.isReady);
+    if (!allReady) {
+      return; // Block play request until everyone is ready
+    }
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
@@ -478,7 +485,7 @@ export function useSyncPlayer({
       position: cur,
       playbackRate: playbackRateRef.current,
     });
-  }, [socket, room?.id, getRealPos]);
+  }, [socket, room?.id, members, getRealPos]);
 
   const sendPause = useCallback(() => {
     if (!socket || !room?.id) return;
@@ -561,6 +568,7 @@ export function useSyncPlayer({
     syncDiffMs,
     syncQuality,
     isHost,
+    allMembersReady,
     isBufferingBarrier,
     barrierTargetPosition,
     forceBarrierPlay,

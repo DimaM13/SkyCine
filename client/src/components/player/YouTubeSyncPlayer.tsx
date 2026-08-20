@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX,
   Maximize, Minimize, ArrowLeft, Users, Share2,
-  RefreshCw, Video, AlertCircle, X
+  RefreshCw, Video, AlertCircle, X, Clock
 } from 'lucide-react';
 import { useSocket } from '../../context/SocketContext';
 import { Room, RoomMember, RoomReaction, RoomState } from '../../types';
@@ -22,6 +22,7 @@ interface YouTubeSyncPlayerProps {
   syncDiffMs: number;
   syncQuality: 'perfect' | 'good' | 'adjusting' | 'seeking';
   isHost: boolean;
+  allMembersReady?: boolean;
   onForceSyncAll: () => void;
   onSyncToHost: () => void;
   members: RoomMember[];
@@ -52,6 +53,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   syncDiffMs,
   syncQuality,
   isHost,
+  allMembersReady = true,
   onForceSyncAll,
   onSyncToHost,
   members,
@@ -331,21 +333,20 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     controlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying && !isBufferingBarrier) {
+      if (isPlaying) {
         setShowControls(false);
       }
     }, 3500);
   };
 
   const handlePlayPauseToggle = () => {
-    if (isBufferingBarrier && isHost) {
-      onForceBarrierPlay?.();
-      return;
-    }
-
     if (isPlaying) {
       onPauseRequest();
     } else {
+      if (!allMembersReady && members.length > 1) {
+        // Block play request until everyone is ready
+        return;
+      }
       onPlayRequest();
     }
     resetControlsTimeout();
@@ -432,6 +433,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   };
 
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const isBlockedByBuffer = !isPlaying && !allMembersReady && members.length > 1;
 
   return (
     <div
@@ -453,10 +455,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
       {/* Buffer Barrier Readiness Banner */}
       <BufferBarrierBanner
-        isVisible={isBufferingBarrier}
+        isVisible={!isPlaying && members.length > 1}
         members={members}
         isHost={isHost}
-        onForcePlay={() => onForceBarrierPlay?.()}
+        onForcePlay={() => {
+          if (isHost) onPlayRequest();
+        }}
       />
 
       {/* Synchronized Flying Reactions Overlay */}
@@ -467,7 +471,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       {/* TOP BAR OVERLAY */}
       <div
         className={`absolute top-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-b from-black/90 via-black/50 to-transparent z-30 transition-opacity duration-300 flex items-center justify-between ${
-          showControls || isBufferingBarrier ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
         {/* Left: Back & Title */}
@@ -554,7 +558,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       {/* BOTTOM CONTROLS BAR */}
       <div
         className={`absolute bottom-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30 transition-opacity duration-300 flex flex-col gap-3 ${
-          showControls || isBufferingBarrier ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -589,12 +593,24 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         <div className="flex items-center justify-between">
           {/* Left: Play/Pause, Rewind, Forward, Volume */}
           <div className="flex items-center gap-3">
-            <button
-              onClick={handlePlayPauseToggle}
-              className="p-2.5 md:p-3 rounded-2xl bg-white text-black hover:bg-cinema-gold hover:text-black transition-all active:scale-95 shadow-glow-gold cursor-pointer"
-            >
-              {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-            </button>
+            {/* Play/Pause Button with readiness state */}
+            {isBlockedByBuffer ? (
+              <button
+                disabled
+                className="p-2.5 md:p-3 rounded-2xl bg-amber-500/20 text-amber-300 border border-amber-500/30 opacity-80 cursor-not-allowed flex items-center justify-center"
+                title="Ожидание загрузки у всех участников..."
+              >
+                <Clock className="w-5 h-5 animate-pulse" />
+              </button>
+            ) : (
+              <button
+                onClick={handlePlayPauseToggle}
+                className="p-2.5 md:p-3 rounded-2xl bg-white text-black hover:bg-cinema-gold hover:text-black transition-all active:scale-95 shadow-glow-gold cursor-pointer"
+                title={isPlaying ? 'Пауза' : 'Снять с паузы'}
+              >
+                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
+              </button>
+            )}
 
             <button
               onClick={() => handleSeek(currentTime - 10)}
@@ -635,8 +651,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           {/* Right: Sync Status badge & Fullscreen */}
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-black/60 border border-white/10 text-[11px] font-mono text-slate-300">
-              <span className={`w-2 h-2 rounded-full ${isBufferingBarrier ? 'bg-amber-400 animate-spin' : syncQuality === 'perfect' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span>{isBufferingBarrier ? 'Буферизация' : syncQuality === 'perfect' ? 'Синхронизировано' : 'Подгонка'}</span>
+              <span className={`w-2 h-2 rounded-full ${!allMembersReady && members.length > 1 ? 'bg-amber-400 animate-spin' : syncQuality === 'perfect' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span>{!allMembersReady && members.length > 1 ? 'Буферизация' : syncQuality === 'perfect' ? 'Синхронизировано' : 'Подгонка'}</span>
             </div>
 
             <button

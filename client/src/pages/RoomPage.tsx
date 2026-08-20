@@ -78,6 +78,7 @@ export const RoomPage: React.FC = () => {
     syncToHost,
     forceSyncAll,
     isHost,
+    allMembersReady,
     isBufferingBarrier,
     barrierTargetPosition,
     forceBarrierPlay,
@@ -152,6 +153,7 @@ export const RoomPage: React.FC = () => {
               syncDiffMs={syncDiffMs}
               syncQuality={syncQuality}
               isHost={isHost}
+              allMembersReady={allMembersReady}
               isBufferingBarrier={isBufferingBarrier}
               onForceBarrierPlay={forceBarrierPlay}
               onForceSyncAll={forceSyncAll}
@@ -184,6 +186,7 @@ export const RoomPage: React.FC = () => {
               syncQuality={syncQuality}
               isWatchTogether={true}
               isHost={isHost}
+              allMembersReady={allMembersReady}
               isBufferingBarrier={isBufferingBarrier}
               onForceBarrierPlay={forceBarrierPlay}
               onForceSyncAll={forceSyncAll}

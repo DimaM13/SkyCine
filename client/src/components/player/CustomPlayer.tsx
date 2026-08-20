@@ -4,7 +4,7 @@ import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
   RotateCcw, RotateCw, Settings, MessageSquare,
   Users, Radio, Disc3, Subtitles, Volume1, Volume,
-  ArrowLeft, Share2, Info, Activity, Cpu, Film, Music
+  ArrowLeft, Share2, Info, Activity, Cpu, Film, Music, Clock
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
@@ -19,6 +19,7 @@ interface CustomPlayerProps {
   syncQuality?: 'perfect' | 'good' | 'adjusting' | 'seeking';
   isWatchTogether?: boolean;
   isHost?: boolean;
+  allMembersReady?: boolean;
   isBufferingBarrier?: boolean;
   onForceBarrierPlay?: () => void;
   onForceSyncAll?: () => void;
@@ -50,6 +51,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   syncQuality = 'perfect',
   isWatchTogether = false,
   isHost = false,
+  allMembersReady = true,
   isBufferingBarrier = false,
   onForceBarrierPlay,
   onForceSyncAll,
@@ -833,6 +835,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setIsPlaying(false);
       reportProgress();
     } else {
+      if (isWatchTogether && !allMembersReady && members.length > 1) {
+        // Block play until all participants are ready
+        return;
+      }
       const p = video.play();
       if (p) {
         p.then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
@@ -1033,10 +1039,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
       {/* Buffer Barrier Readiness Banner */}
       <BufferBarrierBanner
-        isVisible={isBufferingBarrier}
+        isVisible={!!(isWatchTogether && !isPlaying && members.length > 1)}
         members={members}
         isHost={isHost}
-        onForcePlay={() => onForceBarrierPlay?.()}
+        onForcePlay={() => {
+          if (isHost) onPlayRequest?.();
+        }}
       />
 
       {/* Floating Reaction Overlay */}
@@ -1422,18 +1430,30 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         <div className="flex items-center justify-between">
           {/* Left Controls: Play, Skip, Volume, Time */}
           <div className="flex items-center gap-4">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                (e.currentTarget as HTMLElement).blur();
-                togglePlay();
-              }}
-              onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
-              tabIndex={-1}
-              className="p-2.5 rounded-full bg-white/10 hover:bg-cinema-gold hover:text-black text-white transition-all transform active:scale-95 cursor-pointer focus:outline-none"
-            >
-              {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-            </button>
+            {/* Play/Pause Button with readiness state */}
+            {!isPlaying && isWatchTogether && !allMembersReady && members.length > 1 ? (
+              <button
+                disabled
+                tabIndex={-1}
+                className="p-2.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 opacity-80 cursor-not-allowed flex items-center justify-center focus:outline-none"
+                title="Ожидание загрузки у всех участников..."
+              >
+                <Clock className="w-5 h-5 animate-pulse" />
+              </button>
+            ) : (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  (e.currentTarget as HTMLElement).blur();
+                  togglePlay();
+                }}
+                onPointerDown={(e) => (e.currentTarget as HTMLElement).blur()}
+                tabIndex={-1}
+                className="p-2.5 rounded-full bg-white/10 hover:bg-cinema-gold hover:text-black text-white transition-all transform active:scale-95 cursor-pointer focus:outline-none"
+              >
+                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
+              </button>
+            )}
 
             <button
               onClick={(e) => {
