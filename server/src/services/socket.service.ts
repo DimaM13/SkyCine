@@ -3,6 +3,7 @@ import { db } from '../config/db';
 import { Room, RoomMember, RoomState } from '../types';
 import { logger } from './logger.service';
 import { extractYouTubeId, fetchYouTubeInfo } from '../controllers/rooms.controller';
+import { YouTubeController } from '../controllers/youtube.controller';
 
 interface ConnectedUser {
   userId: string;
@@ -355,7 +356,7 @@ class SocketService {
         const user = this.users.get(socket.id);
         if (!user) return;
 
-        const room = db.prepare('SELECT hostUserId FROM rooms WHERE id = ?').get(roomId) as any;
+        const room = db.prepare('SELECT hostUserId, youtubeId FROM rooms WHERE id = ?').get(roomId) as any;
         if (!room) return;
 
         if (room.hostUserId !== user.userId) {
@@ -363,10 +364,19 @@ class SocketService {
           return;
         }
 
+        const oldYtId = room.youtubeId;
+
         const ytId = extractYouTubeId(youtubeUrl);
         if (!ytId) {
           socket.emit('room:error', { message: 'Некорректная ссылка на YouTube' });
           return;
+        }
+
+        if (oldYtId && oldYtId !== ytId) {
+          const otherRoom = db.prepare('SELECT id FROM rooms WHERE youtubeId = ? AND id != ?').get(oldYtId, roomId);
+          if (!otherRoom) {
+            YouTubeController.deleteCache(oldYtId);
+          }
         }
 
         const ytInfo = await fetchYouTubeInfo(ytId);

@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
+import { YouTubeController } from './youtube.controller';
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -226,7 +227,7 @@ export class RoomsController {
       const currentUserId = req.user!.id;
       const role = req.user!.role;
 
-      const room = db.prepare('SELECT hostUserId FROM rooms WHERE id = ?').get(roomId) as { hostUserId: string } | undefined;
+      const room = db.prepare('SELECT hostUserId, youtubeId, sourceType FROM rooms WHERE id = ?').get(roomId) as any;
       if (!room) {
         res.status(404).json({ error: 'Комната не найдена' });
         return;
@@ -235,6 +236,14 @@ export class RoomsController {
       if (room.hostUserId !== currentUserId && role !== 'ADMIN') {
         res.status(403).json({ error: 'Вы не являетесь владельцем комнаты' });
         return;
+      }
+
+      if (room.youtubeId) {
+        // Check if any other room is currently using this youtubeId
+        const otherRoom = db.prepare('SELECT id FROM rooms WHERE youtubeId = ? AND id != ?').get(room.youtubeId, roomId);
+        if (!otherRoom) {
+          YouTubeController.deleteCache(room.youtubeId);
+        }
       }
 
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);

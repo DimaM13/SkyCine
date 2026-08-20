@@ -45,6 +45,23 @@ export class YouTubeController {
   }
 
   /**
+   * Delete cached video file for a given videoId
+   */
+  public static deleteCache(videoId: string): void {
+    if (!videoId) return;
+    try {
+      const filePath = path.join(cacheDir, `${videoId}.mp4`);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`[YouTubeController] Deleted cached video for ${videoId}: ${filePath}`);
+      }
+      activeDownloads.delete(videoId);
+    } catch (err) {
+      console.error(`[YouTubeController] Error deleting cache for ${videoId}:`, err);
+    }
+  }
+
+  /**
    * Start 1080p background download of a YouTube video to uploads/youtube_cache
    */
   public static startDownload(videoId: string): DownloadProgress {
