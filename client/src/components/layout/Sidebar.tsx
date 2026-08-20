@@ -236,7 +236,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
       {/* Footer Info */}
       <div className="pt-4 border-t border-white/5 flex flex-col gap-1 px-2">
         <span className="text-[10px] text-slate-600 font-mono">SkyCine Cinema Server</span>
-        <span className="text-[9px] text-slate-600">v1.5.0 • Multi-room sync</span>
+        <span className="text-[9px] text-slate-600">v2.0.0 • Multi-room sync</span>
       </div>
     </div>
   );
