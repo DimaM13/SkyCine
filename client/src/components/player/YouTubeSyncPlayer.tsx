@@ -118,7 +118,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
     seekTimeoutRef.current = setTimeout(() => {
       isSeekingRef.current = false;
-    }, 1200);
+    }, 800);
   }, []);
 
   // Helper to switch to server_stream engine and broadcast to all room members
@@ -360,7 +360,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             disableCaptions(event.target);
 
             // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
-            if (event.data === 1 || event.data === 2 || event.data === 0 || event.data === 5) {
+            if (event.data === 1 || event.data === 2 || event.data === 0 || event.data === 5 || event.data === -1) {
               isSeekingRef.current = false;
             }
 
@@ -457,7 +457,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        const isReady = (video.readyState >= 2) || (bufSec > cur + 1);
+        const isReady = (video.readyState >= 2) || (bufSec > cur + 0.5);
         const bufferPercent = isReady ? 100 : Math.min(99, Math.round((bufSec / dur) * 100));
         onBufferStatusChange(isReady, bufSec, cur, bufferPercent);
         return;
@@ -476,15 +476,17 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        // Check if seek has settled
-        if (isSeekingRef.current && (ytState === 1 || ytState === 2 || ytState === 5)) {
-          isSeekingRef.current = false;
-        }
-
-        const isBufferingYT = ytState === 3 || ytState === -1 || isSeekingRef.current;
+        // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
+        const isBufferingYT = ytState === 3 || isSeekingRef.current;
         const isReady = isPlayerReady && !isBufferingYT;
 
-        const bufferPercent = isReady ? 100 : isSeekingRef.current ? 75 : Math.max(10, Math.min(99, Math.round(fraction * 100)));
+        const bufferPercent = isReady ? 100 : isSeekingRef.current ? 75 : 50;
+
+        // Debug logging for developer inspection
+        if (isBufferingYT) {
+          console.debug('[YouTube Buffer]', { ytState, isReady, isSeeking: isSeekingRef.current, cur, fraction, bufferPercent });
+        }
+
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
     }, 350);
