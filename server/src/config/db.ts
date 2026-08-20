@@ -101,7 +101,12 @@ export function initDatabase() {
       code TEXT UNIQUE NOT NULL,
       title TEXT NOT NULL,
       hostUserId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      mediaItemId TEXT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+      mediaItemId TEXT REFERENCES media_items(id) ON DELETE SET NULL,
+      sourceType TEXT NOT NULL DEFAULT 'LOCAL', -- 'LOCAL' | 'YOUTUBE'
+      youtubeId TEXT,
+      youtubeUrl TEXT,
+      youtubeTitle TEXT,
+      youtubeThumbnail TEXT,
       state TEXT NOT NULL DEFAULT 'PAUSED', -- 'PLAYING' | 'PAUSED' | 'BUFFERING'
       currentPosition REAL DEFAULT 0,
       serverTimestamp INTEGER NOT NULL,
@@ -167,6 +172,52 @@ export function initDatabase() {
       `);
     }
   } catch (e) {}
+
+  // Migration for rooms table (add YouTube fields and nullable mediaItemId)
+  try {
+    const roomTableInfo = db.prepare('PRAGMA table_info(rooms)').all() as any[];
+    const hasSourceType = roomTableInfo.some((col) => col.name === 'sourceType');
+    const mediaItemCol = roomTableInfo.find((col) => col.name === 'mediaItemId');
+
+    if (!hasSourceType || (mediaItemCol && mediaItemCol.notnull === 1)) {
+      db.exec(`
+        PRAGMA foreign_keys=off;
+        CREATE TABLE IF NOT EXISTS rooms_migration (
+          id TEXT PRIMARY KEY,
+          code TEXT UNIQUE NOT NULL,
+          title TEXT NOT NULL,
+          hostUserId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          mediaItemId TEXT REFERENCES media_items(id) ON DELETE SET NULL,
+          sourceType TEXT NOT NULL DEFAULT 'LOCAL',
+          youtubeId TEXT,
+          youtubeUrl TEXT,
+          youtubeTitle TEXT,
+          youtubeThumbnail TEXT,
+          state TEXT NOT NULL DEFAULT 'PAUSED',
+          currentPosition REAL DEFAULT 0,
+          serverTimestamp INTEGER NOT NULL,
+          playbackRate REAL DEFAULT 1.0,
+          isPrivate INTEGER DEFAULT 0,
+          password TEXT,
+          createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO rooms_migration (
+          id, code, title, hostUserId, mediaItemId, state, currentPosition, serverTimestamp, playbackRate, isPrivate, password, createdAt
+        ) SELECT id, code, title, hostUserId, mediaItemId, state, currentPosition, serverTimestamp, playbackRate, isPrivate, password, createdAt FROM rooms;
+        DROP TABLE rooms;
+        ALTER TABLE rooms_migration RENAME TO rooms;
+        PRAGMA foreign_keys=on;
+      `);
+    }
+  } catch (e) {
+    try {
+      db.exec("ALTER TABLE rooms ADD COLUMN sourceType TEXT NOT NULL DEFAULT 'LOCAL';");
+      db.exec("ALTER TABLE rooms ADD COLUMN youtubeId TEXT;");
+      db.exec("ALTER TABLE rooms ADD COLUMN youtubeUrl TEXT;");
+      db.exec("ALTER TABLE rooms ADD COLUMN youtubeTitle TEXT;");
+      db.exec("ALTER TABLE rooms ADD COLUMN youtubeThumbnail TEXT;");
+    } catch (err) {}
+  }
 
   // Default server settings
   const insertSetting = db.prepare(`

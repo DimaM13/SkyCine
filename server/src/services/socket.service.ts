@@ -2,6 +2,7 @@ import { Server, Socket } from 'socket.io';
 import { db } from '../config/db';
 import { Room, RoomMember, RoomState } from '../types';
 import { logger } from './logger.service';
+import { extractYouTubeId, fetchYouTubeInfo } from '../controllers/rooms.controller';
 
 interface ConnectedUser {
   userId: string;
@@ -263,6 +264,70 @@ class SocketService {
           type: 'sync',
           timestamp: now,
         });
+      });
+
+      // Host Change YouTube Video Live
+      socket.on('room:change_youtube', async (data: { roomId: string; youtubeUrl: string; title?: string }) => {
+        const { roomId, youtubeUrl, title } = data;
+        const user = this.users.get(socket.id);
+        if (!user) return;
+
+        const room = db.prepare('SELECT hostUserId FROM rooms WHERE id = ?').get(roomId) as any;
+        if (!room) return;
+
+        if (room.hostUserId !== user.userId) {
+          socket.emit('room:error', { message: 'Только хост может переключать видео' });
+          return;
+        }
+
+        const ytId = extractYouTubeId(youtubeUrl);
+        if (!ytId) {
+          socket.emit('room:error', { message: 'Некорректная ссылка на YouTube' });
+          return;
+        }
+
+        const ytInfo = await fetchYouTubeInfo(ytId);
+        const finalTitle = title?.trim() || ytInfo.title;
+        const fullUrl = `https://www.youtube.com/watch?v=${ytId}`;
+        const now = Date.now();
+
+        try {
+          db.prepare(`
+            UPDATE rooms SET
+              sourceType = 'YOUTUBE',
+              youtubeId = ?,
+              youtubeUrl = ?,
+              youtubeTitle = ?,
+              youtubeThumbnail = ?,
+              title = ?,
+              currentPosition = 0,
+              state = 'PAUSED',
+              serverTimestamp = ?
+            WHERE id = ?
+          `).run(ytId, fullUrl, ytInfo.title, ytInfo.thumbnail, `YouTube: ${finalTitle}`, now, roomId);
+
+          logger.info('ROOM_CHANGE_YT', `Room ${roomId} YouTube changed to ${ytId} (${finalTitle}) by ${user.username}`);
+
+          io.to(roomId).emit('room:youtube_changed', {
+            sourceType: 'YOUTUBE',
+            youtubeId: ytId,
+            youtubeUrl: fullUrl,
+            youtubeTitle: ytInfo.title,
+            youtubeThumbnail: ytInfo.thumbnail,
+            title: `YouTube: ${finalTitle}`,
+            state: 'PAUSED',
+            currentPosition: 0,
+            serverTimestamp: now,
+          });
+
+          io.to(roomId).emit('room:system_message', {
+            text: `🎬 Хост ${user.username} переключил видео на «${finalTitle}»`,
+            type: 'video_change',
+            timestamp: now,
+          });
+        } catch (err) {
+          logger.error('ROOM_CHANGE_YT', `Error changing YouTube video: ${err}`);
+        }
       });
 
       // Member Buffer Status

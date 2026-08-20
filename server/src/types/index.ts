@@ -89,12 +89,19 @@ export interface WatchHistory {
 
 export type RoomState = 'PLAYING' | 'PAUSED' | 'BUFFERING';
 
+export type RoomSourceType = 'LOCAL' | 'YOUTUBE';
+
 export interface Room {
   id: string;
   code: string;
   title: string;
   hostUserId: string;
-  mediaItemId: string;
+  mediaItemId?: string | null;
+  sourceType: RoomSourceType;
+  youtubeId?: string | null;
+  youtubeUrl?: string | null;
+  youtubeTitle?: string | null;
+  youtubeThumbnail?: string | null;
   state: RoomState;
   currentPosition: number;
   serverTimestamp: number;

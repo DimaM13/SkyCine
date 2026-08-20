@@ -94,12 +94,19 @@ export interface ContinueWatchingItem {
   fullDuration: number;
 }
 
+export type RoomSourceType = 'LOCAL' | 'YOUTUBE';
+
 export interface Room {
   id: string;
   code: string;
   title: string;
   hostUserId: string;
-  mediaItemId: string;
+  mediaItemId?: string | null;
+  sourceType?: RoomSourceType;
+  youtubeId?: string | null;
+  youtubeUrl?: string | null;
+  youtubeTitle?: string | null;
+  youtubeThumbnail?: string | null;
   state: 'PLAYING' | 'PAUSED' | 'BUFFERING';
   currentPosition: number;
   serverTimestamp: number;

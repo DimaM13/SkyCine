@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Users, Share2, Sparkles, Film } from 'lucide-react';
+import { ArrowLeft, Users, Share2, Sparkles, Film, Video } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { CustomPlayer } from '../components/player/CustomPlayer';
+import { YouTubeSyncPlayer } from '../components/player/YouTubeSyncPlayer';
 import { RoomSidebar } from '../components/rooms/RoomSidebar';
 import { InviteFriendsModal } from '../components/rooms/InviteFriendsModal';
 import { useSyncPlayer } from '../hooks/useSyncPlayer';
@@ -26,28 +27,31 @@ export const RoomPage: React.FC = () => {
     setLoading(true);
     apiClient.get(`/rooms/${code}`)
       .then((res) => {
-        const roomData = res.data.room;
+        const roomData: Room = res.data.room;
         setRoom(roomData);
-        setMedia({
-          id: roomData.mediaItemId,
-          libraryId: roomData.libraryId || '',
-          title: roomData.mediaTitle || roomData.title,
-          originalTitle: roomData.originalTitle || '',
-          type: roomData.type || 'MOVIE',
-          year: roomData.year,
-          overview: roomData.overview,
-          posterPath: roomData.posterPath,
-          backdropPath: roomData.backdropPath,
-          rating: roomData.rating,
-          genres: roomData.genres,
-          durationSeconds: roomData.durationSeconds || 0,
-          filePath: roomData.filePath || '',
-          fileSize: roomData.fileSize || 0,
-          resolution: roomData.resolution,
-          videoCodec: roomData.videoCodec,
-          audioCodec: roomData.audioCodec,
-          tracks: roomData.tracks || [],
-        });
+
+        if (roomData.sourceType !== 'YOUTUBE') {
+          setMedia({
+            id: roomData.mediaItemId || '',
+            libraryId: (roomData as any).libraryId || '',
+            title: roomData.mediaTitle || roomData.title,
+            originalTitle: (roomData as any).originalTitle || '',
+            type: (roomData as any).type || 'MOVIE',
+            year: (roomData as any).year,
+            overview: (roomData as any).overview,
+            posterPath: roomData.posterPath,
+            backdropPath: roomData.backdropPath,
+            rating: (roomData as any).rating,
+            genres: (roomData as any).genres,
+            durationSeconds: roomData.durationSeconds || 0,
+            filePath: (roomData as any).filePath || '',
+            fileSize: (roomData as any).fileSize || 0,
+            resolution: (roomData as any).resolution,
+            videoCodec: (roomData as any).videoCodec,
+            audioCodec: (roomData as any).audioCodec,
+            tracks: (roomData as any).tracks || [],
+          });
+        }
       })
       .catch((err) => {
         alert('Комната не найдена');
@@ -99,7 +103,7 @@ export const RoomPage: React.FC = () => {
     },
   });
 
-  if (loading || !room || !media) {
+  if (loading || !room) {
     return (
       <div className="h-[80vh] flex flex-col items-center justify-center gap-3 text-slate-400">
         <div className="w-10 h-10 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
@@ -108,40 +112,66 @@ export const RoomPage: React.FC = () => {
     );
   }
 
+  const isYouTubeRoom = room.sourceType === 'YOUTUBE';
+
   return (
     <div className="w-full h-full flex flex-col md:flex-row overflow-hidden bg-black relative select-none touch-none">
-      {/* Main Video Screen Area */}
+      {/* Main Screen Area */}
       <div className="flex-1 flex flex-col h-full relative overflow-hidden bg-black">
-        {/* Video Player */}
         <div className="flex-1 w-full h-full">
-          <CustomPlayer
-            media={media}
-            room={room}
-            roomState={roomState}
-            syncDiffMs={syncDiffMs}
-            syncQuality={syncQuality}
-            isWatchTogether={true}
-            isHost={isHost}
-            onForceSyncAll={forceSyncAll}
-            onSyncToHost={syncToHost}
-            members={members}
-            currentUserId={user?.id}
-            hostUserId={room.hostUserId}
-            reactions={reactions}
-            initialPosition={room.currentPosition || 0}
-            initialPlaying={room.state === 'PLAYING'}
-            onPlayRequest={sendPlay}
-            onPauseRequest={sendPause}
-            onSeekRequest={sendSeek}
-            onBufferStatusChange={reportBufferStatus}
-            onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-            isSidebarOpen={isSidebarOpen}
-            onBack={() => navigate('/rooms')}
-            onInvite={() => setIsInviteModalOpen(true)}
-            onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
-            onAttachGetCurrentTime={(fn) => { getCurrentTimeRef.current = fn; }}
-            videoRef={videoRef}
-          />
+          {isYouTubeRoom ? (
+            <YouTubeSyncPlayer
+              room={room}
+              roomState={roomState}
+              syncDiffMs={syncDiffMs}
+              syncQuality={syncQuality}
+              isHost={isHost}
+              onForceSyncAll={forceSyncAll}
+              onSyncToHost={syncToHost}
+              members={members}
+              currentUserId={user?.id}
+              hostUserId={room.hostUserId}
+              reactions={reactions}
+              onPlayRequest={sendPlay}
+              onPauseRequest={sendPause}
+              onSeekRequest={sendSeek}
+              onBufferStatusChange={reportBufferStatus}
+              onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+              isSidebarOpen={isSidebarOpen}
+              onBack={() => navigate('/rooms')}
+              onInvite={() => setIsInviteModalOpen(true)}
+              onSendReaction={sendReaction}
+            />
+          ) : media ? (
+            <CustomPlayer
+              media={media}
+              room={room}
+              roomState={roomState}
+              syncDiffMs={syncDiffMs}
+              syncQuality={syncQuality}
+              isWatchTogether={true}
+              isHost={isHost}
+              onForceSyncAll={forceSyncAll}
+              onSyncToHost={syncToHost}
+              members={members}
+              currentUserId={user?.id}
+              hostUserId={room.hostUserId}
+              reactions={reactions}
+              initialPosition={room.currentPosition || 0}
+              initialPlaying={room.state === 'PLAYING'}
+              onPlayRequest={sendPlay}
+              onPauseRequest={sendPause}
+              onSeekRequest={sendSeek}
+              onBufferStatusChange={reportBufferStatus}
+              onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+              isSidebarOpen={isSidebarOpen}
+              onBack={() => navigate('/rooms')}
+              onInvite={() => setIsInviteModalOpen(true)}
+              onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
+              onAttachGetCurrentTime={(fn) => { getCurrentTimeRef.current = fn; }}
+              videoRef={videoRef}
+            />
+          ) : null}
         </div>
       </div>
 
