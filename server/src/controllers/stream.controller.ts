@@ -252,7 +252,12 @@ export class StreamController {
 
   public static async endHlsSession(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { mediaId, quality, audioIndex, isApple, roomId } = req.body;
+      const mediaId = req.body?.mediaId || (req.query.mediaId as string);
+      const quality = req.body?.quality || (req.query.quality as string);
+      const audioIndex = req.body?.audioIndex !== undefined ? req.body.audioIndex : (req.query.audioIndex !== undefined ? parseInt(req.query.audioIndex as string, 10) : undefined);
+      const isApple = req.body?.isApple !== undefined ? req.body.isApple : (req.query.isApple === '1');
+      const roomId = req.body?.roomId || (req.query.roomId as string);
+
       if (roomId) {
         const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(roomId);
         if (room) {
@@ -262,11 +267,16 @@ export class StreamController {
         }
       }
 
-      if (mediaId && quality && audioIndex !== undefined) {
-        const deviceSuffix = isApple ? 'apple' : 'pc';
-        const roomSuffix = roomId ? `_r${roomId}` : '';
-        const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
-        ffmpegService.killSession(sessionId);
+      if (mediaId) {
+        if (quality && audioIndex !== undefined) {
+          const deviceSuffix = isApple ? 'apple' : 'pc';
+          const roomSuffix = roomId ? `_r${roomId}` : '';
+          const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
+          ffmpegService.killSession(sessionId);
+        }
+        if (!roomId) {
+          ffmpegService.killSoloSessionsForMedia(mediaId);
+        }
       }
       res.json({ success: true });
     } catch (err) {

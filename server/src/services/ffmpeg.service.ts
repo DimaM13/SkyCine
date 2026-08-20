@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, exec, ChildProcess } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { systemService } from './system.service';
@@ -28,8 +28,23 @@ class FFmpegService {
   constructor() {
     // Initial cleanup of old orphaned transcodes on server launch
     this.cleanupOrphanedTranscodes();
-    // Periodically cleanup dead HLS sessions (idle > 2 minutes)
-    setInterval(() => this.cleanupIdleSessions(), 20000);
+    // Periodically cleanup dead HLS sessions (idle > 25 seconds)
+    setInterval(() => this.cleanupIdleSessions(), 5000);
+  }
+
+  public terminateProcess(proc: ChildProcess): void {
+    if (!proc || !proc.pid) return;
+    try {
+      if (process.platform === 'win32') {
+        exec(`taskkill /pid ${proc.pid} /T /F`, () => {
+          try { proc.kill('SIGKILL'); } catch (e) {}
+        });
+      } else {
+        proc.kill('SIGKILL');
+      }
+    } catch (e) {
+      try { proc.kill(); } catch (err) {}
+    }
   }
 
   private cleanupOrphanedTranscodes() {
@@ -113,12 +128,12 @@ class FFmpegService {
       const sessionToClose = existing;
       const dirToDelete = existing.sessionDir;
       this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
-      try { sessionToClose.process.kill('SIGKILL'); } catch (e) {}
+      this.terminateProcess(sessionToClose.process);
       setTimeout(() => {
         try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
           console.error(`[Continuous HLS] Failed to delete session dir on overwrite: ${dirToDelete}`, e);
         }
-      }, 30000);
+      }, 10000);
       this.continuousSessions.delete(sessionId);
     }
 
@@ -372,11 +387,11 @@ class FFmpegService {
         this.continuousSessions.delete(sId);
         const dirToDelete = sess.sessionDir;
         this.closingSessions.set(sId, sess);
-        try { sess.process.kill(); } catch (e) {}
+        this.terminateProcess(sess.process);
         setTimeout(() => {
           this.closingSessions.delete(sId);
           try { fs.rmSync(dirToDelete, { recursive: true, force: true }); } catch (e) {}
-        }, 30000);
+        }, 10000);
       }
     }
 
@@ -468,12 +483,12 @@ class FFmpegService {
        const sessionToClose = session;
        const dirToDelete = session.sessionDir;
        this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
-       try { sessionToClose.process.kill('SIGKILL'); } catch (e) {}
+       this.terminateProcess(sessionToClose.process);
        setTimeout(() => {
          try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
            console.error(`[Continuous HLS] Failed to delete session dir on restart: ${dirToDelete}`, e);
          }
-       }, 30000);
+       }, 10000);
        this.continuousSessions.delete(sessionId);
        session = undefined as any;
     }
@@ -504,13 +519,22 @@ class FFmpegService {
       const sessionToClose = session;
       const dirToDelete = session.sessionDir;
       this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
-      try { sessionToClose.process.kill('SIGKILL'); } catch (e) {}
+      this.terminateProcess(sessionToClose.process);
       setTimeout(() => {
         try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
           console.error(`[Continuous HLS] Failed to delete session dir: ${dirToDelete}`, e);
         }
-      }, 30000);
+      }, 10000);
       this.continuousSessions.delete(sessionId);
+    }
+  }
+
+  public killSoloSessionsForMedia(mediaId: string): void {
+    for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
+      if (session.mediaId === mediaId && !sId.includes('_r')) {
+        console.log(`[Continuous HLS] 🛑 Killing solo session for media ${mediaId}: ${sId}`);
+        this.killSession(sId);
+      }
     }
   }
 
@@ -596,17 +620,17 @@ class FFmpegService {
   private cleanupIdleSessions() {
     try {
       const now = Date.now();
-      for (const [sessionId, session] of this.continuousSessions.entries()) {
-        // If inactive for > 10 minutes (600,000ms), terminate and clean up
-        if (now - session.lastAccess > 600000) {
-          try { session.process.kill(); } catch (e) {}
-          try { fs.rmSync(session.sessionDir, { recursive: true, force: true }); } catch (e) {}
+      for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
+        // If inactive for > 25 seconds (no segment or playlist requested), terminate FFmpeg immediately!
+        if (now - session.lastAccess > 25000) {
+          console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>25s) for ${sessionId}, terminating process...`);
+          this.terminateProcess(session.process);
+          try { fs.rmSync(session.sessionDir, { recursive: true, force: true, maxRetries: 3 }); } catch (e) {}
           this.continuousSessions.delete(sessionId);
-          console.log(`[Continuous HLS] Cleaned up idle session ${sessionId}`);
         }
       }
 
-      // Clean orphaned session folders older than 30 minutes
+      // Clean orphaned session folders older than 5 minutes
       const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
       const baseTempDir = tempDirSetting?.value || path.resolve(__dirname, '../../../data/transcodes');
       const sessionsRoot = path.join(baseTempDir, 'hls_sessions');
@@ -617,7 +641,7 @@ class FFmpegService {
             const dirPath = path.join(sessionsRoot, dir);
             try {
               const stats = fs.statSync(dirPath);
-              if (now - stats.mtimeMs > 30 * 60 * 1000) {
+              if (now - stats.mtimeMs > 5 * 60 * 1000) {
                 fs.rmSync(dirPath, { recursive: true, force: true });
               }
             } catch (e) {}

@@ -63,7 +63,7 @@ router.get('/stream/:id/direct', authenticateToken, StreamController.directStrea
 router.get('/stream/:id/remux', authenticateToken, StreamController.remuxStream);
 router.get('/stream/:id/master.m3u8', authenticateToken, StreamController.getHlsMaster);
 router.get('/stream/hls/session/start/:id', authenticateToken, StreamController.startHlsSession);
-router.post('/stream/hls/session/end', authenticateToken, StreamController.endHlsSession);
+router.post('/stream/hls/session/end', optionalAuth, StreamController.endHlsSession);
 router.get('/stream/hls/session/:sessionId/playlist.m3u8', StreamController.getHlsSessionPlaylist);
 router.get('/stream/hls/session/:sessionId/:segmentName', StreamController.getHlsSessionSegment);
 router.get('/stream/hls/:sessionId/:segmentName', StreamController.getHlsSessionSegment);

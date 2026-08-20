@@ -426,28 +426,60 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     streamInfoRef.current = { mediaId: media.id, quality: selectedQuality, audioIndex: selectedAudioTrack, isApple: isAppleDevice, isDirectPlay };
   }, [media.id, selectedQuality, selectedAudioTrack, isAppleDevice, isDirectPlay]);
 
-  // Clean up Hls on unmount
+  // Clean up Hls and terminate solo transcode session on unmount or page exit
   useEffect(() => {
-    return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-      
+    const endSession = () => {
       const { mediaId, quality, audioIndex, isApple, isDirectPlay } = streamInfoRef.current;
-      // Only kill private solo sessions (do NOT kill shared room sessions where others might be watching)
       if (!isDirectPlay && !isWatchTogether) {
         const token = localStorage.getItem('myplex_token');
-        fetch('/api/stream/hls/session/end', {
+        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+        const payload = JSON.stringify({ mediaId, quality, audioIndex, isApple });
+
+        // Use sendBeacon for instant, guaranteed delivery on page exit
+        try {
+          if (navigator.sendBeacon) {
+            const blob = new Blob([payload], { type: 'application/json' });
+            navigator.sendBeacon(`/api/stream/hls/session/end${tokenParam}`, blob);
+          }
+        } catch (e) {}
+
+        // Fallback fetch with keepalive
+        fetch(`/api/stream/hls/session/end${tokenParam}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {})
           },
-          body: JSON.stringify({ mediaId, quality, audioIndex, isApple }),
+          body: payload,
           keepalive: true
         }).catch(() => {});
       }
+    };
+
+    window.addEventListener('pagehide', endSession);
+    window.addEventListener('beforeunload', endSession);
+
+    return () => {
+      window.removeEventListener('pagehide', endSession);
+      window.removeEventListener('beforeunload', endSession);
+
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.stopLoad();
+          hlsRef.current.destroy();
+        } catch (e) {}
+        hlsRef.current = null;
+      }
+
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause();
+          videoRef.current.removeAttribute('src');
+          videoRef.current.load();
+        } catch (e) {}
+      }
+      
+      endSession();
     };
   }, [isWatchTogether]);
 
