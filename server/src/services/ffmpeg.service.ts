@@ -170,10 +170,6 @@ class FFmpegService {
       '-fflags', '+genpts+discardcorrupt+nobuffer',
     ];
 
-    if (encoder === 'h264_nvenc') {
-      args.push('-hwaccel', 'cuda');
-    }
-
     if (cleanStartTime > 0) {
       args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
     }
@@ -211,9 +207,9 @@ class FFmpegService {
     } else {
       args.push('-c:v', encoder);
       if (encoder === 'h264_nvenc') {
-        args.push('-preset', 'p1', '-tune', 'ull', '-cq', '19', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p', '-g', '48', '-keyint_min', '48');
+        args.push('-preset', 'p1', '-tune', 'ull', '-cq', '19', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-g', '48', '-keyint_min', '48');
       } else {
-        args.push('-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '20', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p', '-g', '48', '-keyint_min', '48');
+        args.push('-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '20', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-g', '48', '-keyint_min', '48');
       }
 
       if (quality === '720p') {

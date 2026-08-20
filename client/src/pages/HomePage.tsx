@@ -142,6 +142,8 @@ export const HomePage: React.FC = () => {
                 ? Math.round((item.progressSeconds / item.durationSeconds) * 100)
                 : 0;
 
+              const thumbUrl = item.stillPath || (item.type === 'EPISODE' ? `/api/media/item/${item.mediaId}/thumbnail` : (item.backdropPath || item.posterPath));
+
               return (
                 <div
                   key={item.mediaId}
@@ -150,8 +152,11 @@ export const HomePage: React.FC = () => {
                 >
                   <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
                     <img
-                      src={item.backdropPath || item.posterPath}
+                      src={thumbUrl}
                       alt={item.title}
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).src = `/api/media/item/${item.mediaId}/thumbnail`;
+                      }}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                     />
                     {/* Progress Bar */}

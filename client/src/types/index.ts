@@ -85,6 +85,7 @@ export interface ContinueWatchingItem {
   title: string;
   posterPath?: string;
   backdropPath?: string;
+  stillPath?: string;
   type: 'MOVIE' | 'EPISODE';
   showTitle?: string;
   seasonNumber?: number;

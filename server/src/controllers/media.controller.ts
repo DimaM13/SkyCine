@@ -208,7 +208,7 @@ export class MediaController {
 
       const items = db.prepare(`
         SELECT wh.progressSeconds, wh.durationSeconds, wh.lastWatchedAt,
-               m.id as mediaId, m.title, m.posterPath, m.backdropPath,
+               m.id as mediaId, m.title, m.posterPath, m.backdropPath, m.stillPath,
                m.type, m.showTitle, m.seasonNumber, m.episodeNumber, m.durationSeconds as fullDuration
         FROM watch_history wh
         JOIN media_items m ON wh.mediaItemId = m.id

@@ -57,9 +57,9 @@ export class StreamController {
         // Ultra low-latency visually-lossless video encoding with exact frame sync and mobile hardware compatibility
         args.push('-c:v', encoder);
         if (encoder === 'h264_nvenc') {
-          args.push('-preset', 'p1', '-tune', 'ull', '-cq', '19', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p', '-g', '48');
+          args.push('-preset', 'p1', '-tune', 'ull', '-cq', '19', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-g', '48');
         } else {
-          args.push('-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '20', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p', '-g', '48');
+          args.push('-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '20', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-g', '48');
         }
 
         if (quality === '720p') {
