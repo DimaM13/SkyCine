@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Film, Tv, Search, SlidersHorizontal, RefreshCw,
+  Film, Tv, Video, Search, SlidersHorizontal, RefreshCw,
   Sparkles, Clapperboard, Layers, Star, Play, Lock, ArrowLeft, Clock, Calendar, X, Check,
-  CheckCircle2, ChevronRight
+  CheckCircle2, ChevronRight, Plus
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { MediaCard } from '../components/library/MediaCard';
@@ -264,6 +264,7 @@ export const LibraryPage: React.FC = () => {
     if (name.includes('аниме') || name.includes('anime')) return Sparkles;
     if (name.includes('мульт') || name.includes('cartoon') || name.includes('детск')) return Clapperboard;
     if (lib.type === 'SHOWS' || name.includes('сериал') || name.includes('show')) return Tv;
+    if (lib.type === 'VIDEOS' || name.includes('видео') || name.includes('video') || name.includes('клип') || name.includes('ролик')) return Video;
     return Film;
   };
 
@@ -279,13 +280,31 @@ export const LibraryPage: React.FC = () => {
         </p>
         <button
           onClick={() => navigate('/')}
-          className="px-5 py-2.5 rounded-2xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold"
+          className="px-5 py-2.5 rounded-2xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold cursor-pointer"
         >
           На главную
         </button>
       </div>
     );
   }
+
+  const getItemCountLabel = () => {
+    if (!library) return '';
+    if (library.type === 'SHOWS') {
+      return `${shows.length} ${shows.length === 1 ? 'сериал' : 'сериалов'}`;
+    }
+    if (library.type === 'VIDEOS') {
+      return `${movies.length} ${movies.length === 1 ? 'видео' : 'видео'}`;
+    }
+    return `${movies.length} ${movies.length === 1 ? 'фильм' : 'фильмов'}`;
+  };
+
+  const getLibrarySubheading = () => {
+    if (!library) return '';
+    if (library.type === 'SHOWS') return 'Коллекция сериалов со всеми сезонами и сериями';
+    if (library.type === 'VIDEOS') return 'Коллекция видеороликов и записей';
+    return 'Коллекция фильмов с поддержкой прямого воспроизведения';
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-8 py-8 flex flex-col gap-8">
@@ -300,18 +319,18 @@ export const LibraryPage: React.FC = () => {
               <h1 className="text-2xl md:text-3xl font-extrabold text-white tracking-tight flex items-center gap-2.5">
                 {library?.name || 'Библиотека'}
                 <span className="text-xs font-mono font-bold text-cinema-gold bg-cinema-gold/10 px-2.5 py-0.5 rounded-lg border border-cinema-gold/20">
-                  {library?.type === 'SHOWS' ? `${shows.length} сериалов` : `${movies.length} фильмов`}
+                  {getItemCountLabel()}
                 </span>
               </h1>
               <p className="text-xs text-slate-400 mt-0.5">
-                {library?.type === 'SHOWS' ? 'Коллекция сериалов и эпизодов' : 'Коллекция фильмов с поддержкой прямого воспроизведения'}
+                {getLibrarySubheading()}
               </p>
             </div>
           </div>
 
           {/* Action Bar (Search, Sort, Scan) */}
           <div className="flex flex-wrap items-center gap-3">
-            {library?.type === 'MOVIES' && (
+            {(library?.type === 'MOVIES' || library?.type === 'VIDEOS') && (
               <>
                 <form onSubmit={handleSearchSubmit} className="relative">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -332,9 +351,9 @@ export const LibraryPage: React.FC = () => {
                     className="bg-transparent text-xs text-slate-300 focus:outline-none cursor-pointer"
                   >
                     <option value="recent">Недавно добавленные</option>
-                    <option value="rating">По рейтингу TMDB</option>
-                    <option value="year">По году выпуска</option>
                     <option value="title">По названию (А-Я)</option>
+                    <option value="year">По дате / году</option>
+                    {library.type === 'MOVIES' && <option value="rating">По рейтингу TMDB</option>}
                   </select>
                 </div>
               </>
@@ -342,9 +361,20 @@ export const LibraryPage: React.FC = () => {
 
             {isAdmin && (
               <button
+                onClick={() => navigate('/admin')}
+                className="px-4 py-2.5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-xs font-bold text-slate-300 hover:text-white flex items-center gap-2 transition-all cursor-pointer"
+                title="Управление библиотеками и добавление файлов"
+              >
+                <Plus className="w-3.5 h-3.5 text-cinema-gold" />
+                <span>Добавить медиа</span>
+              </button>
+            )}
+
+            {isAdmin && library?.path && (
+              <button
                 onClick={handleScanLibrary}
                 disabled={isScanning}
-                className="px-4 py-2.5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-xs font-bold text-slate-300 hover:text-white flex items-center gap-2 transition-all disabled:opacity-50"
+                className="px-4 py-2.5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 text-xs font-bold text-slate-300 hover:text-white flex items-center gap-2 transition-all disabled:opacity-50 cursor-pointer"
                 title="Пересканировать папку библиотеки"
               >
                 <RefreshCw className={`w-3.5 h-3.5 text-cinema-gold ${isScanning ? 'animate-spin' : ''}`} />
@@ -366,16 +396,19 @@ export const LibraryPage: React.FC = () => {
             <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
               <Film className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
               <h3 className="text-base font-bold text-white mb-1">Библиотека пуста</h3>
-              <p className="text-xs text-slate-500 max-w-md mx-auto mb-4">
-                В этой папке пока не найдено видеофайлов. Убедитесь, что файлы лежат в директории: <code className="text-slate-400 font-mono">{library.path}</code>
+              <p className="text-xs text-slate-500 max-w-md mx-auto mb-5">
+                В этой библиотеке пока нет фильмов. Вы можете добавить целую папку с фильмами или отдельные видеофайлы.
               </p>
               {isAdmin && (
-                <button
-                  onClick={handleScanLibrary}
-                  className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold"
-                >
-                  Запустить сканирование папки
-                </button>
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={() => navigate('/admin')}
+                    className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Добавить фильмы в библиотеку</span>
+                  </button>
+                </div>
               )}
             </div>
           ) : (
@@ -392,6 +425,121 @@ export const LibraryPage: React.FC = () => {
                   }}
                 />
               ))}
+            </div>
+          )}
+
+          {/* Details Modal */}
+          <MediaModal
+            mediaId={selectedMediaId}
+            isOpen={isModalOpen}
+            onClose={() => setIsModalOpen(false)}
+            onPlayDirect={handlePlayDirect}
+            onCreateRoom={handleCreateRoom}
+            onMediaUpdated={() => fetchMovies(library.id)}
+          />
+        </>
+      )}
+
+      {/* Content Section: VIDEOS (Standalone Videos / Clips) */}
+      {library?.type === 'VIDEOS' && (
+        <>
+          {loading ? (
+            <div className="p-16 flex justify-center items-center">
+              <div className="w-8 h-8 border-2 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
+            </div>
+          ) : movies.length === 0 ? (
+            <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
+              <Video className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
+              <h3 className="text-base font-bold text-white mb-1">Видео не найдены</h3>
+              <p className="text-xs text-slate-500 max-w-md mx-auto mb-5">
+                В этой библиотеке пока нет видеофайлов. Добавьте папку с видео или отдельные файлы.
+              </p>
+              {isAdmin && (
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={() => navigate('/admin')}
+                    className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Добавить видео в библиотеку</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {movies.map((vid) => {
+                const thumbUrl = vid.stillPath || vid.posterPath || `/api/media/item/${vid.id}/thumbnail`;
+                const userProgress = (vid as any).userProgress || 0;
+                const duration = vid.durationSeconds || 0;
+                const hasProgress = userProgress > 15 && duration > 0;
+                const progressPercent = hasProgress ? Math.min(100, Math.round((userProgress / duration) * 100)) : 0;
+
+                return (
+                  <div
+                    key={vid.id}
+                    onClick={() => {
+                      setSelectedMediaId(vid.id);
+                      setIsModalOpen(true);
+                    }}
+                    className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5 cursor-pointer select-none"
+                  >
+                    {/* 16:9 Thumbnail Container */}
+                    <div className="relative aspect-video w-full overflow-hidden bg-cinema-950">
+                      <img
+                        src={thumbUrl}
+                        alt={vid.title}
+                        loading="lazy"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).src = `/api/media/item/${vid.id}/thumbnail`;
+                        }}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+
+                      {/* Quality & Duration Badges */}
+                      <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between pointer-events-none z-10">
+                        {vid.resolution ? (
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-200 bg-black/80 backdrop-blur-md px-2 py-0.5 rounded-lg border border-white/10 font-mono">
+                            {vid.resolution}
+                          </span>
+                        ) : <span />}
+
+                        {duration > 0 && (
+                          <span className="text-[10px] font-bold text-cinema-gold bg-black/80 backdrop-blur-md px-2 py-0.5 rounded-lg border border-white/10 font-mono">
+                            {formatDuration(duration)}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Progress Bar */}
+                      {hasProgress && (
+                        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/50 z-10">
+                          <div
+                            className="h-full bg-cinema-gold shadow-[0_0_8px_rgba(229,160,13,0.9)]"
+                            style={{ width: `${progressPercent}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Meta info */}
+                    <div className="p-3.5 flex flex-col flex-1 justify-between gap-1.5">
+                      <h3 className="text-xs font-bold text-slate-200 group-hover:text-cinema-gold transition-colors line-clamp-2">
+                        {vid.title}
+                      </h3>
+
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 font-medium">
+                        <span>{vid.year || 'Видео'}</span>
+                        {vid.videoCodec && (
+                          <span className="uppercase text-[10px] text-slate-500 font-mono">
+                            {vid.videoCodec}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -716,16 +864,19 @@ export const LibraryPage: React.FC = () => {
                 <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
                   <Tv className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
                   <h3 className="text-base font-bold text-white mb-1">Сериалы не найдены</h3>
-                  <p className="text-xs text-slate-500 max-w-md mx-auto mb-4">
-                    В этой библиотеке пока нет сериалов. Убедитесь, что файлы лежат в директории: <code className="text-slate-400 font-mono">{library.path}</code>
+                  <p className="text-xs text-slate-500 max-w-md mx-auto mb-5">
+                    В этой библиотеке пока нет сериалов. Вы можете добавить целую папку с сериалом или сезонами в панели управления.
                   </p>
                   {isAdmin && (
-                    <button
-                      onClick={handleScanLibrary}
-                      className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold"
-                    >
-                      Запустить сканирование папки
-                    </button>
+                    <div className="flex items-center justify-center gap-3">
+                      <button
+                        onClick={() => navigate('/admin')}
+                        className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-all cursor-pointer flex items-center gap-2"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Добавить сериал в библиотеку</span>
+                      </button>
+                    </div>
                   )}
                 </div>
               ) : (

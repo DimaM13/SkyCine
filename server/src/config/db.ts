@@ -40,8 +40,8 @@ export function initDatabase() {
     CREATE TABLE IF NOT EXISTS libraries (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      type TEXT NOT NULL, -- 'MOVIES' | 'SHOWS'
-      path TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL, -- 'MOVIES' | 'SHOWS' | 'VIDEOS'
+      path TEXT,
       lastScannedAt DATETIME,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
     );

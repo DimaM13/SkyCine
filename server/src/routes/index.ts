@@ -28,6 +28,8 @@ router.delete('/friends/remove/:friendId', authenticateToken, FriendsController.
 // --- Library Routes ---
 router.get('/libraries', authenticateToken, LibraryController.getLibraries);
 router.post('/libraries', requireAdmin, LibraryController.createLibrary);
+router.post('/libraries/add-folder', requireAdmin, LibraryController.addFolder);
+router.post('/libraries/:libraryId/add-folder', requireAdmin, LibraryController.addFolder);
 router.post('/libraries/add-file', requireAdmin, LibraryController.addSingleFile);
 router.post('/libraries/add-show-folder', requireAdmin, LibraryController.addShowFolder);
 router.delete('/libraries/:libraryId', requireAdmin, LibraryController.deleteLibrary);

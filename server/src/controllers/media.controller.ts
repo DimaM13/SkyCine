@@ -28,7 +28,7 @@ export class MediaController {
         FROM media_items m
         JOIN libraries l ON m.libraryId = l.id
         LEFT JOIN watch_history wh ON (wh.mediaItemId = m.id AND wh.userId = ?)
-        WHERE m.type = 'MOVIE' AND ${filter.sql}
+        WHERE m.type IN ('MOVIE', 'VIDEO') AND ${filter.sql}
       `;
       const params: any[] = [userId, ...filter.params];
 

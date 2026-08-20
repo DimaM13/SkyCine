@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
-  Home, Film, Tv, Radio, Users, Shield, Plus,
+  Home, Film, Tv, Video, Radio, Users, Shield, Plus,
   Sparkles, Clapperboard, Folder, ChevronRight, X, Layers
 } from 'lucide-react';
 import { apiClient } from '../../api/client';
@@ -40,6 +40,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
     if (name.includes('аниме') || name.includes('anime')) return Sparkles;
     if (name.includes('мульт') || name.includes('cartoon') || name.includes('детск')) return Clapperboard;
     if (lib.type === 'SHOWS' || name.includes('сериал') || name.includes('show')) return Tv;
+    if (lib.type === 'VIDEOS' || name.includes('видео') || name.includes('video') || name.includes('клип') || name.includes('ролик')) return Video;
     return Film;
   };
 
@@ -96,7 +97,18 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
               <Layers className="w-3 h-3 text-cinema-gold" />
               Медиатека
             </span>
-            <span className="text-[10px] text-slate-500 font-mono font-bold">{libraries.length}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-slate-500 font-mono font-bold">{libraries.length}</span>
+              {isAdmin && (
+                <button
+                  onClick={() => handleNavClick('/admin')}
+                  className="p-1 rounded-md bg-white/5 hover:bg-cinema-gold text-slate-400 hover:text-black transition-colors"
+                  title="Создать библиотеку"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-col gap-1">

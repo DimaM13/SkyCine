@@ -22,18 +22,18 @@ export interface Friendship {
   updatedAt: string;
 }
 
-export type LibraryType = 'MOVIES' | 'SHOWS';
+export type LibraryType = 'MOVIES' | 'SHOWS' | 'VIDEOS';
 
 export interface Library {
   id: string;
   name: string;
   type: LibraryType;
-  path: string;
+  path?: string;
   lastScannedAt?: string;
   createdAt: string;
 }
 
-export type MediaType = 'MOVIE' | 'EPISODE';
+export type MediaType = 'MOVIE' | 'EPISODE' | 'VIDEO';
 
 export interface MediaTrack {
   id: string;

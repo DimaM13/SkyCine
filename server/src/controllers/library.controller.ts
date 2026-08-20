@@ -23,7 +23,7 @@ export class LibraryController {
                    ELSE (
                      SELECT COUNT(m.id)
                      FROM media_items m
-                     WHERE m.libraryId = l.id AND m.type = 'MOVIE'
+                     WHERE m.libraryId = l.id AND m.type IN ('MOVIE', 'VIDEO')
                    )
                  END as itemCount
           FROM libraries l
@@ -49,7 +49,7 @@ export class LibraryController {
                  ELSE (
                    SELECT COUNT(m.id)
                    FROM media_items m
-                   WHERE m.libraryId = l.id AND m.type = 'MOVIE'
+                   WHERE m.libraryId = l.id AND m.type IN ('MOVIE', 'VIDEO')
                      AND (
                        l.id IN (SELECT libraryId FROM user_library_access WHERE userId = ?)
                        OR m.id IN (SELECT mediaItemId FROM user_media_access WHERE userId = ?)
@@ -73,43 +73,72 @@ export class LibraryController {
     try {
       const { name, type, path: folderPath } = req.body;
 
-      if (!name || !type || !folderPath) {
-        res.status(400).json({ error: 'Заполните название, тип (MOVIES/SHOWS) и путь к папке' });
+      if (!name || !type) {
+        res.status(400).json({ error: 'Укажите название и тип библиотеки (MOVIES, SHOWS или VIDEOS)' });
         return;
       }
 
-      if (type !== 'MOVIES' && type !== 'SHOWS') {
-        res.status(400).json({ error: 'Тип библиотеки должен быть MOVIES или SHOWS' });
+      if (type !== 'MOVIES' && type !== 'SHOWS' && type !== 'VIDEOS') {
+        res.status(400).json({ error: 'Тип библиотеки должен быть MOVIES, SHOWS или VIDEOS' });
         return;
       }
 
-      // Check if path exists
-      if (!fs.existsSync(folderPath)) {
-        // Attempt to create directory if not exists
-        try {
-          fs.mkdirSync(folderPath, { recursive: true });
-        } catch (e) {
-          res.status(400).json({ error: `Папка не существует и не может быть создана: ${folderPath}` });
-          return;
+      let validPath: string | null = null;
+      if (folderPath && typeof folderPath === 'string' && folderPath.trim()) {
+        const trimmed = folderPath.trim();
+        if (!fs.existsSync(trimmed)) {
+          try {
+            fs.mkdirSync(trimmed, { recursive: true });
+          } catch (e) {
+            res.status(400).json({ error: `Папка не существует и не может быть создана: ${trimmed}` });
+            return;
+          }
         }
+        validPath = trimmed;
       }
 
       const id = uuidv4();
       db.prepare(`
         INSERT INTO libraries (id, name, type, path)
         VALUES (?, ?, ?, ?)
-      `).run(id, name, type, folderPath);
+      `).run(id, name.trim(), type, validPath);
 
-      // Trigger scan in background
-      scannerService.scanLibrary(id).catch(err => console.error('Scan error:', err));
+      // If a folder path was provided, trigger scan in background
+      if (validPath) {
+        scannerService.scanFolderIntoLibrary(id, validPath).catch(err => console.error('Scan error:', err));
+      }
 
-      res.status(201).json({ message: 'Библиотека создана и поставлена в очередь сканирования', id });
+      res.status(201).json({
+        message: validPath
+          ? 'Библиотека создана и поставлена в очередь сканирования'
+          : 'Библиотека успешно создана. Теперь вы можете добавить в неё папки или отдельные файлы.',
+        id,
+      });
     } catch (err: any) {
-      if (err.code === 'SQLITE_CONSTRAINT') {
-        res.status(400).json({ error: 'Библиотека с таким путем уже существует' });
+      console.error('createLibrary error:', err);
+      res.status(500).json({ error: 'Ошибка создания библиотеки' });
+    }
+  }
+
+  public static async addFolder(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const libraryId = req.params.libraryId || req.body.libraryId;
+      const { folderPath } = req.body;
+
+      if (!libraryId || !folderPath || !folderPath.trim()) {
+        res.status(400).json({ error: 'Укажите библиотеку и путь к папке на сервере' });
         return;
       }
-      res.status(500).json({ error: 'Ошибка создания библиотеки' });
+
+      const result = await scannerService.scanFolderIntoLibrary(libraryId, folderPath.trim());
+
+      res.status(200).json({
+        message: `Папка успешно добавлена в библиотеку «${result.libraryName}» (${result.itemsAdded} элементов)!`,
+        ...result,
+      });
+    } catch (err: any) {
+      console.error('addFolder error:', err);
+      res.status(400).json({ error: err.message || 'Ошибка добавления папки' });
     }
   }
 

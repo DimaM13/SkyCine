@@ -95,46 +95,120 @@ class ScannerService {
     const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(libraryId) as Library | undefined;
     if (!library) throw new Error('Библиотека не найдена');
 
+    if (!library.path || !library.path.trim()) {
+      throw new Error(`Для библиотеки «${library.name}» еще не указана папка. Нажмите «+ Добавить папку»`);
+    }
+
+    await this.scanFolderIntoLibrary(libraryId, library.path);
+  }
+
+  public async scanAll(): Promise<void> {
+    const libraries = db.prepare('SELECT id, path FROM libraries WHERE path IS NOT NULL AND path != ""').all() as { id: string; path: string }[];
+    for (const lib of libraries) {
+      try {
+        await this.scanLibrary(lib.id);
+      } catch (err: any) {
+        console.warn(`[Scanner] Could not scan library ${lib.id}:`, err.message);
+      }
+    }
+  }
+
+  public async scanFolderIntoLibrary(
+    libraryId: string,
+    folderPath: string
+  ): Promise<{ itemsAdded: number; libraryName: string }> {
+    if (this.isScanning) {
+      throw new Error('Сканирование уже выполняется');
+    }
+
+    const cleanPath = path.normalize(folderPath).trim();
+    if (!fs.existsSync(cleanPath)) {
+      throw new Error(`Папка не найдена на диске: ${cleanPath}`);
+    }
+
+    const stat = fs.statSync(cleanPath);
+    if (!stat.isDirectory()) {
+      throw new Error(`Указанный путь не является папкой: ${cleanPath}`);
+    }
+
+    const library = db.prepare('SELECT * FROM libraries WHERE id = ?').get(libraryId) as Library | undefined;
+    if (!library) throw new Error('Библиотека не найдена');
+
+    // Save path in library if not set
+    if (!library.path) {
+      db.prepare('UPDATE libraries SET path = ? WHERE id = ?').run(cleanPath, libraryId);
+      library.path = cleanPath;
+    }
+
+    if (library.type === 'SHOWS') {
+      const entries = fs.readdirSync(cleanPath, { withFileTypes: true });
+      const subdirs = entries.filter(e => e.isDirectory());
+      const videoFiles = entries.filter(e => e.isFile() && VIDEO_EXTENSIONS.has(path.extname(e.name).toLowerCase()));
+
+      let totalEpisodes = 0;
+      const isSeasonDir = subdirs.some(d => d.name.match(/^(?:season|сезон|s)\s*\d+/i));
+
+      if (subdirs.length > 0 && !isSeasonDir && videoFiles.length === 0) {
+        // Multiple show directories
+        for (const sub of subdirs) {
+          try {
+            const subPath = path.join(cleanPath, sub.name);
+            const res = await this.addShowFolder(subPath, libraryId, sub.name);
+            totalEpisodes += res.episodesAdded;
+          } catch (e: any) {
+            console.warn(`[Scanner] Could not process show folder ${sub.name}:`, e.message);
+          }
+        }
+      } else {
+        // Direct show folder
+        const res = await this.addShowFolder(cleanPath, libraryId);
+        totalEpisodes += res.episodesAdded;
+      }
+
+      db.prepare('UPDATE libraries SET lastScannedAt = CURRENT_TIMESTAMP WHERE id = ?').run(libraryId);
+      return { itemsAdded: totalEpisodes, libraryName: library.name };
+    }
+
+    // For MOVIES and VIDEOS: collect all video files
+    const files = this.collectFiles(cleanPath);
+    if (files.length === 0) {
+      throw new Error(`В папке "${path.basename(cleanPath)}" не найдено ни одного видеофайла (.mkv, .mp4, .avi, .mov и др.)`);
+    }
+
     this.isScanning = true;
     this.currentProgress = {
       libraryName: library.name,
       scannedFiles: 0,
-      totalFiles: 0,
+      totalFiles: files.length,
       currentFile: '',
     };
 
+    let count = 0;
     try {
-      if (!fs.existsSync(library.path)) {
-        throw new Error(`Путь к папке не существует: ${library.path}`);
-      }
-
-      const files = this.collectFiles(library.path);
-      this.currentProgress.totalFiles = files.length;
-
       for (const filePath of files) {
         this.currentProgress.currentFile = path.basename(filePath);
-        await this.processFile(filePath, library);
+        await this.processFile(
+          filePath,
+          library,
+          undefined,
+          library.type === 'VIDEOS' ? 'VIDEO' : 'MOVIE'
+        );
+        count++;
         this.currentProgress.scannedFiles++;
       }
-
       db.prepare('UPDATE libraries SET lastScannedAt = CURRENT_TIMESTAMP WHERE id = ?').run(libraryId);
     } finally {
       this.isScanning = false;
     }
-  }
 
-  public async scanAll(): Promise<void> {
-    const libraries = db.prepare('SELECT id FROM libraries').all() as { id: string }[];
-    for (const lib of libraries) {
-      await this.scanLibrary(lib.id);
-    }
+    return { itemsAdded: count, libraryName: library.name };
   }
 
   public async addSingleFile(
     filePath: string,
     libraryId?: string,
     overrideTitle?: string,
-    forceType?: 'MOVIE' | 'EPISODE'
+    forceType?: 'MOVIE' | 'EPISODE' | 'VIDEO'
   ): Promise<any> {
     const cleanPath = path.normalize(filePath).trim();
     if (!fs.existsSync(cleanPath)) {
@@ -153,26 +227,25 @@ class ScannerService {
     }
 
     if (!library) {
-      // Find existing library of appropriate type or create one for the parent folder
+      // Find existing library of appropriate type
       const isShow = forceType === 'EPISODE' || cleanPath.match(/[sS]\d{1,2}[eE]\d{1,2}/i);
-      const targetType = isShow ? 'SHOWS' : 'MOVIES';
+      const isVideo = forceType === 'VIDEO';
+      const targetType = isVideo ? 'VIDEOS' : (isShow ? 'SHOWS' : 'MOVIES');
 
       library = db.prepare('SELECT * FROM libraries WHERE type = ? ORDER BY createdAt ASC').get(targetType) as Library | undefined;
 
       if (!library) {
-        // Create an automatic library for parent directory
-        const parentDir = path.dirname(cleanPath);
         const newLibId = uuidv4();
+        const defaultName = targetType === 'MOVIES' ? 'Фильмы' : (targetType === 'SHOWS' ? 'Сериалы' : 'Видео');
         db.prepare(`
-          INSERT INTO libraries (id, name, type, path)
-          VALUES (?, ?, ?, ?)
-        `).run(newLibId, targetType === 'MOVIES' ? 'Фильмы' : 'Сериалы', targetType, parentDir);
+          INSERT INTO libraries (id, name, type)
+          VALUES (?, ?, ?)
+        `).run(newLibId, defaultName, targetType);
 
         library = {
           id: newLibId,
-          name: targetType === 'MOVIES' ? 'Фильмы' : 'Сериалы',
+          name: defaultName,
           type: targetType,
-          path: parentDir,
           createdAt: new Date().toISOString(),
         };
       }
@@ -398,7 +471,7 @@ class ScannerService {
     filePath: string,
     library: Library,
     overrideTitle?: string,
-    forceType?: 'MOVIE' | 'EPISODE'
+    forceType?: 'MOVIE' | 'EPISODE' | 'VIDEO'
   ): Promise<void> {
     const stat = fs.statSync(filePath);
     const existing = db.prepare('SELECT id FROM media_items WHERE filePath = ?').get(filePath) as { id: string } | undefined;
@@ -411,13 +484,21 @@ class ScannerService {
       parsed.isEpisode = forceType === 'EPISODE';
     }
 
+    // Determine target media type
+    let finalType: 'MOVIE' | 'EPISODE' | 'VIDEO' = 'MOVIE';
+    if (forceType === 'VIDEO' || library.type === 'VIDEOS') {
+      finalType = 'VIDEO';
+    } else if (forceType === 'EPISODE' || library.type === 'SHOWS' || parsed.isEpisode) {
+      finalType = 'EPISODE';
+    }
+
     // Probe media with ffprobe
     const probeData = await this.probeFile(filePath);
 
     let metadata: any = null;
-    if ((library.type === 'MOVIES' || forceType === 'MOVIE') && !parsed.isEpisode) {
+    if (finalType === 'MOVIE') {
       metadata = await tmdbService.searchMovie(parsed.title, parsed.year);
-    } else if (library.type === 'SHOWS' || parsed.isEpisode || forceType === 'EPISODE') {
+    } else if (finalType === 'EPISODE') {
       metadata = await tmdbService.searchShow(parsed.showTitle || parsed.title, parsed.year);
     }
 
@@ -440,7 +521,7 @@ class ScannerService {
     if (existing) {
       db.prepare(`
         UPDATE media_items SET
-          title = ?, originalTitle = ?, year = ?, overview = ?,
+          title = ?, originalTitle = ?, type = ?, year = ?, overview = ?,
           posterPath = ?, backdropPath = ?, rating = ?, genres = ?,
           durationSeconds = ?, fileSize = ?, resolution = ?,
           videoCodec = ?, audioCodec = ?, showTitle = ?,
@@ -448,7 +529,7 @@ class ScannerService {
           updatedAt = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(
-        title, metadata?.originalTitle || '', year || null, overview,
+        title, metadata?.originalTitle || '', finalType, year || null, overview,
         posterPath, backdropPath, rating, genres,
         durationSeconds, stat.size, resolution,
         videoCodec, audioCodec, parsed.showTitle || null,
@@ -468,7 +549,7 @@ class ScannerService {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         mediaId, library.id, title, metadata?.originalTitle || '',
-        parsed.isEpisode ? 'EPISODE' : 'MOVIE', year || null, overview,
+        finalType, year || null, overview,
         posterPath, backdropPath, rating, genres, durationSeconds,
         filePath, stat.size, resolution, videoCodec, audioCodec,
         parsed.showTitle || null, parsed.seasonNumber || null, parsed.episodeNumber || null, streamDetails

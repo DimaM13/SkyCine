@@ -34,8 +34,8 @@ export interface FriendRequest {
 export interface Library {
   id: string;
   name: string;
-  type: 'MOVIES' | 'SHOWS';
-  path: string;
+  type: 'MOVIES' | 'SHOWS' | 'VIDEOS';
+  path?: string;
   lastScannedAt?: string;
   itemCount?: number;
 }
@@ -58,7 +58,7 @@ export interface MediaItem {
   libraryName?: string;
   title: string;
   originalTitle?: string;
-  type: 'MOVIE' | 'EPISODE';
+  type: 'MOVIE' | 'EPISODE' | 'VIDEO';
   year?: number;
   overview?: string;
   posterPath?: string;

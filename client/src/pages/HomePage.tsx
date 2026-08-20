@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Film, Tv, Radio, Clock, Play, Users, Star, Layers, Sparkles, Clapperboard
+  Film, Tv, Video, Radio, Clock, Play, Users, Star, Layers, Sparkles, Clapperboard
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { HeroBanner } from '../components/library/HeroBanner';
@@ -54,7 +54,7 @@ export const HomePage: React.FC = () => {
             const res = await apiClient.get('/media/movies', { params: { libraryId: lib.id } });
             const moviesList: MediaItem[] = res.data.movies || [];
             sections.push({ library: lib, items: moviesList });
-            if (!firstMovie && moviesList.length > 0) {
+            if (!firstMovie && moviesList.length > 0 && lib.type === 'MOVIES') {
               firstMovie = moviesList[0];
             }
           } catch {
@@ -106,7 +106,14 @@ export const HomePage: React.FC = () => {
     if (name.includes('аниме') || name.includes('anime')) return Sparkles;
     if (name.includes('мульт') || name.includes('cartoon') || name.includes('детск')) return Clapperboard;
     if (lib.type === 'SHOWS' || name.includes('сериал') || name.includes('show')) return Tv;
+    if (lib.type === 'VIDEOS' || name.includes('видео') || name.includes('video') || name.includes('клип') || name.includes('ролик')) return Video;
     return Film;
+  };
+
+  const formatDuration = (sec: number) => {
+    if (!sec || isNaN(sec)) return '';
+    const m = Math.round(sec / 60);
+    return `${m} мин`;
   };
 
   return (
@@ -173,7 +180,7 @@ export const HomePage: React.FC = () => {
             </div>
             <button
               onClick={() => navigate('/rooms')}
-              className="text-xs text-cinema-gold hover:underline font-semibold"
+              className="text-xs text-cinema-gold hover:underline font-semibold cursor-pointer"
             >
               Все комнаты →
             </button>
@@ -224,13 +231,13 @@ export const HomePage: React.FC = () => {
           <Film className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
           <h3 className="text-base font-bold text-white mb-1">Медиатека пока пуста</h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">
-            Добавьте вашу первую папку с фильмами или сериалами в панели управления сервером
+            Создайте вашу первую библиотеку фильмов, сериалов или видео в панели управления сервером
           </p>
           <button
             onClick={() => navigate('/admin')}
-            className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold"
+            className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 cursor-pointer"
           >
-            Перейти в настройки сервера
+            Перейти в управление медиатекой
           </button>
         </div>
       ) : (
@@ -251,7 +258,7 @@ export const HomePage: React.FC = () => {
                   </div>
                   <button
                     onClick={() => navigate(`/library/${library.id}`)}
-                    className="text-xs text-cinema-gold hover:underline font-semibold"
+                    className="text-xs text-cinema-gold hover:underline font-semibold cursor-pointer"
                   >
                     Смотреть все ({items.length}) →
                   </button>
@@ -306,6 +313,69 @@ export const HomePage: React.FC = () => {
             );
           }
 
+          if (library.type === 'VIDEOS') {
+            return (
+              <section key={library.id} className="flex flex-col gap-5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Icon className="w-5 h-5 text-cinema-gold" />
+                    <h2 className="text-lg font-bold text-white tracking-wide">{library.name}</h2>
+                    <span className="text-[10px] font-mono font-bold text-cinema-gold bg-cinema-gold/10 px-2 py-0.5 rounded-md border border-cinema-gold/20">
+                      {items.length} {items.length === 1 ? 'видео' : 'видео'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => navigate(`/library/${library.id}`)}
+                    className="text-xs text-cinema-gold hover:underline font-semibold cursor-pointer"
+                  >
+                    Смотреть все ({items.length}) →
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  {items.slice(0, 4).map((vid: MediaItem) => {
+                    const thumbUrl = vid.stillPath || vid.posterPath || `/api/media/item/${vid.id}/thumbnail`;
+                    return (
+                      <div
+                        key={vid.id}
+                        onClick={() => handleOpenDetails(vid)}
+                        className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5 cursor-pointer select-none"
+                      >
+                        <div className="relative aspect-video w-full overflow-hidden bg-cinema-950">
+                          <img
+                            src={thumbUrl}
+                            alt={vid.title}
+                            loading="lazy"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).src = `/api/media/item/${vid.id}/thumbnail`;
+                            }}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          />
+                          <div className="absolute top-2.5 right-2.5">
+                            {vid.durationSeconds > 0 && (
+                              <span className="text-[10px] font-bold text-cinema-gold bg-black/80 backdrop-blur-md px-2 py-0.5 rounded-lg border border-white/10 font-mono">
+                                {formatDuration(vid.durationSeconds)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="p-3 flex flex-col justify-between flex-1">
+                          <h4 className="text-xs font-bold text-slate-200 group-hover:text-cinema-gold transition-colors line-clamp-1">
+                            {vid.title}
+                          </h4>
+                          <span className="text-[11px] text-slate-400 mt-1 block">
+                            {vid.year || 'Видео'} {vid.resolution ? `• ${vid.resolution}` : ''}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          }
+
           // MOVIES library
           return (
             <section key={library.id} className="flex flex-col gap-5">
@@ -319,7 +389,7 @@ export const HomePage: React.FC = () => {
                 </div>
                 <button
                   onClick={() => navigate(`/library/${library.id}`)}
-                  className="text-xs text-cinema-gold hover:underline font-semibold"
+                  className="text-xs text-cinema-gold hover:underline font-semibold cursor-pointer"
                 >
                   Смотреть все ({items.length}) →
                 </button>
