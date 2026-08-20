@@ -121,17 +121,17 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     }, 800);
   }, []);
 
-  // Helper to switch to server_stream engine and broadcast ONLY if host or explicitly triggered
+  // Helper to switch to server_stream engine and broadcast to all room members
   const switchToServerStream = useCallback(() => {
     if (!currentYtId) return;
     setEngine('server_stream');
     setFallbackToast(true);
     setTimeout(() => setFallbackToast(false), 5000);
 
-    if (isHost && socket && room?.id) {
+    if (socket && room?.id) {
       socket.emit('room:set_youtube_engine', { roomId: room.id, engine: 'server_stream' });
     }
-  }, [currentYtId, isHost, socket, room?.id]);
+  }, [currentYtId, socket, room?.id]);
 
   // Synchronize engine switch from socket
   useEffect(() => {
@@ -148,6 +148,15 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       socket.off('room:youtube_engine', handleEngine);
     };
   }, [socket]);
+
+  // Force video element to load when streamSrc is ready on Safari / iOS
+  useEffect(() => {
+    if (videoStreamRef.current && streamSrc) {
+      try {
+        videoStreamRef.current.load();
+      } catch (e) {}
+    }
+  }, [streamSrc]);
 
   // Poll 1080p download status ONLY when in server_stream mode with cache busting
   useEffect(() => {
@@ -374,7 +383,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           },
           onError: (event: any) => {
             // ONLY 101 or 150 = Age restricted / Embed not allowed by owner
-            // (Do NOT trigger fallback on code 2, 5, or 100 which occur normally during mobile lifecycle)
             if (event.data === 101 || event.data === 150) {
               switchToServerStream();
             }
@@ -462,7 +470,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        const isReady = (video.readyState >= 1) || (bufSec > 0) || !video.paused;
+        // Once video file is ready on server, it is 100% ready to play
+        const isReady = isPlayerReady || (video.readyState >= 1) || (bufSec > 0) || !video.paused;
         const bufferPercent = isReady ? 100 : Math.min(99, Math.round((bufSec / dur) * 100));
         onBufferStatusChange(isReady, bufSec, cur, bufferPercent);
         return;
