@@ -499,6 +499,11 @@ class SocketService {
         });
       });
 
+      // YouTube Engine Switch Synchronization (18+ Fallback)
+      socket.on('room:set_youtube_engine', (data: { roomId: string; engine: 'iframe' | 'server_stream' }) => {
+        io.to(data.roomId).emit('room:youtube_engine', { engine: data.engine });
+      });
+
       // 4. Friend Invitations
       socket.on('friend:invite_to_room', (data: {
         targetUserId: string;
