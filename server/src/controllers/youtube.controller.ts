@@ -3,12 +3,14 @@ import { spawn, execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { promisify } from 'util';
+import axios from 'axios';
 
 const execFileAsync = promisify(execFile);
 
 interface CachedYtStream {
   videoUrl: string;
   audioUrl?: string;
+  isCombined: boolean;
   title: string;
   duration: number;
   expiresAt: number;
@@ -53,12 +55,13 @@ export class YouTubeController {
     const cookiesPath = YouTubeController.getCookiesPath();
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
+    // Prefer progressive combined MP4 (format 18 / best[acodec!=none]) for 100% native iOS Safari Range support
     const args = [
       '--dump-single-json',
       '--no-playlist',
       '--js-runtimes', 'node',
       '--remote-components', 'ejs:github',
-      '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best/18',
+      '--format', '18/best[ext=mp4][acodec!=none]/best[acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
       ...(cookiesPath ? ['--cookies', cookiesPath] : []),
       videoUrl,
     ];
@@ -72,15 +75,19 @@ export class YouTubeController {
 
       let vUrl = '';
       let aUrl = '';
+      let isCombined = false;
 
-      if (info.requested_formats && info.requested_formats.length >= 2) {
+      if (info.url && info.acodec && info.acodec !== 'none' && info.vcodec && info.vcodec !== 'none') {
+        // Combined stream with both audio and video
+        vUrl = info.url;
+        isCombined = true;
+      } else if (info.requested_formats && info.requested_formats.length >= 2) {
         vUrl = info.requested_formats[0].url;
         aUrl = info.requested_formats[1].url;
+        isCombined = false;
       } else if (info.url) {
         vUrl = info.url;
-      } else if (info.formats && info.formats.length > 0) {
-        const best = info.formats[info.formats.length - 1];
-        vUrl = best.url;
+        isCombined = true;
       }
 
       if (!vUrl) {
@@ -90,6 +97,7 @@ export class YouTubeController {
       const streamData: CachedYtStream = {
         videoUrl: vUrl,
         audioUrl: aUrl || undefined,
+        isCombined,
         title,
         duration,
         expiresAt: Date.now() + 3.5 * 60 * 60 * 1000, // 3.5 hours
@@ -120,7 +128,7 @@ export class YouTubeController {
         videoId,
         title: info.title,
         duration: info.duration,
-        hasAudioStream: !!info.audioUrl,
+        isCombined: info.isCombined,
       });
     } catch (err: any) {
       res.status(500).json({
@@ -132,24 +140,69 @@ export class YouTubeController {
 
   /**
    * GET /api/stream/youtube/:videoId
-   * Streams video + audio remuxed on-the-fly via ffmpeg as fragmented MP4
+   * Streams progressive MP4 with full HTTP 206 Range request support for iOS/iPadOS Safari & Chrome
    */
   public static async stream(req: Request, res: Response): Promise<void> {
     try {
       const videoId = req.params.videoId as string;
-      const startSec = Math.max(0, parseFloat(req.query.start as string) || 0);
-
       if (!videoId) {
         res.status(400).send('videoId is required');
         return;
       }
 
       const streamInfo = await YouTubeController.extractStreamUrls(videoId);
-      const { videoUrl, audioUrl } = streamInfo;
+      const { videoUrl, audioUrl, isCombined } = streamInfo;
 
+      // 1. If combined stream, proxy directly with native HTTP Range support (perfect for iOS/iPadOS Safari)
+      if (isCombined || !audioUrl) {
+        const range = req.headers.range;
+
+        const proxyHeaders: Record<string, string> = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+        };
+        if (range) {
+          proxyHeaders['Range'] = range;
+        }
+
+        const upstream = await axios({
+          method: 'get',
+          url: videoUrl,
+          headers: proxyHeaders,
+          responseType: 'stream',
+          validateStatus: () => true,
+        });
+
+        const responseHeaders: Record<string, any> = {
+          'Content-Type': upstream.headers['content-type'] || 'video/mp4',
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+        };
+
+        if (upstream.headers['content-length']) {
+          responseHeaders['Content-Length'] = upstream.headers['content-length'];
+        }
+        if (upstream.headers['content-range']) {
+          responseHeaders['Content-Range'] = upstream.headers['content-range'];
+        }
+
+        res.writeHead(upstream.status, responseHeaders);
+        upstream.data.pipe(res);
+
+        const cleanup = () => {
+          try {
+            upstream.data?.destroy?.();
+          } catch (e) {}
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
+        return;
+      }
+
+      // 2. Separate video + audio streams: remux on-the-fly via ffmpeg
+      const startSec = Math.max(0, parseFloat(req.query.start as string) || 0);
       const ffmpegArgs: string[] = [];
 
-      // Video input with seeking
       if (startSec > 0) {
         ffmpegArgs.push('-ss', startSec.toString());
       }
@@ -161,7 +214,6 @@ export class YouTubeController {
         '-i', videoUrl
       );
 
-      // Audio input with seeking (if separate)
       if (audioUrl) {
         if (startSec > 0) {
           ffmpegArgs.push('-ss', startSec.toString());
@@ -175,7 +227,6 @@ export class YouTubeController {
         );
       }
 
-      // Fast remux: copy video codec, encode audio to aac (or copy if compatible)
       ffmpegArgs.push(
         '-c:v', 'copy',
         '-c:a', 'aac',
@@ -184,8 +235,6 @@ export class YouTubeController {
         '-f', 'mp4',
         'pipe:1'
       );
-
-      console.log(`[YouTubeController] Starting ffmpeg stream for ${videoId} at ${startSec}s`);
 
       res.writeHead(200, {
         'Content-Type': 'video/mp4',
@@ -196,15 +245,7 @@ export class YouTubeController {
       });
 
       const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-
       ffmpeg.stdout.pipe(res);
-
-      ffmpeg.stderr.on('data', (data) => {
-        const msg = data.toString();
-        if (msg.includes('Error') || msg.includes('fatal')) {
-          console.warn(`[YouTube ffmpeg] ${msg.trim()}`);
-        }
-      });
 
       const cleanup = () => {
         try {
@@ -214,7 +255,6 @@ export class YouTubeController {
 
       req.on('close', cleanup);
       res.on('close', cleanup);
-      res.on('error', cleanup);
     } catch (err: any) {
       console.error(`[YouTubeController] Streaming error:`, err.message);
       if (!res.headersSent) {
