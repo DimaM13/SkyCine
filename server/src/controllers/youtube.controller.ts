@@ -56,7 +56,9 @@ export class YouTubeController {
     const args = [
       '--dump-single-json',
       '--no-playlist',
-      '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+      '--js-runtimes', 'node',
+      '--remote-components', 'ejs:github',
+      '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best/18',
       ...(cookiesPath ? ['--cookies', cookiesPath] : []),
       videoUrl,
     ];

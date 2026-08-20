@@ -52,6 +52,10 @@ router.get('/media/:id/match-search', requireAdmin, MediaController.searchMatch)
 router.post('/media/:id/match-apply', requireAdmin, MediaController.applyMatch);
 router.delete('/media/:id', requireAdmin, MediaController.deleteMedia);
 
+// --- YouTube Direct Stream Routes (yt-dlp fallback) ---
+router.get('/stream/youtube/info/:videoId', YouTubeController.getInfo);
+router.get('/stream/youtube/:videoId', YouTubeController.stream);
+
 // --- Stream Routes ---
 router.get('/stream/:id/info', authenticateToken, StreamController.getStreamInfo);
 router.get('/stream/:id/direct', authenticateToken, StreamController.directStream);
@@ -64,10 +68,6 @@ router.get('/stream/hls/session/:sessionId/:segmentName', StreamController.getHl
 router.get('/stream/hls/:sessionId/:segmentName', StreamController.getHlsSessionSegment);
 router.get('/stream/:mediaId/:segmentName', StreamController.getHlsSessionSegment);
 router.get('/stream/:id/subtitle/:trackIndex', StreamController.getSubtitle);
-
-// --- YouTube Direct Stream Routes (yt-dlp fallback) ---
-router.get('/stream/youtube/info/:videoId', YouTubeController.getInfo);
-router.get('/stream/youtube/:videoId', YouTubeController.stream);
 
 // --- Rooms (Watch Together) Routes ---
 router.get('/rooms', authenticateToken, RoomsController.getRooms);
