@@ -83,6 +83,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const videoStreamRef = useRef<HTMLVideoElement>(null);
   const targetSeekPosRef = useRef<number>(room.currentPosition || 0);
   const isSeekingRef = useRef<boolean>(false);
+  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Playback engine: 'iframe' or 'server_stream'
   const [engine, setEngine] = useState<'iframe' | 'server_stream'>('iframe');
@@ -111,6 +112,14 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const [videoTitle, setVideoTitle] = useState<string>(room.youtubeTitle || room.title);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const markSeeking = useCallback(() => {
+    isSeekingRef.current = true;
+    if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
+    seekTimeoutRef.current = setTimeout(() => {
+      isSeekingRef.current = false;
+    }, 1200);
+  }, []);
 
   // Helper to switch to server_stream engine and broadcast to all room members
   const switchToServerStream = useCallback(() => {
@@ -193,7 +202,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
       targetSeekPosRef.current = pos;
-      isSeekingRef.current = true;
+      markSeeking();
 
       if (engine === 'server_stream') {
         if (videoStreamRef.current) {
@@ -281,6 +290,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     isPlaying,
     currentTime,
     disableCaptions,
+    markSeeking,
     onAttachSeekHandler,
     onAttachPlayHandler,
     onAttachPauseHandler,
@@ -327,6 +337,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         events: {
           onReady: (event: any) => {
             setIsPlayerReady(true);
+            isSeekingRef.current = false;
             const d = event.target.getDuration();
             if (d && d > 0) setDuration(d);
 
@@ -348,9 +359,13 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           onStateChange: (event: any) => {
             disableCaptions(event.target);
 
+            // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
+            if (event.data === 1 || event.data === 2 || event.data === 0 || event.data === 5) {
+              isSeekingRef.current = false;
+            }
+
             if (event.data === 1) {
               setIsPlaying(true);
-              isSeekingRef.current = false;
               const d = event.target.getDuration();
               if (d && d > 0) setDuration(d);
             } else if (event.data === 2 || event.data === 0) {
@@ -399,6 +414,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setVideoTitle(data.youtubeTitle || data.title);
         setCurrentTime(0);
         targetSeekPosRef.current = 0;
+        isSeekingRef.current = false;
         setIsPlaying(false);
         setEngine('iframe');
         setDownloadStatus('idle');
@@ -460,17 +476,15 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        // Check if seek is pending
-        if (isSeekingRef.current) {
-          if (Math.abs(cur - targetSeekPosRef.current) < 1.2 && ytState !== 3 && ytState !== -1) {
-            isSeekingRef.current = false;
-          }
+        // Check if seek has settled
+        if (isSeekingRef.current && (ytState === 1 || ytState === 2 || ytState === 5)) {
+          isSeekingRef.current = false;
         }
 
         const isBufferingYT = ytState === 3 || ytState === -1 || isSeekingRef.current;
         const isReady = isPlayerReady && !isBufferingYT;
 
-        const bufferPercent = isReady ? 100 : isSeekingRef.current ? 45 : Math.max(10, Math.min(99, Math.round(fraction * 100)));
+        const bufferPercent = isReady ? 100 : isSeekingRef.current ? 75 : Math.max(10, Math.min(99, Math.round(fraction * 100)));
         onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
     }, 350);
@@ -504,7 +518,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const handleSeek = (seconds: number) => {
     const target = Math.max(0, Math.min(duration, seconds));
     targetSeekPosRef.current = target;
-    isSeekingRef.current = true;
+    markSeeking();
     setCurrentTime(target);
 
     if (engine === 'server_stream') {
