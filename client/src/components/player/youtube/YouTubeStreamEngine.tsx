@@ -198,6 +198,9 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
             if (roomState === 'PLAYING') {
               videoRef.current?.play().catch(() => {});
               onPlayingChange(true);
+            } else {
+              videoRef.current?.pause();
+              onPlayingChange(false);
             }
           }}
           onLoadedData={() => {

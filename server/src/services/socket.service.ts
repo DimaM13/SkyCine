@@ -243,10 +243,10 @@ class SocketService {
               initiatedBy: user?.username || 'Host',
             });
 
-            // Fallback timer (7 seconds maximum)
+            // Fallback timer (2.5 seconds maximum to prevent hanging)
             const fallbackTimer = setTimeout(() => {
-              this.startBarrierPlayback(roomId, position, playbackRate, user?.username || 'Host', user?.userId || '');
-            }, 7000);
+              this.startBarrierPlayback(roomId, position, playbackRate, user?.username || 'Участники', user?.userId || '');
+            }, 2500);
 
             this.pendingBarriers.set(roomId, {
               targetPosition: position,

@@ -233,11 +233,16 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
             }
 
             if (event.data === 1) {
-              onPlayingChange(true);
-              const d = event.target.getDuration();
-              if (d && d > 0) {
-                durationRef.current = d;
-                onTimeUpdate(event.target.getCurrentTime() || 0, d);
+              if (roomState !== 'PLAYING') {
+                try { event.target.pauseVideo(); } catch (e) {}
+                onPlayingChange(false);
+              } else {
+                onPlayingChange(true);
+                const d = event.target.getDuration();
+                if (d && d > 0) {
+                  durationRef.current = d;
+                  onTimeUpdate(event.target.getCurrentTime() || 0, d);
+                }
               }
             } else if (event.data === 2 || event.data === 0) {
               onPlayingChange(false);

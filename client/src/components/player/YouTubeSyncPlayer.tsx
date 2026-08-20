@@ -158,9 +158,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     if (isPlaying) {
       onPauseRequest();
     } else {
-      if (!allMembersReady && members.length > 1) {
-        return;
-      }
       onPlayRequest();
     }
     resetControlsTimeout();

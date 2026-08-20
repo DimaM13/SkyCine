@@ -475,12 +475,8 @@ export function useSyncPlayer({
   const sendPlay = useCallback(() => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    const allReady = members.length <= 1 || members.every((m) => m.isReady);
-    if (!allReady) {
-      return; // Block play request until everyone is ready
-    }
     const cur = getRealPos();
-    const scheduledStart = getSyncedServerTime() + 450;
+    const scheduledStart = getSyncedServerTime() + 350;
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PLAY',
@@ -488,7 +484,7 @@ export function useSyncPlayer({
       playbackRate: playbackRateRef.current,
       timestamp: scheduledStart,
     });
-  }, [socket, room?.id, members, getRealPos, getSyncedServerTime]);
+  }, [socket, room?.id, getRealPos, getSyncedServerTime]);
 
   const sendPause = useCallback(() => {
     if (!socket || !room?.id) return;
