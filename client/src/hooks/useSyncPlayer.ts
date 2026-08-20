@@ -338,6 +338,20 @@ export function useSyncPlayer({
       ]);
     });
 
+    socket.on('room:youtube_changed', () => {
+      roomStateRef.current = 'PAUSED';
+      currentPosRef.current = 0;
+      serverTimestampRef.current = Date.now();
+      setRoomState('PAUSED');
+      setBarrierTargetPosition(0);
+      setIsBufferingBarrier(false);
+      executePause();
+      executeSeek(0, false);
+      smoothedDiffRef.current = 0;
+      setSyncDiffMs(0);
+      setSyncQuality('perfect');
+    });
+
     return () => {
       if (scheduledPlayTimer.current) clearTimeout(scheduledPlayTimer.current);
       socket.emit('room:leave', { roomId: room.id });
@@ -353,6 +367,7 @@ export function useSyncPlayer({
       socket.off('room:chat_message');
       socket.off('room:reaction');
       socket.off('room:system_message');
+      socket.off('room:youtube_changed');
     };
   }, [socket, room?.id, user?.id, executePlay, executePause, executeSeek, getRealPaused, getRealPos, getSyncedServerTime]);
 

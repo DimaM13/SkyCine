@@ -249,8 +249,9 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
             }
           },
           onError: (event: any) => {
-            // ONLY code 101 or 150 = Age restricted / Embed blocked by content owner
-            if (event.data === 101 || event.data === 150) {
+            // Code 100/101/150/153/2/5: Embed blocked / age restricted / unavailable in iframe
+            if (event.data === 101 || event.data === 150 || event.data === 100 || event.data === 153 || event.data === 2 || event.data === 5) {
+              console.warn(`[YouTube IFrame] Embed error code ${event.data}, falling back to server 1080p stream`);
               onAgeRestrictedFallback();
             }
           },
