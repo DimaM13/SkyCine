@@ -5,13 +5,25 @@ import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState } from '../t
 
 interface UseSyncPlayerProps {
   room: Room | null;
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRef?: React.RefObject<HTMLVideoElement | null>;
   onTimeUpdate?: (currentTime: number) => void;
   onSeekTo?: (pos: number, shouldPlay?: boolean) => void;
+  onPlay?: () => void;
+  onPause?: () => void;
   getCurrentTime?: () => number;
+  getIsPaused?: () => boolean;
 }
 
-export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurrentTime }: UseSyncPlayerProps) {
+export function useSyncPlayer({
+  room,
+  videoRef,
+  onTimeUpdate,
+  onSeekTo,
+  onPlay,
+  onPause,
+  getCurrentTime,
+  getIsPaused,
+}: UseSyncPlayerProps) {
   const { socket, isConnected, getSyncedServerTime } = useSocket();
   const { user } = useAuth();
 
@@ -47,22 +59,60 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
     onSeekToRef.current = onSeekTo;
   }, [onSeekTo]);
 
+  const onPlayRef = useRef(onPlay);
+  useEffect(() => {
+    onPlayRef.current = onPlay;
+  }, [onPlay]);
+
+  const onPauseRef = useRef(onPause);
+  useEffect(() => {
+    onPauseRef.current = onPause;
+  }, [onPause]);
+
   const getCurrentTimeRef = useRef(getCurrentTime);
   useEffect(() => {
     getCurrentTimeRef.current = getCurrentTime;
   }, [getCurrentTime]);
 
+  const getIsPausedRef = useRef(getIsPaused);
+  useEffect(() => {
+    getIsPausedRef.current = getIsPaused;
+  }, [getIsPaused]);
+
   const syncToHostRef = useRef<(() => void) | null>(null);
 
   const getRealPos = useCallback(() => {
     if (getCurrentTimeRef.current) return getCurrentTimeRef.current();
-    return videoRef.current?.currentTime || 0;
+    return videoRef?.current?.currentTime || 0;
+  }, [videoRef]);
+
+  const getRealPaused = useCallback(() => {
+    if (getIsPausedRef.current) return getIsPausedRef.current();
+    if (videoRef?.current) return videoRef.current.paused;
+    return roomStateRef.current !== 'PLAYING';
+  }, [videoRef]);
+
+  const executePlay = useCallback(() => {
+    if (onPlayRef.current) {
+      onPlayRef.current();
+    } else if (videoRef?.current) {
+      videoRef.current.playbackRate = playbackRateRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [videoRef]);
+
+  const executePause = useCallback(() => {
+    if (onPauseRef.current) {
+      onPauseRef.current();
+    } else if (videoRef?.current) {
+      videoRef.current.pause();
+    }
   }, [videoRef]);
 
   const executeSeek = useCallback((pos: number, shouldPlay?: boolean) => {
     if (onSeekToRef.current) {
       onSeekToRef.current(pos, shouldPlay);
-    } else if (videoRef.current) {
+    } else if (videoRef?.current) {
       videoRef.current.currentTime = pos;
       if (shouldPlay) {
         videoRef.current.play().catch(() => {});
@@ -109,19 +159,16 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
           hasInitializedRef.current = true;
           currentPosRef.current = livePos;
 
-          // Align video element on initial join
-          if (videoRef.current) {
-            isInternalAction.current = true;
-            const video = videoRef.current;
-            const shouldPlay = data.room.state === 'PLAYING';
-            executeSeek(livePos, shouldPlay);
-            if (shouldPlay) {
-              video.play().catch(() => {});
-            } else {
-              video.pause();
-            }
-            setTimeout(() => { isInternalAction.current = false; }, 100);
+          // Align player on initial join
+          isInternalAction.current = true;
+          const shouldPlay = data.room.state === 'PLAYING';
+          executeSeek(livePos, shouldPlay);
+          if (shouldPlay) {
+            executePlay();
+          } else {
+            executePause();
           }
+          setTimeout(() => { isInternalAction.current = false; }, 200);
 
           // Ask host directly for accurate live playback time
           if (userRef.current?.id !== data.room.hostUserId) {
@@ -147,10 +194,10 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
         const shouldPlay = roomStateRef.current === 'PLAYING';
         isInternalAction.current = true;
         executeSeek(data.position, shouldPlay);
-        if (shouldPlay && videoRef.current?.paused) {
-          videoRef.current.play().catch(() => {});
+        if (shouldPlay && getRealPaused()) {
+          executePlay();
         }
-        setTimeout(() => { isInternalAction.current = false; }, 100);
+        setTimeout(() => { isInternalAction.current = false; }, 150);
         smoothedDiffRef.current = 0;
         setSyncDiffMs(0);
         setSyncQuality('perfect');
@@ -180,35 +227,31 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
       playbackRateRef.current = data.playbackRate;
       setRoomState(data.state);
 
-      if (!videoRef.current) return;
-      const video = videoRef.current;
-
       if (scheduledPlayTimer.current) {
         clearTimeout(scheduledPlayTimer.current);
         scheduledPlayTimer.current = null;
       }
 
       const shouldPlay = data.state === 'PLAYING';
-
       isInternalAction.current = true;
+
       if (data.action === 'SEEK') {
         executeSeek(data.currentPosition, shouldPlay);
       } else if (data.action === 'PAUSE') {
-        video.pause();
+        executePause();
         const cur = getRealPos();
         if (Math.abs(cur - data.currentPosition) > 0.5) {
-          executeSeek(data.currentPosition);
+          executeSeek(data.currentPosition, false);
         }
       } else if (data.action === 'PLAY') {
         const cur = getRealPos();
         if (Math.abs(cur - data.currentPosition) > 1.0) {
           executeSeek(data.currentPosition, true);
         } else {
-          video.playbackRate = data.playbackRate || 1.0;
-          video.play().catch(() => {});
+          executePlay();
         }
       }
-      setTimeout(() => { isInternalAction.current = false; }, 100);
+      setTimeout(() => { isInternalAction.current = false; }, 200);
     });
 
     socket.on('room:time_anchor', (data: { currentPosition: number; serverTimestamp: number }) => {
@@ -234,25 +277,17 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
 
         if (delay > 0) {
           scheduledPlayTimer.current = setTimeout(() => {
-            if (videoRef.current) {
-              isInternalAction.current = true;
-              videoRef.current.playbackRate = playbackRateRef.current;
-              videoRef.current.play().catch(() => {});
-              setTimeout(() => { isInternalAction.current = false; }, 100);
-            }
+            isInternalAction.current = true;
+            executePlay();
+            setTimeout(() => { isInternalAction.current = false; }, 150);
           }, delay);
         } else {
-          if (videoRef.current) {
-            videoRef.current.playbackRate = playbackRateRef.current;
-            videoRef.current.play().catch(() => {});
-          }
+          executePlay();
         }
       } else {
-        if (videoRef.current) {
-          videoRef.current.pause();
-        }
+        executePause();
       }
-      setTimeout(() => { isInternalAction.current = false; }, 100);
+      setTimeout(() => { isInternalAction.current = false; }, 200);
 
       smoothedDiffRef.current = 0;
       setSyncDiffMs(0);
@@ -264,10 +299,6 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
           syncToHostRef.current?.();
         }, 2000);
       }
-    });
-
-    socket.on('room:members_status', (membersList: RoomMember[]) => {
-      setMembers(membersList || []);
     });
 
     socket.on('room:chat_message', (msg: RoomChatMessage) => {
@@ -309,15 +340,14 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
       socket.off('room:reaction');
       socket.off('room:system_message');
     };
-  }, [socket, room?.id, user?.id]);
+  }, [socket, room?.id, user?.id, executePlay, executePause, executeSeek, getRealPaused, getRealPos, getSyncedServerTime]);
 
   // Host Continuous Heartbeat Anchor (broadcast real position every 2 seconds while playing)
   useEffect(() => {
     if (!isHost || !socket || !room?.id || roomState !== 'PLAYING') return;
 
     const interval = setInterval(() => {
-      const video = videoRef.current;
-      if (video && !video.paused && !video.seeking) {
+      if (!getRealPaused()) {
         const cur = getRealPos();
         socket.emit('room:host_heartbeat', {
           roomId: room.id,
@@ -327,56 +357,58 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [isHost, socket, room?.id, roomState, videoRef, getRealPos]);
+  }, [isHost, socket, room?.id, roomState, getRealPaused, getRealPos]);
 
   const smoothedDiffRef = useRef<number>(0);
 
-  // Pure 1.0x Original Speed Tracking (Strictly 1.0x, zero speed changes)
+  // Pure Tracking / Drift calculation
   useEffect(() => {
     const interval = setInterval(() => {
-      if (!videoRef.current || roomStateRef.current !== 'PLAYING') {
+      if (roomStateRef.current !== 'PLAYING') {
         setSyncQuality('perfect');
         setSyncDiffMs(0);
         return;
       }
 
-      const video = videoRef.current;
-
-      // Ensure playbackRate is strictly normal (1.0x) as original
-      if (video.playbackRate !== playbackRateRef.current) {
-        video.playbackRate = playbackRateRef.current;
-      }
-
       const now = getSyncedServerTime();
-      const elapsed = (now - serverTimestampRef.current) / 1000;
-      const expectedPos = Math.max(0, currentPosRef.current + elapsed * playbackRateRef.current);
-      const currentPos = getRealPos();
+      const targetTime = currentPosRef.current + Math.max(0, (now - serverTimestampRef.current) / 1000) * playbackRateRef.current;
+      const actualTime = getRealPos();
+      const rawDiffMs = Math.round((actualTime - targetTime) * 1000);
 
-      const instantDiffSec = currentPos - expectedPos;
-      // Exponential smoothing for steady UI ping/lag display
-      smoothedDiffRef.current = smoothedDiffRef.current * 0.7 + instantDiffSec * 0.3;
-      const diffSec = smoothedDiffRef.current;
-      const diffMs = Math.round(diffSec * 1000);
-      setSyncDiffMs(diffMs);
+      // Exponential moving average filter to prevent jitter
+      smoothedDiffRef.current = Math.round(smoothedDiffRef.current * 0.7 + rawDiffMs * 0.3);
+      setSyncDiffMs(smoothedDiffRef.current);
 
-      const absDiff = Math.abs(diffSec);
+      const absDiffMs = Math.abs(smoothedDiffRef.current);
 
-      if (absDiff < 0.4) {
+      if (absDiffMs < 300) {
         setSyncQuality('perfect');
-      } else if (absDiff < 1.5) {
+      } else if (absDiffMs < 800) {
         setSyncQuality('good');
       } else {
         setSyncQuality('adjusting');
       }
-    }, 500);
+
+      // If desync is huge (> 1.5 seconds) on non-host, hard seek directly to host target position
+      if (absDiffMs > 1500 && !isInternalAction.current && userRef.current?.id !== room?.hostUserId) {
+        isInternalAction.current = true;
+        setSyncQuality('seeking');
+        executeSeek(targetTime, true);
+        if (getRealPaused()) {
+          executePlay();
+        }
+        setTimeout(() => {
+          isInternalAction.current = false;
+        }, 300);
+      }
+    }, 1000);
 
     return () => clearInterval(interval);
-  }, [videoRef, getSyncedServerTime, members.length, getRealPos]);
+  }, [getSyncedServerTime, getRealPos, getRealPaused, executeSeek, executePlay, room?.hostUserId]);
 
-  // One-Click Instant Align with Host
+  // Synchronize To Host Query Button
   const syncToHost = useCallback(() => {
-    if (!socket || !room?.id || !videoRef.current) return;
-    const video = videoRef.current;
+    if (!socket || !room?.id) return;
 
     // Send query to host for real-time live position
     socket.emit('room:request_host_sync', { roomId: room.id });
@@ -395,46 +427,43 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
 
     if (targetPos > 0) {
       isInternalAction.current = true;
-      executeSeek(targetPos);
-      if (roomStateRef.current === 'PLAYING' && video.paused) {
-        video.play().catch(() => {});
+      executeSeek(targetPos, roomStateRef.current === 'PLAYING');
+      if (roomStateRef.current === 'PLAYING' && getRealPaused()) {
+        executePlay();
       }
-      setTimeout(() => { isInternalAction.current = false; }, 100);
+      setTimeout(() => { isInternalAction.current = false; }, 200);
     }
 
     smoothedDiffRef.current = 0;
     setSyncDiffMs(0);
     setSyncQuality('perfect');
-  }, [socket, room?.id, room?.hostUserId, members, getSyncedServerTime, executeSeek]);
+  }, [socket, room?.id, room?.hostUserId, members, getSyncedServerTime, executeSeek, getRealPaused, executePlay]);
 
   useEffect(() => {
     syncToHostRef.current = syncToHost;
   }, [syncToHost]);
 
   // Send local buffer status to room
-  const reportBufferStatus = useCallback((isReady: boolean) => {
-    if (!socket || !room?.id || !videoRef.current) return;
-    const video = videoRef.current;
-    let bufferedSec = 0;
-    if (video.buffered.length > 0) {
-      bufferedSec = video.buffered.end(video.buffered.length - 1);
-    }
+  const reportBufferStatus = useCallback((isReady: boolean, bufferedSec?: number, currentSec?: number) => {
+    if (!socket || !room?.id) return;
+    const cur = currentSec !== undefined ? currentSec : getRealPos();
+    const buf = bufferedSec !== undefined
+      ? bufferedSec
+      : (videoRef?.current?.buffered?.length ? videoRef.current.buffered.end(videoRef.current.buffered.length - 1) : cur + 5);
 
-    const cur = getRealPos();
     socket.emit('room:buffer_status', {
       roomId: room.id,
       isReady,
-      bufferedPosition: bufferedSec,
+      bufferedPosition: buf,
       currentPosition: cur,
     });
   }, [socket, room?.id, videoRef, getRealPos]);
 
   // Client Action Triggers
   const sendPlay = useCallback(() => {
-    if (!socket || !room?.id || !videoRef.current) return;
+    if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    const video = videoRef.current;
-    video.play().catch(() => {});
+    executePlay();
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
@@ -442,32 +471,31 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
       position: cur,
       playbackRate: playbackRateRef.current,
     });
-  }, [socket, room?.id, videoRef, getRealPos]);
+  }, [socket, room?.id, executePlay, getRealPos]);
 
   const sendPause = useCallback(() => {
-    if (!socket || !room?.id || !videoRef.current) return;
+    if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    const video = videoRef.current;
-    video.pause();
+    executePause();
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PAUSE',
       position: cur,
     });
-  }, [socket, room?.id, videoRef, getRealPos]);
+  }, [socket, room?.id, executePause, getRealPos]);
 
   const sendSeek = useCallback((pos: number) => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    const isPlayingNow = videoRef.current ? !videoRef.current.paused : (roomStateRef.current === 'PLAYING');
+    const isPlayingNow = !getRealPaused();
     socket.emit('room:action', {
       roomId: room.id,
       action: 'SEEK',
       position: pos,
       isPlaying: isPlayingNow,
     });
-  }, [socket, room?.id, videoRef]);
+  }, [socket, room?.id, getRealPaused]);
 
   const sendMessage = useCallback((text: string) => {
     if (!socket || !room?.id || !text.trim()) return;
@@ -490,28 +518,6 @@ export function useSyncPlayer({ room, videoRef, onTimeUpdate, onSeekTo, getCurre
       username: currentUser?.username,
     });
   }, [socket, room?.id]);
-
-  // Periodic live position & buffer reporter (every 1.5s while active)
-  useEffect(() => {
-    if (!socket || !room?.id) return;
-    const interval = setInterval(() => {
-      const video = videoRef.current;
-      if (!video) return;
-      const isReady = video.readyState >= 3;
-      let bufSec = 0;
-      if (video.buffered.length > 0) {
-        bufSec = video.buffered.end(video.buffered.length - 1);
-      }
-      const cur = getRealPos();
-      socket.emit('room:buffer_status', {
-        roomId: room.id,
-        isReady,
-        bufferedPosition: bufSec,
-        currentPosition: cur,
-      });
-    }, 1500);
-    return () => clearInterval(interval);
-  }, [socket, room?.id, videoRef, getRealPos]);
 
   // Host Force Sync All Participants to Host Position
   const forceSyncAll = useCallback(() => {

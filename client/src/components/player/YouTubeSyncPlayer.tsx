@@ -30,12 +30,17 @@ interface YouTubeSyncPlayerProps {
   onPlayRequest: () => void;
   onPauseRequest: () => void;
   onSeekRequest: (pos: number) => void;
-  onBufferStatusChange: (isReady: boolean, bufferedPos: number, currentPos: number) => void;
+  onBufferStatusChange: (isReady: boolean, bufferedPos?: number, currentPos?: number) => void;
   onToggleSidebar: () => void;
   isSidebarOpen: boolean;
   onBack: () => void;
   onInvite: () => void;
   onSendReaction?: (emoji: string) => void;
+  onAttachSeekHandler?: (fn: (pos: number, shouldPlay?: boolean) => void) => void;
+  onAttachPlayHandler?: (fn: () => void) => void;
+  onAttachPauseHandler?: (fn: () => void) => void;
+  onAttachGetCurrentTime?: (fn: () => number) => void;
+  onAttachGetIsPaused?: (fn: () => boolean) => void;
 }
 
 export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
@@ -59,6 +64,11 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   onBack,
   onInvite,
   onSendReaction,
+  onAttachSeekHandler,
+  onAttachPlayHandler,
+  onAttachPauseHandler,
+  onAttachGetCurrentTime,
+  onAttachGetIsPaused,
 }) => {
   const { socket, getSyncedServerTime } = useSocket();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -85,9 +95,69 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const [videoTitle, setVideoTitle] = useState<string>(room.youtubeTitle || room.title);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isInternalSeekingRef = useRef(false);
 
-  // 1. Load YouTube IFrame API
+  // 1. Attach callbacks to parent hook
+  useEffect(() => {
+    onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
+      if (playerRef.current && isPlayerReady) {
+        try {
+          playerRef.current.seekTo(pos, true);
+          if (shouldPlay) {
+            playerRef.current.playVideo();
+            setIsPlaying(true);
+          }
+        } catch (e) {}
+      }
+    });
+
+    onAttachPlayHandler?.(() => {
+      if (playerRef.current && isPlayerReady) {
+        try {
+          playerRef.current.playVideo();
+          setIsPlaying(true);
+        } catch (e) {}
+      }
+    });
+
+    onAttachPauseHandler?.(() => {
+      if (playerRef.current && isPlayerReady) {
+        try {
+          playerRef.current.pauseVideo();
+          setIsPlaying(false);
+        } catch (e) {}
+      }
+    });
+
+    onAttachGetCurrentTime?.(() => {
+      if (playerRef.current && isPlayerReady) {
+        try {
+          return playerRef.current.getCurrentTime() || 0;
+        } catch (e) {}
+      }
+      return currentTime;
+    });
+
+    onAttachGetIsPaused?.(() => {
+      if (playerRef.current && isPlayerReady) {
+        try {
+          const state = playerRef.current.getPlayerState();
+          return state !== 1; // 1 is PLAYING
+        } catch (e) {}
+      }
+      return !isPlaying;
+    });
+  }, [
+    isPlayerReady,
+    isPlaying,
+    currentTime,
+    onAttachSeekHandler,
+    onAttachPlayHandler,
+    onAttachPauseHandler,
+    onAttachGetCurrentTime,
+    onAttachGetIsPaused,
+  ]);
+
+  // 2. Load YouTube IFrame API script
   useEffect(() => {
     if (!window.YT) {
       const tag = document.createElement('script');
@@ -97,7 +167,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     }
   }, []);
 
-  // 2. Initialize YouTube Player
+  // 3. Initialize YouTube Player
   const initPlayer = useCallback((videoId: string) => {
     if (!videoId) return;
 
@@ -127,15 +197,17 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             const d = event.target.getDuration();
             if (d && d > 0) setDuration(d);
 
-            // Set initial position if any
+            // Seek to initial position if any
             if (room.currentPosition && room.currentPosition > 0) {
               event.target.seekTo(room.currentPosition, true);
             }
 
             if (roomState === 'PLAYING') {
               event.target.playVideo();
+              setIsPlaying(true);
             } else {
               event.target.pauseVideo();
+              setIsPlaying(false);
             }
           },
           onStateChange: (event: any) => {
@@ -175,7 +247,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
   }, [currentYtId]);
 
-  // 3. Listen to YouTube Changed Socket Event
+  // 4. Listen to YouTube Changed Socket Event
   useEffect(() => {
     if (!socket) return;
 
@@ -200,22 +272,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     };
   }, [socket, isPlayerReady]);
 
-  // 4. Synchronize with Room State
-  useEffect(() => {
-    if (!playerRef.current || !isPlayerReady) return;
-
-    try {
-      if (roomState === 'PLAYING') {
-        playerRef.current.playVideo();
-        setIsPlaying(true);
-      } else if (roomState === 'PAUSED') {
-        playerRef.current.pauseVideo();
-        setIsPlaying(false);
-      }
-    } catch (e) {}
-  }, [roomState, isPlayerReady]);
-
-  // 5. Periodic Time Tracker & Drift Corrector
+  // 5. Periodic Time Tracker & Buffer Reporter
   useEffect(() => {
     const interval = setInterval(() => {
       if (!playerRef.current || !isPlayerReady) return;

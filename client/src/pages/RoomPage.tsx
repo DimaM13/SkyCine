@@ -61,7 +61,10 @@ export const RoomPage: React.FC = () => {
   }, [code, navigate]);
 
   const doSeekRef = useRef<((pos: number, shouldPlay?: boolean) => void) | null>(null);
+  const doPlayRef = useRef<(() => void) | null>(null);
+  const doPauseRef = useRef<(() => void) | null>(null);
   const getCurrentTimeRef = useRef<(() => number) | null>(null);
+  const getIsPausedRef = useRef<(() => boolean) | null>(null);
 
   const { user } = useAuth();
 
@@ -95,11 +98,31 @@ export const RoomPage: React.FC = () => {
         }
       }
     },
+    onPlay: () => {
+      if (doPlayRef.current) {
+        doPlayRef.current();
+      } else if (videoRef.current) {
+        videoRef.current.play().catch(() => {});
+      }
+    },
+    onPause: () => {
+      if (doPauseRef.current) {
+        doPauseRef.current();
+      } else if (videoRef.current) {
+        videoRef.current.pause();
+      }
+    },
     getCurrentTime: () => {
       if (getCurrentTimeRef.current) {
         return getCurrentTimeRef.current();
       }
       return videoRef.current?.currentTime || 0;
+    },
+    getIsPaused: () => {
+      if (getIsPausedRef.current) {
+        return getIsPausedRef.current();
+      }
+      return videoRef.current ? videoRef.current.paused : (roomState !== 'PLAYING');
     },
   });
 
@@ -141,6 +164,11 @@ export const RoomPage: React.FC = () => {
               onBack={() => navigate('/rooms')}
               onInvite={() => setIsInviteModalOpen(true)}
               onSendReaction={sendReaction}
+              onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
+              onAttachPlayHandler={(fn) => { doPlayRef.current = fn; }}
+              onAttachPauseHandler={(fn) => { doPauseRef.current = fn; }}
+              onAttachGetCurrentTime={(fn) => { getCurrentTimeRef.current = fn; }}
+              onAttachGetIsPaused={(fn) => { getIsPausedRef.current = fn; }}
             />
           ) : media ? (
             <CustomPlayer
