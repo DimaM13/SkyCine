@@ -7,6 +7,7 @@ import {
 import { useSocket } from '../../context/SocketContext';
 import { Room, RoomMember, RoomReaction, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
+import { BufferBarrierBanner } from '../rooms/BufferBarrierBanner';
 
 declare global {
   interface Window {
@@ -27,10 +28,12 @@ interface YouTubeSyncPlayerProps {
   currentUserId?: string;
   hostUserId: string;
   reactions: RoomReaction[];
+  isBufferingBarrier?: boolean;
+  onForceBarrierPlay?: () => void;
   onPlayRequest: () => void;
   onPauseRequest: () => void;
   onSeekRequest: (pos: number) => void;
-  onBufferStatusChange: (isReady: boolean, bufferedPos?: number, currentPos?: number) => void;
+  onBufferStatusChange: (isReady: boolean, bufferedPos?: number, currentPos?: number, bufferPercent?: number) => void;
   onToggleSidebar: () => void;
   isSidebarOpen: boolean;
   onBack: () => void;
@@ -55,6 +58,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   currentUserId,
   hostUserId,
   reactions,
+  isBufferingBarrier = false,
+  onForceBarrierPlay,
   onPlayRequest,
   onPauseRequest,
   onSeekRequest,
@@ -294,10 +299,15 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       try {
         const cur = playerRef.current.getCurrentTime() || 0;
         const dur = playerRef.current.getDuration() || 0;
+        const fraction = playerRef.current.getVideoLoadedFraction() || 0;
+        const loadedSec = fraction * dur;
+        const bufferPercent = Math.min(100, Math.round(fraction * 100));
+
         setCurrentTime(cur);
         if (dur > 0 && dur !== duration) setDuration(dur);
 
-        onBufferStatusChange(true, cur + 10, cur);
+        const isReady = (loadedSec >= cur + 1.2) || (playerRef.current.getPlayerState() === 2) || (fraction > 0.05);
+        onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
       } catch (e) {}
     }, 500);
 
@@ -309,13 +319,18 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     controlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying) {
+      if (isPlaying && !isBufferingBarrier) {
         setShowControls(false);
       }
     }, 3500);
   };
 
   const handlePlayPauseToggle = () => {
+    if (isBufferingBarrier && isHost) {
+      onForceBarrierPlay?.();
+      return;
+    }
+
     if (isPlaying) {
       onPauseRequest();
     } else {
@@ -421,6 +436,14 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         className="absolute inset-0 z-10 cursor-pointer"
       />
 
+      {/* Buffer Barrier Readiness Banner */}
+      <BufferBarrierBanner
+        isVisible={isBufferingBarrier}
+        members={members}
+        isHost={isHost}
+        onForcePlay={() => onForceBarrierPlay?.()}
+      />
+
       {/* Synchronized Flying Reactions Overlay */}
       {reactions && reactions.length > 0 && (
         <ReactionOverlay reactions={reactions} />
@@ -429,7 +452,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       {/* TOP BAR OVERLAY */}
       <div
         className={`absolute top-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-b from-black/90 via-black/50 to-transparent z-30 transition-opacity duration-300 flex items-center justify-between ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls || isBufferingBarrier ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
         {/* Left: Back & Title */}
@@ -516,7 +539,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       {/* BOTTOM CONTROLS BAR */}
       <div
         className={`absolute bottom-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30 transition-opacity duration-300 flex flex-col gap-3 ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls || isBufferingBarrier ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -597,8 +620,8 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           {/* Right: Sync Status badge & Fullscreen */}
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-black/60 border border-white/10 text-[11px] font-mono text-slate-300">
-              <span className={`w-2 h-2 rounded-full ${syncQuality === 'perfect' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span>{syncQuality === 'perfect' ? 'Синхронизировано' : 'Подгонка'}</span>
+              <span className={`w-2 h-2 rounded-full ${isBufferingBarrier ? 'bg-amber-400 animate-spin' : syncQuality === 'perfect' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span>{isBufferingBarrier ? 'Буферизация' : syncQuality === 'perfect' ? 'Синхронизировано' : 'Подгонка'}</span>
             </div>
 
             <button

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
+import { BufferBarrierBanner } from '../rooms/BufferBarrierBanner';
 import { apiClient } from '../../api/client';
 
 interface CustomPlayerProps {
@@ -18,6 +19,8 @@ interface CustomPlayerProps {
   syncQuality?: 'perfect' | 'good' | 'adjusting' | 'seeking';
   isWatchTogether?: boolean;
   isHost?: boolean;
+  isBufferingBarrier?: boolean;
+  onForceBarrierPlay?: () => void;
   onForceSyncAll?: () => void;
   members?: any[];
   currentUserId?: string;
@@ -27,7 +30,7 @@ interface CustomPlayerProps {
   onPauseRequest?: () => void;
   onSeekRequest?: (pos: number) => void;
   onSyncToHost?: () => void;
-  onBufferStatusChange?: (isReady: boolean) => void;
+  onBufferStatusChange?: (isReady: boolean, bufferedPos?: number, currentPos?: number, bufferPercent?: number) => void;
   onToggleSidebar?: () => void;
   isSidebarOpen?: boolean;
   onBack?: () => void;
@@ -47,6 +50,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   syncQuality = 'perfect',
   isWatchTogether = false,
   isHost = false,
+  isBufferingBarrier = false,
+  onForceBarrierPlay,
   onForceSyncAll,
   members = [],
   currentUserId,
@@ -861,6 +866,30 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }, 150);
   }, [effectiveDuration, isWatchTogether, onSeekRequest, doSeek]);
 
+  // Periodic Watch Together Buffer Reporter
+  useEffect(() => {
+    if (!isWatchTogether || !onBufferStatusChange) return;
+
+    const interval = setInterval(() => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      let bufSec = 0;
+      if (video.buffered.length > 0) {
+        bufSec = video.buffered.end(video.buffered.length - 1);
+      }
+      const cur = video.currentTime;
+      const dur = effectiveDuration || video.duration || 1;
+      const bufferAhead = Math.max(0, bufSec - cur);
+      const isReady = video.readyState >= 3 && (bufferAhead >= 1.5 || video.readyState === 4);
+      const bufferPercent = Math.min(100, Math.round((bufSec / dur) * 100));
+
+      onBufferStatusChange(isReady, bufSec, cur, bufferPercent);
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [isWatchTogether, effectiveDuration, onBufferStatusChange]);
+
   const skip = (seconds: number) => {
     const video = videoRef.current;
     if (!video) return;
@@ -1001,6 +1030,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           />
         )}
       </video>
+
+      {/* Buffer Barrier Readiness Banner */}
+      <BufferBarrierBanner
+        isVisible={isBufferingBarrier}
+        members={members}
+        isHost={isHost}
+        onForcePlay={() => onForceBarrierPlay?.()}
+      />
 
       {/* Floating Reaction Overlay */}
       {reactions.length > 0 && <ReactionOverlay reactions={reactions} />}

@@ -34,6 +34,8 @@ export function useSyncPlayer({
   const [syncDiffMs, setSyncDiffMs] = useState<number>(0);
   const [syncQuality, setSyncQuality] = useState<'perfect' | 'good' | 'adjusting' | 'seeking'>('perfect');
   const [isHost, setIsHost] = useState(false);
+  const [isBufferingBarrier, setIsBufferingBarrier] = useState<boolean>(false);
+  const [barrierTargetPosition, setBarrierTargetPosition] = useState<number>(0);
 
   // References for live tracking without re-triggering effects
   const currentPosRef = useRef<number>(room?.currentPosition || 0);
@@ -212,6 +214,13 @@ export function useSyncPlayer({
       setMembers(updatedMembers);
     });
 
+    socket.on('room:buffer_barrier', (data: { isBuffering: boolean; targetPosition?: number }) => {
+      setIsBufferingBarrier(!!data.isBuffering);
+      if (data.targetPosition !== undefined) {
+        setBarrierTargetPosition(data.targetPosition);
+      }
+    });
+
     socket.on('room:sync_state', (data: {
       state: RoomState;
       currentPosition: number;
@@ -245,10 +254,21 @@ export function useSyncPlayer({
         }
       } else if (data.action === 'PLAY') {
         const cur = getRealPos();
-        if (Math.abs(cur - data.currentPosition) > 1.0) {
-          executeSeek(data.currentPosition, true);
+        const now = getSyncedServerTime();
+        const delay = Math.max(0, data.serverTimestamp - now);
+
+        if (delay > 0) {
+          scheduledPlayTimer.current = setTimeout(() => {
+            isInternalAction.current = true;
+            executePlay();
+            setTimeout(() => { isInternalAction.current = false; }, 150);
+          }, delay);
         } else {
-          executePlay();
+          if (Math.abs(cur - data.currentPosition) > 1.0) {
+            executeSeek(data.currentPosition, true);
+          } else {
+            executePlay();
+          }
         }
       }
       setTimeout(() => { isInternalAction.current = false; }, 200);
@@ -333,6 +353,7 @@ export function useSyncPlayer({
       socket.off('room:host_time_reply');
       socket.off('room:members');
       socket.off('room:members_status');
+      socket.off('room:buffer_barrier');
       socket.off('room:sync_state');
       socket.off('room:time_anchor');
       socket.off('room:force_sync_all');
@@ -344,7 +365,7 @@ export function useSyncPlayer({
 
   // Host Continuous Heartbeat Anchor (broadcast real position every 2 seconds while playing)
   useEffect(() => {
-    if (!isHost || !socket || !room?.id || roomState !== 'PLAYING') return;
+    if (!isHost || !socket || !room?.id || roomState !== 'PLAYING' || isBufferingBarrier) return;
 
     const interval = setInterval(() => {
       if (!getRealPaused()) {
@@ -357,14 +378,14 @@ export function useSyncPlayer({
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [isHost, socket, room?.id, roomState, getRealPaused, getRealPos]);
+  }, [isHost, socket, room?.id, roomState, isBufferingBarrier, getRealPaused, getRealPos]);
 
   const smoothedDiffRef = useRef<number>(0);
 
   // Pure Tracking / Drift calculation
   useEffect(() => {
     const interval = setInterval(() => {
-      if (roomStateRef.current !== 'PLAYING') {
+      if (roomStateRef.current !== 'PLAYING' || isBufferingBarrier) {
         setSyncQuality('perfect');
         setSyncDiffMs(0);
         return;
@@ -404,7 +425,7 @@ export function useSyncPlayer({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [getSyncedServerTime, getRealPos, getRealPaused, executeSeek, executePlay, room?.hostUserId]);
+  }, [getSyncedServerTime, getRealPos, getRealPaused, executeSeek, executePlay, isBufferingBarrier, room?.hostUserId]);
 
   // Synchronize To Host Query Button
   const syncToHost = useCallback(() => {
@@ -444,7 +465,7 @@ export function useSyncPlayer({
   }, [syncToHost]);
 
   // Send local buffer status to room
-  const reportBufferStatus = useCallback((isReady: boolean, bufferedSec?: number, currentSec?: number) => {
+  const reportBufferStatus = useCallback((isReady: boolean, bufferedSec?: number, currentSec?: number, bufferPercent?: number) => {
     if (!socket || !room?.id) return;
     const cur = currentSec !== undefined ? currentSec : getRealPos();
     const buf = bufferedSec !== undefined
@@ -456,14 +477,21 @@ export function useSyncPlayer({
       isReady,
       bufferedPosition: buf,
       currentPosition: cur,
+      bufferPercent: bufferPercent !== undefined ? Math.round(bufferPercent) : (isReady ? 100 : 0),
     });
   }, [socket, room?.id, videoRef, getRealPos]);
+
+  // Force barrier play (Manual Host Override)
+  const forceBarrierPlay = useCallback(() => {
+    if (!socket || !room?.id) return;
+    socket.emit('room:force_barrier_play', { roomId: room.id });
+    setIsBufferingBarrier(false);
+  }, [socket, room?.id]);
 
   // Client Action Triggers
   const sendPlay = useCallback(() => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    executePlay();
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
@@ -471,7 +499,7 @@ export function useSyncPlayer({
       position: cur,
       playbackRate: playbackRateRef.current,
     });
-  }, [socket, room?.id, executePlay, getRealPos]);
+  }, [socket, room?.id, getRealPos]);
 
   const sendPause = useCallback(() => {
     if (!socket || !room?.id) return;
@@ -553,6 +581,9 @@ export function useSyncPlayer({
     syncDiffMs,
     syncQuality,
     isHost,
+    isBufferingBarrier,
+    barrierTargetPosition,
+    forceBarrierPlay,
     syncToHost,
     forceSyncAll,
     sendPlay,

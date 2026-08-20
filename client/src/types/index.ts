@@ -130,6 +130,7 @@ export interface RoomMember {
   bufferedPosition: number;
   currentPosition: number;
   pingMs: number;
+  bufferPercent?: number;
   joinedAt: string;
 }
 

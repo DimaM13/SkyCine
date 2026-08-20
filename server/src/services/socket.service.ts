@@ -19,6 +19,42 @@ class SocketService {
   private users: Map<string, ConnectedUser> = new Map(); // socketId -> user
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set of socketIds
   private roomMembers: Map<string, Map<string, RoomMember>> = new Map(); // roomId -> (socketId -> RoomMember)
+  private pendingBarriers: Map<string, { targetPosition: number; action: string; playbackRate: number; timer?: NodeJS.Timeout }> = new Map();
+
+  private startBarrierPlayback(roomId: string, targetPosition: number, playbackRate: number, initiatedBy: string, initiatedByUserId: string) {
+    if (this.pendingBarriers.has(roomId)) {
+      const b = this.pendingBarriers.get(roomId)!;
+      if (b.timer) clearTimeout(b.timer);
+      this.pendingBarriers.delete(roomId);
+    }
+
+    const now = Date.now();
+    const scheduledPlayAt = now + 350; // 350ms synchronized lockstep
+
+    try {
+      db.prepare(`
+        UPDATE rooms SET
+          state = 'PLAYING',
+          currentPosition = ?,
+          serverTimestamp = ?,
+          playbackRate = ?
+        WHERE id = ?
+      `).run(targetPosition, scheduledPlayAt, playbackRate, roomId);
+    } catch (e) {}
+
+    logger.info('BARRIER_RESOLVED', `Room ${roomId} all members ready. Starting playback from ${targetPosition.toFixed(1)}s (lockstep in 350ms)`);
+
+    this.io?.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
+    this.io?.to(roomId).emit('room:sync_state', {
+      state: 'PLAYING',
+      currentPosition: targetPosition,
+      serverTimestamp: scheduledPlayAt,
+      playbackRate,
+      action: 'PLAY',
+      initiatedBy,
+      initiatedByUserId,
+    });
+  }
 
   public init(io: Server) {
     this.io = io;
@@ -156,45 +192,104 @@ class SocketService {
 
         const currentRoom = db.prepare('SELECT state FROM rooms WHERE id = ?').get(roomId) as any;
         const wasPlaying = currentRoom?.state === 'PLAYING';
+        const user = this.users.get(socket.id);
 
-        let newState: RoomState = 'PAUSED';
-        let scheduledPlayAt = now;
-
-        if (action === 'PLAY') {
-          newState = 'PLAYING';
-          scheduledPlayAt = now + (memberCount <= 1 ? 50 : 250); // 50ms if alone, 250ms lockstep for group
-        } else if (action === 'PAUSE') {
-          newState = 'PAUSED';
-          scheduledPlayAt = now;
-        } else if (action === 'SEEK') {
-          const keepPlaying = data.isPlaying !== undefined ? !!data.isPlaying : wasPlaying;
-          newState = keepPlaying ? 'PLAYING' : 'PAUSED';
-          scheduledPlayAt = keepPlaying ? now + (memberCount <= 1 ? 50 : 350) : now;
+        // Cancel previous pending barrier if any
+        if (this.pendingBarriers.has(roomId)) {
+          const existing = this.pendingBarriers.get(roomId)!;
+          if (existing.timer) clearTimeout(existing.timer);
+          this.pendingBarriers.delete(roomId);
         }
 
-        // Update DB
-        db.prepare(`
-          UPDATE rooms SET
-            state = ?,
-            currentPosition = ?,
-            serverTimestamp = ?,
-            playbackRate = ?
-          WHERE id = ?
-        `).run(newState, position, scheduledPlayAt, playbackRate, roomId);
+        if (action === 'PAUSE') {
+          // Immediate Pause
+          db.prepare(`
+            UPDATE rooms SET
+              state = 'PAUSED',
+              currentPosition = ?,
+              serverTimestamp = ?,
+              playbackRate = ?
+            WHERE id = ?
+          `).run(position, now, playbackRate, roomId);
 
-        const user = this.users.get(socket.id);
-        logger.info('ROOM_ACTION', `Room ${roomId} action ${action} (state: ${newState}) at ${position.toFixed(1)}s by ${user?.username || 'Host'} (members: ${memberCount})`);
+          io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
+          io.to(roomId).emit('room:sync_state', {
+            state: 'PAUSED',
+            currentPosition: position,
+            serverTimestamp: now,
+            playbackRate,
+            action: 'PAUSE',
+            initiatedBy: user?.username || 'Host',
+            initiatedByUserId: user?.userId || '',
+          });
+          return;
+        }
 
-        // Broadcast to all participants in the room
-        io.to(roomId).emit('room:sync_state', {
-          state: newState,
-          currentPosition: position,
-          serverTimestamp: scheduledPlayAt,
-          playbackRate,
-          action,
-          initiatedBy: user?.username || 'Host',
-          initiatedByUserId: user?.userId || '',
-        });
+        const shouldPlay = action === 'PLAY' || (action === 'SEEK' && (data.isPlaying !== undefined ? !!data.isPlaying : wasPlaying));
+
+        if (memberCount > 1 && shouldPlay) {
+          // Multi-user room: engage Buffer Barrier lockstep!
+          if (roomMap) {
+            for (const member of roomMap.values()) {
+              member.isReady = false;
+              member.currentPosition = position;
+            }
+            io.to(roomId).emit('room:members_status', Array.from(roomMap.values()));
+          }
+
+          // Seek and pause all players first so they buffer from target position
+          io.to(roomId).emit('room:sync_state', {
+            state: 'PAUSED',
+            currentPosition: position,
+            serverTimestamp: now,
+            playbackRate,
+            action: 'SEEK',
+            initiatedBy: user?.username || 'Host',
+            initiatedByUserId: user?.userId || '',
+          });
+
+          io.to(roomId).emit('room:buffer_barrier', {
+            isBuffering: true,
+            targetPosition: position,
+            initiatedBy: user?.username || 'Host',
+          });
+
+          // Fallback timer (6 seconds maximum)
+          const fallbackTimer = setTimeout(() => {
+            this.startBarrierPlayback(roomId, position, playbackRate, user?.username || 'Host', user?.userId || '');
+          }, 6000);
+
+          this.pendingBarriers.set(roomId, {
+            targetPosition: position,
+            action,
+            playbackRate,
+            timer: fallbackTimer,
+          });
+        } else {
+          // Single user OR seek while paused
+          const newState: RoomState = shouldPlay ? 'PLAYING' : 'PAUSED';
+          const scheduledPlayAt = shouldPlay ? now + 50 : now;
+
+          db.prepare(`
+            UPDATE rooms SET
+              state = ?,
+              currentPosition = ?,
+              serverTimestamp = ?,
+              playbackRate = ?
+            WHERE id = ?
+          `).run(newState, position, scheduledPlayAt, playbackRate, roomId);
+
+          io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
+          io.to(roomId).emit('room:sync_state', {
+            state: newState,
+            currentPosition: position,
+            serverTimestamp: scheduledPlayAt,
+            playbackRate,
+            action,
+            initiatedBy: user?.username || 'Host',
+            initiatedByUserId: user?.userId || '',
+          });
+        }
       });
 
       // Host Continuous Time Anchor (every 2.5s while playing)
@@ -337,8 +432,9 @@ class SocketService {
         bufferedPosition: number;
         currentPosition: number;
         pingMs?: number;
+        bufferPercent?: number;
       }) => {
-        const { roomId, isReady, bufferedPosition, currentPosition, pingMs = 0 } = data;
+        const { roomId, isReady, bufferedPosition, currentPosition, pingMs = 0, bufferPercent } = data;
         const members = this.roomMembers.get(roomId);
         if (members && members.has(socket.id)) {
           const m = members.get(socket.id)!;
@@ -346,9 +442,30 @@ class SocketService {
           m.bufferedPosition = bufferedPosition;
           m.currentPosition = currentPosition;
           m.pingMs = pingMs;
+          if (bufferPercent !== undefined) m.bufferPercent = bufferPercent;
 
           // Notify room about member states (for UI sync indicators)
           io.to(roomId).emit('room:members_status', Array.from(members.values()));
+
+          // Check if active barrier is ready to trigger synchronized play
+          if (this.pendingBarriers.has(roomId)) {
+            const barrier = this.pendingBarriers.get(roomId)!;
+            const allMembersReady = Array.from(members.values()).every((member) => member.isReady);
+            if (allMembersReady) {
+              const user = this.users.get(socket.id);
+              this.startBarrierPlayback(roomId, barrier.targetPosition, barrier.playbackRate, user?.username || 'Участники', user?.userId || '');
+            }
+          }
+        }
+      });
+
+      // Host Force Barrier Play (Manual Override)
+      socket.on('room:force_barrier_play', (data: { roomId: string }) => {
+        const { roomId } = data;
+        const user = this.users.get(socket.id);
+        if (this.pendingBarriers.has(roomId)) {
+          const barrier = this.pendingBarriers.get(roomId)!;
+          this.startBarrierPlayback(roomId, barrier.targetPosition, barrier.playbackRate, user?.username || 'Host', user?.userId || '');
         }
       });
 
