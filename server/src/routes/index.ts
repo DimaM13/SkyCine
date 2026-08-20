@@ -4,6 +4,7 @@ import { FriendsController } from '../controllers/friends.controller';
 import { LibraryController } from '../controllers/library.controller';
 import { MediaController } from '../controllers/media.controller';
 import { StreamController } from '../controllers/stream.controller';
+import { YouTubeController } from '../controllers/youtube.controller';
 import { RoomsController } from '../controllers/rooms.controller';
 import { AdminController } from '../controllers/admin.controller';
 import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/auth.middleware';
@@ -63,6 +64,10 @@ router.get('/stream/hls/session/:sessionId/:segmentName', StreamController.getHl
 router.get('/stream/hls/:sessionId/:segmentName', StreamController.getHlsSessionSegment);
 router.get('/stream/:mediaId/:segmentName', StreamController.getHlsSessionSegment);
 router.get('/stream/:id/subtitle/:trackIndex', StreamController.getSubtitle);
+
+// --- YouTube Direct Stream Routes (yt-dlp fallback) ---
+router.get('/stream/youtube/info/:videoId', YouTubeController.getInfo);
+router.get('/stream/youtube/:videoId', YouTubeController.stream);
 
 // --- Rooms (Watch Together) Routes ---
 router.get('/rooms', authenticateToken, RoomsController.getRooms);
