@@ -102,6 +102,7 @@ export interface Room {
   youtubeUrl?: string | null;
   youtubeTitle?: string | null;
   youtubeThumbnail?: string | null;
+  youtubeEngine?: 'iframe' | 'server_stream';
   state: RoomState;
   currentPosition: number;
   serverTimestamp: number;

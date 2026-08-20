@@ -107,6 +107,7 @@ export interface Room {
   youtubeUrl?: string | null;
   youtubeTitle?: string | null;
   youtubeThumbnail?: string | null;
+  youtubeEngine?: 'iframe' | 'server_stream';
   state: 'PLAYING' | 'PAUSED' | 'BUFFERING';
   currentPosition: number;
   serverTimestamp: number;

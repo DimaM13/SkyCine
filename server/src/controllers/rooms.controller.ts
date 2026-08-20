@@ -211,6 +211,7 @@ export class RoomsController {
         room.mediaTitle = room.youtubeTitle || room.title;
         room.posterPath = room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`;
         room.backdropPath = room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`;
+        room.youtubeEngine = room.youtubeEngine || 'iframe';
       }
 
       res.json({ room: { ...room, tracks } });

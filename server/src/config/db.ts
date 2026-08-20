@@ -219,6 +219,10 @@ export function initDatabase() {
     } catch (err) {}
   }
 
+  try {
+    db.exec("ALTER TABLE rooms ADD COLUMN youtubeEngine TEXT NOT NULL DEFAULT 'iframe';");
+  } catch (err) {}
+
   // Default server settings
   const insertSetting = db.prepare(`
     INSERT OR IGNORE INTO server_settings (key, value) VALUES (?, ?)

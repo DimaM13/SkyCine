@@ -382,6 +382,7 @@ class SocketService {
               youtubeUrl = ?,
               youtubeTitle = ?,
               youtubeThumbnail = ?,
+              youtubeEngine = 'iframe',
               title = ?,
               currentPosition = 0,
               state = 'PAUSED',
@@ -398,8 +399,9 @@ class SocketService {
             youtubeTitle: ytInfo.title,
             youtubeThumbnail: ytInfo.thumbnail,
             title: `YouTube: ${finalTitle}`,
-            state: 'PAUSED',
+            youtubeEngine: 'iframe',
             currentPosition: 0,
+            state: 'PAUSED',
             serverTimestamp: now,
           });
 
@@ -501,6 +503,9 @@ class SocketService {
 
       // YouTube Engine Switch Synchronization (18+ Fallback)
       socket.on('room:set_youtube_engine', (data: { roomId: string; engine: 'iframe' | 'server_stream' }) => {
+        try {
+          db.prepare('UPDATE rooms SET youtubeEngine = ? WHERE id = ?').run(data.engine, data.roomId);
+        } catch (e) {}
         io.to(data.roomId).emit('room:youtube_engine', { engine: data.engine });
       });
 
