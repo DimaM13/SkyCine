@@ -188,9 +188,8 @@ class FFmpegService {
       '-fflags', '+genpts+discardcorrupt+nobuffer',
     ];
 
-    if (cleanStartTime > 0) {
-      args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
-    }
+    // Always pass -ss (even 0) so FFmpeg resets the container PTS to exactly 0.0s for the first segment
+    args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
     args.push('-i', media.filePath);
 
     args.push('-map', '0:v:0');
