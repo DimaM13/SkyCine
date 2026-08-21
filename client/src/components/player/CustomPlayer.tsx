@@ -181,16 +181,24 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       return false;
     }
 
+    const rawVideoCodec = (media.videoCodec || 'h264').toLowerCase();
+    const supportedVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    if (!supportedVideoCodecs.includes(rawVideoCodec)) {
+      return false;
+    }
+
     if (isAppleDevice) {
       const selectedTrack = audioTracks[0];
       const codec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
-      const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac'].some(c => codec.includes(c));
+      const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac', 'flac'].some(c => codec.includes(c));
       return isNativeAppleAudio;
     } else {
-      const isNativeAudio = media.audioCodec === 'aac' || media.audioCodec === 'mp3' || media.audioCodec === 'opus';
-      return isNativeAudio;
+      const selectedTrack = audioTracks[0];
+      const codec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
+      const isNativePcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'].some(c => codec.includes(c));
+      return isNativePcAudio;
     }
-  }, [media.filePath, media.audioCodec, selectedQuality, audioTracks, isAppleDevice]);
+  }, [media.filePath, media.videoCodec, media.audioCodec, selectedQuality, audioTracks, isAppleDevice]);
 
   // Stream mode status for user transparency
   const streamMode = useMemo(() => {
@@ -198,12 +206,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawAudioCodec = (selectedTrackObj?.codec || media.audioCodec || 'aac').toLowerCase();
     const rawVideoCodec = (media.videoCodec || 'h264').toLowerCase();
 
-    // Apple supports AC3/EAC3/AAC/MP3 natively. PC/Android browsers only support AAC/MP3 natively.
-    const isDirectAudio = isAppleDevice
-      ? (rawAudioCodec.includes('aac') || rawAudioCodec.includes('ac3') || rawAudioCodec.includes('eac3') || rawAudioCodec.includes('mp3') || rawAudioCodec.includes('alac'))
-      : (rawAudioCodec === 'aac' || rawAudioCodec === 'mp3');
+    const appleAudioCodecs = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus', 'flac'];
+    const pcAudioCodecs = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
 
-    const isSupportedVideoCodec = rawVideoCodec === 'h264' || rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
+    const isDirectAudio = isAppleDevice
+      ? appleAudioCodecs.some(c => rawAudioCodec.includes(c))
+      : pcAudioCodecs.some(c => rawAudioCodec.includes(c));
+
+    const isSupportedVideoCodec = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'].includes(rawVideoCodec);
     const isDirectVideo = selectedQuality === 'original' && isSupportedVideoCodec;
 
     const audioDisplayName = rawAudioCodec.toUpperCase();

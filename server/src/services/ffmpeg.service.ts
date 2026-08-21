@@ -200,7 +200,8 @@ class FFmpegService {
     }
 
     // Check if video can be directly stream-copied without re-encoding (Lossless Direct Stream Copy)
-    const isSupportedCodec = media.videoCodec === 'h264' || media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const supportedVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    const isSupportedCodec = supportedVideoCodecs.includes(media.videoCodec?.toLowerCase() || '');
     const canCopyVideo = quality === 'original' && isSupportedCodec;
 
     let trackAudioCodec = media.audioCodec?.toLowerCase() || '';
@@ -213,8 +214,10 @@ class FFmpegService {
       } catch (e) {}
     }
 
-    const isAppleNativeAudio = trackAudioCodec.includes('aac') || trackAudioCodec.includes('ac3') || trackAudioCodec.includes('eac3') || trackAudioCodec.includes('mp3') || trackAudioCodec.includes('alac');
-    const isPcNativeAudio = trackAudioCodec === 'aac' || trackAudioCodec === 'mp3';
+    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus', 'flac'];
+    const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
+    const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
+    const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
     const canCopyAudio = isApple ? isAppleNativeAudio : isPcNativeAudio;
 
     console.log(`[Continuous HLS] 🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iPad' : 'PC/Android'}): Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY - NO COMPRESSION' : `TRANSCODE ${encoder}`}), Audio=${trackAudioCodec || 'default'} (${canCopyAudio ? 'DIRECT COPY (Lossless)' : 'TRANSPARENT AAC 320k'}), StartPos=${cleanStartTime}s`);
@@ -279,13 +282,14 @@ class FFmpegService {
     // we force BOTH iPad and PC to use the SAME container format (mpegts for H.264).
     // Hls.js on PC supports mpegts perfectly fine.
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isVpxOrAv1 = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
     const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
     let useFmp4: boolean;
-    if (isRoomSession && !isHevc) {
+    if (isRoomSession && !isHevc && !isVpxOrAv1) {
       // Watch Together + H.264: force mpegts for ALL devices to ensure identical PTS
       useFmp4 = false;
     } else {
-      useFmp4 = !isApple || isHevc; // Normal: PC gets fmp4, iPad gets mpegts (except HEVC)
+      useFmp4 = !isApple || isHevc || isVpxOrAv1; // Normal: PC gets fmp4, iPad gets mpegts (except HEVC/VPx/AV1)
     }
 
     if (cleanStartTime > 0) {
@@ -423,15 +427,16 @@ class FFmpegService {
     const totalSegments = Math.ceil(duration / segmentDuration);
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isVpxOrAv1 = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
     const isApple = sessionId.includes('_apple');
     const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
     const canCopyVideo = sessionId.includes('_qoriginal_');
     let useFmp4: boolean;
-    if (isRoomSession && !isHevc) {
+    if (isRoomSession && !isHevc && !isVpxOrAv1) {
       // Watch Together + H.264: mpegts for ALL devices (matches FFmpeg output)
       useFmp4 = false;
     } else {
-      useFmp4 = !isApple || isHevc;
+      useFmp4 = !isApple || isHevc || isVpxOrAv1;
     }
     const ext = useFmp4 ? '.m4s' : '.ts';
 

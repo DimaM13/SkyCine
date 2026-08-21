@@ -246,7 +246,7 @@ export class RoomsController {
         }
       } else {
         // Local media room: cleanly kill active FFmpeg sessions for this room
-        import('../services/ffmpeg.service').then(m => m.ffmpegService.killSessionsForRoom(roomId));
+        import('../services/ffmpeg.service').then(m => m.ffmpegService.killSessionsForRoom(roomId as string));
       }
 
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
