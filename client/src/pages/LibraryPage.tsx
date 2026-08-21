@@ -1,3 +1,4 @@
+import { LazyImage } from '../components/library/LazyImage';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -486,7 +487,7 @@ export const LibraryPage: React.FC = () => {
                   >
                     {/* 16:9 Thumbnail Container */}
                     <div className="relative aspect-video w-full overflow-hidden bg-cinema-950">
-                      <img
+                      <LazyImage
                         src={thumbUrl}
                         alt={vid.title}
                         loading="lazy"
@@ -579,7 +580,7 @@ export const LibraryPage: React.FC = () => {
 
                 <div className="relative z-10 p-6 md:p-8 flex flex-col md:flex-row gap-6 md:gap-8 items-start">
                   {selectedShow.posterPath ? (
-                    <img
+                    <LazyImage
                       src={selectedShow.posterPath}
                       alt={selectedShow.showTitle}
                       className="w-36 md:w-52 aspect-[2/3] rounded-2xl object-cover shadow-2xl shrink-0 border border-white/10"
@@ -764,7 +765,7 @@ export const LibraryPage: React.FC = () => {
                           >
                             {/* 16:9 Episode Thumbnail with Badges */}
                             <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
-                              <img
+                              <LazyImage
                                 src={posterUrl}
                                 alt={epTitle}
                                 onError={(e) => {
@@ -889,7 +890,7 @@ export const LibraryPage: React.FC = () => {
                     >
                       <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
                         {show.posterPath ? (
-                          <img
+                          <LazyImage
                             src={show.posterPath}
                             alt={show.showTitle}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
@@ -1033,7 +1034,7 @@ export const LibraryPage: React.FC = () => {
                         className="p-3.5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/5 hover:border-white/15 transition-all flex items-start gap-4"
                       >
                         {cand.posterPath ? (
-                          <img
+                          <LazyImage
                             src={cand.posterPath}
                             alt={cand.title}
                             className="w-14 aspect-[2/3] object-cover rounded-xl shadow-md shrink-0"

@@ -1,3 +1,4 @@
+import { LazyImage } from '../components/library/LazyImage';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -209,7 +210,7 @@ export const ShowsPage: React.FC = () => {
 
             <div className="relative z-10 p-6 md:p-8 flex flex-col md:flex-row gap-6 md:gap-8 items-start">
               {selectedShow.posterPath ? (
-                <img
+                <LazyImage
                   src={selectedShow.posterPath}
                   alt={selectedShow.showTitle}
                   className="w-36 md:w-52 aspect-[2/3] rounded-2xl object-cover shadow-2xl shrink-0 border border-white/10"
@@ -391,7 +392,7 @@ export const ShowsPage: React.FC = () => {
                       >
                         {/* 16:9 Episode Thumbnail with Badges */}
                         <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
-                          <img
+                          <LazyImage
                             src={posterUrl}
                             alt={epTitle}
                             onError={(e) => {
@@ -527,7 +528,7 @@ export const ShowsPage: React.FC = () => {
                 >
                   <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
                     {show.posterPath ? (
-                      <img
+                      <LazyImage
                         src={show.posterPath}
                         alt={show.showTitle}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
@@ -660,7 +661,7 @@ export const ShowsPage: React.FC = () => {
                     className="p-3.5 rounded-2xl bg-white/5 border border-white/10 hover:border-cinema-gold/50 flex gap-4 items-start transition-all"
                   >
                     {cand.posterPath ? (
-                      <img src={cand.posterPath} alt={cand.title} className="w-16 h-24 rounded-xl object-cover shrink-0" />
+                      <LazyImage src={cand.posterPath} alt={cand.title} className="w-16 h-24 rounded-xl object-cover shrink-0" />
                     ) : (
                       <div className="w-16 h-24 rounded-xl bg-cinema-800 flex items-center justify-center text-slate-600 shrink-0">
                         <Tv className="w-6 h-6" />

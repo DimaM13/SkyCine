@@ -1,3 +1,4 @@
+import { LazyImage } from '../components/library/LazyImage';
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -151,7 +152,7 @@ export const HomePage: React.FC = () => {
                   className="group relative rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
                 >
                   <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
-                    <img
+                    <LazyImage
                       src={thumbUrl}
                       alt={item.title}
                       onError={(e) => {
@@ -200,7 +201,7 @@ export const HomePage: React.FC = () => {
               >
                 <div className="flex items-center gap-3">
                   {room.posterPath ? (
-                    <img src={room.posterPath} alt={room.title} className="w-12 h-16 rounded-xl object-cover" />
+                    <LazyImage src={room.posterPath || ''} alt={room.title} className="w-12 h-16 rounded-xl object-cover" />
                   ) : (
                     <div className="w-12 h-16 rounded-xl bg-cinema-800 flex items-center justify-center text-slate-500">
                       <Film className="w-6 h-6" />
@@ -278,7 +279,7 @@ export const HomePage: React.FC = () => {
                     >
                       <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
                         {show.posterPath ? (
-                          <img
+                          <LazyImage
                             src={show.posterPath}
                             alt={show.showTitle}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
@@ -347,7 +348,7 @@ export const HomePage: React.FC = () => {
                         className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5 cursor-pointer select-none"
                       >
                         <div className="relative aspect-video w-full overflow-hidden bg-cinema-950">
-                          <img
+                          <LazyImage
                             src={thumbUrl}
                             alt={vid.title}
                             loading="lazy"

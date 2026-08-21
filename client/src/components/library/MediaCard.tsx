@@ -1,3 +1,4 @@
+import { LazyImage } from './LazyImage';
 import React from 'react';
 import { Star, Film } from 'lucide-react';
 import { MediaItem } from '../../types';
@@ -36,7 +37,7 @@ export const MediaCard: React.FC<MediaCardProps> = ({
       {/* Poster Image Container */}
       <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
         {media.posterPath ? (
-          <img
+          <LazyImage
             src={media.posterPath}
             alt={media.title}
             loading="lazy"
