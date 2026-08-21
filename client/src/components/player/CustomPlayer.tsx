@@ -474,6 +474,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       if (videoRef.current) {
         try {
           videoRef.current.pause();
+          videoRef.current.src = ''; // Crucial: Force Safari to immediately drop the HLS network stream
           videoRef.current.removeAttribute('src');
           videoRef.current.load();
         } catch (e) {}

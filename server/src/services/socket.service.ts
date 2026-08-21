@@ -639,6 +639,8 @@ class SocketService {
 
       if (members.size === 0) {
         this.roomMembers.delete(roomId);
+        // Clean up any stray FFmpeg continuous sessions for this room to prevent CPU/IO leaks
+        import('./ffmpeg.service').then(m => m.ffmpegService.killSessionsForRoom(roomId));
       } else {
         this.emitRoomMembers(roomId);
       }

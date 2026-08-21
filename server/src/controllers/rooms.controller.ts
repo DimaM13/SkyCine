@@ -244,6 +244,9 @@ export class RoomsController {
         if (!otherRoom) {
           YouTubeController.deleteCache(room.youtubeId);
         }
+      } else {
+        // Local media room: cleanly kill active FFmpeg sessions for this room
+        import('../services/ffmpeg.service').then(m => m.ffmpegService.killSessionsForRoom(roomId));
       }
 
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);

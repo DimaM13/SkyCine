@@ -543,6 +543,15 @@ class FFmpegService {
     }
   }
 
+  public killSessionsForRoom(roomId: string): void {
+    for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
+      if (sId.includes(`_r${roomId}`)) {
+        console.log(`[Continuous HLS] 🧹 Cleaning up zombie session for empty/deleted room ${roomId}: ${sId}`);
+        this.killSession(sId);
+      }
+    }
+  }
+
   public killSoloSessionsForMedia(mediaId: string): void {
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (session.mediaId === mediaId && !sId.includes('_r')) {
