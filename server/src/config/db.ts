@@ -10,8 +10,12 @@ if (!fs.existsSync(dataDir)) {
 const dbPath = path.join(dataDir, 'myplex.db');
 export const db = new Database(dbPath);
 
-// Enable WAL mode and foreign keys for high performance & reliability
+// Enable WAL mode and performance pragmas for high concurrency & stability
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL'); // Safe with WAL, massively improves write speed
+db.pragma('cache_size = -32000'); // 32MB cache (negative means KB)
+db.pragma('temp_store = MEMORY'); // Store temporary tables in RAM
+db.pragma('mmap_size = 3000000000'); // Use memory mapping up to 3GB
 db.pragma('foreign_keys = ON');
 
 export function initDatabase() {

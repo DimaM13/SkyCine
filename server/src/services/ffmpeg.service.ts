@@ -133,14 +133,13 @@ class FFmpegService {
       if (cleanStartTime >= currentStart && cleanStartTime < currentStart + 120) {
         return { sessionId };
       }
-      const sessionToClose = existing;
+      const sId = `${sessionId}_closing_${Date.now()}`;
       const dirToDelete = existing.sessionDir;
-      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
-      this.terminateProcess(sessionToClose.process);
-      setTimeout(() => {
-        try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
-          console.error(`[Continuous HLS] Failed to delete session dir on overwrite: ${dirToDelete}`, e);
-        }
+      this.closingSessions.set(sId, existing);
+      this.terminateProcess(existing.process);
+      setTimeout(async () => {
+        try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
+        this.closingSessions.delete(sId);
       }, 10000);
       this.continuousSessions.delete(sessionId);
     }
@@ -372,17 +371,23 @@ class FFmpegService {
       const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || isHevc);
 
       if (useFmp4) {
-        if (fs.existsSync(firstSegPathM4s) && fs.statSync(firstSegPathM4s).size > 100) {
-          sessionObj.isReady = true;
-          console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
-          break;
-        }
+        try {
+          const stats = await fs.promises.stat(firstSegPathM4s);
+          if (stats.size > 100) {
+            sessionObj.isReady = true;
+            console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
+            break;
+          }
+        } catch (e) {}
       } else {
-        if (fs.existsSync(firstSegPathTs) && fs.statSync(firstSegPathTs).size > 100) {
-          sessionObj.isReady = true;
-          console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
-          break;
-        }
+        try {
+          const stats = await fs.promises.stat(firstSegPathTs);
+          if (stats.size > 100) {
+            sessionObj.isReady = true;
+            console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
+            break;
+          }
+        } catch (e) {}
       }
       await new Promise(r => setTimeout(r, 20));
     }
@@ -399,9 +404,9 @@ class FFmpegService {
         const dirToDelete = sess.sessionDir;
         this.closingSessions.set(sId, sess);
         this.terminateProcess(sess.process);
-        setTimeout(() => {
+        setTimeout(async () => {
           this.closingSessions.delete(sId);
-          try { fs.rmSync(dirToDelete, { recursive: true, force: true }); } catch (e) {}
+          try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
         }, 10000);
       }
     }
@@ -532,13 +537,17 @@ class FFmpegService {
       console.log(`[Continuous HLS] 🛑 Manual kill requested for session: ${sessionId}`);
       const sessionToClose = session;
       const dirToDelete = session.sessionDir;
-      this.closingSessions.set(`${sessionId}_closing_${Date.now()}`, sessionToClose);
+      const closingId = `${sessionId}_closing_${Date.now()}`;
+      
+      this.closingSessions.set(closingId, sessionToClose);
       this.terminateProcess(sessionToClose.process);
-      setTimeout(() => {
-        try { fs.rmSync(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
+      setTimeout(async () => {
+        try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
           console.error(`[Continuous HLS] Failed to delete session dir: ${dirToDelete}`, e);
         }
+        this.closingSessions.delete(closingId);
       }, 10000);
+      
       this.continuousSessions.delete(sessionId);
     }
   }
@@ -564,8 +573,13 @@ class FFmpegService {
   private async waitForSegment(sessionDir: string, segmentName: string): Promise<string | null> {
     const segPath = path.join(sessionDir, segmentName);
     for (let i = 0; i < 50; i++) {
-      if (fs.existsSync(segPath) && fs.statSync(segPath).size > 100) {
-        return segPath;
+      try {
+        const stats = await fs.promises.stat(segPath);
+        if (stats.size > 100) {
+          return segPath;
+        }
+      } catch (e) {
+        // File doesn't exist yet
       }
       await new Promise(r => setTimeout(r, 200));
     }
@@ -640,7 +654,7 @@ class FFmpegService {
     });
   }
 
-  private cleanupIdleSessions() {
+  private async cleanupIdleSessions() {
     try {
       const now = Date.now();
       for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
@@ -648,7 +662,7 @@ class FFmpegService {
         if (now - session.lastAccess > 25000) {
           console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>25s) for ${sessionId}, terminating process...`);
           this.terminateProcess(session.process);
-          try { fs.rmSync(session.sessionDir, { recursive: true, force: true, maxRetries: 3 }); } catch (e) {}
+          try { await fs.promises.rm(session.sessionDir, { recursive: true, force: true, maxRetries: 3 }); } catch (e) {}
           this.continuousSessions.delete(sessionId);
         }
       }
@@ -657,20 +671,24 @@ class FFmpegService {
       const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
       const baseTempDir = tempDirSetting?.value || path.resolve(__dirname, '../../../data/transcodes');
       const sessionsRoot = path.join(baseTempDir, 'hls_sessions');
-      if (fs.existsSync(sessionsRoot)) {
-        const dirs = fs.readdirSync(sessionsRoot);
-        for (const dir of dirs) {
-          if (!this.continuousSessions.has(dir) && !this.closingSessions.has(dir)) {
-            const dirPath = path.join(sessionsRoot, dir);
-            try {
-              const stats = fs.statSync(dirPath);
-              if (now - stats.mtimeMs > 5 * 60 * 1000) {
-                fs.rmSync(dirPath, { recursive: true, force: true });
-              }
-            } catch (e) {}
+      
+      try {
+        const stats = await fs.promises.stat(sessionsRoot);
+        if (stats.isDirectory()) {
+          const dirs = await fs.promises.readdir(sessionsRoot);
+          for (const dir of dirs) {
+            if (!this.continuousSessions.has(dir) && !this.closingSessions.has(dir)) {
+              const dirPath = path.join(sessionsRoot, dir);
+              try {
+                const dirStats = await fs.promises.stat(dirPath);
+                if (now - dirStats.mtimeMs > 5 * 60 * 1000) {
+                  await fs.promises.rm(dirPath, { recursive: true, force: true, maxRetries: 3 });
+                }
+              } catch (e) {}
+            }
           }
         }
-      }
+      } catch (e) {}
     } catch (e) {}
   }
 }

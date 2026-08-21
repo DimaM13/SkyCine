@@ -3,6 +3,7 @@ import http from 'http';
 import path from 'path';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import compression from 'compression';
 import { Server as SocketIOServer } from 'socket.io';
 import { initDatabase } from './config/db';
 import { socketService } from './services/socket.service';
@@ -15,6 +16,15 @@ initDatabase();
 
 const app = express();
 const server = http.createServer(app);
+
+// Optimize responses with gzip/brotli compression
+app.use(compression({
+  filter: (req, res) => {
+    // Don't compress HLS video streams, they are already compressed and chunked
+    if (req.path.startsWith('/api/stream/hls')) return false;
+    return compression.filter(req, res);
+  }
+}));
 
 // 2. Configure CORS
 app.use(cors({
