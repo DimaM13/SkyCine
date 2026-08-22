@@ -217,7 +217,7 @@ class FFmpegService {
       } catch (e) {}
     }
 
-    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus', 'flac'];
+    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac']; // Removed opus and flac
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
