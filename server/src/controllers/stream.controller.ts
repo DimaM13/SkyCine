@@ -347,7 +347,8 @@ export class StreamController {
         return;
       }
 
-      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
+      const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');
@@ -375,7 +376,8 @@ export class StreamController {
         return;
       }
 
-      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
+      const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');

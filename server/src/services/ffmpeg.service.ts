@@ -424,7 +424,7 @@ class FFmpegService {
     return this.continuousSessions.has(sessionId) || this.closingSessions.has(sessionId);
   }
 
-  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string): string {
+  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0): string {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200; // fallback 2h
     const segmentDuration = 4;
     const totalSegments = Math.ceil(duration / segmentDuration);
