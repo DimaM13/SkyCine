@@ -578,21 +578,22 @@ class FFmpegService {
     }
   }
 
-  private async waitForSegment(sessionDir: string, segmentName: string): Promise<string | null> {
-    const segPath = path.join(sessionDir, segmentName);
-    for (let i = 0; i < 50; i++) {
-      try {
-        const stats = await fs.promises.stat(segPath);
-        if (stats.size > 100) {
-          return segPath;
+    private async waitForSegment(sessionDir: string, segmentName: string): Promise<string | null> {
+      const segPath = path.join(sessionDir, segmentName);
+      // Wait up to 30 seconds (150 * 200ms) for external HDDs to spin up
+      for (let i = 0; i < 150; i++) {
+        try {
+          const stats = await fs.promises.stat(segPath);
+          if (stats.size > 100) {
+            return segPath;
+          }
+        } catch (e) {
+          // File doesn't exist yet
         }
-      } catch (e) {
-        // File doesn't exist yet
+        await new Promise(r => setTimeout(r, 200));
       }
-      await new Promise(r => setTimeout(r, 200));
+      return null;
     }
-    return null;
-  }
 
   public getHlsPlaylist(sessionId: string, token?: string): string | null {
     const session = this.continuousSessions.get(sessionId) || this.closingSessions.get(sessionId);
