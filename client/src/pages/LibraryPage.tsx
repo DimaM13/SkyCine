@@ -1,4 +1,5 @@
 import { LazyImage } from '../components/library/LazyImage';
+import { InfiniteScroll } from '../components/library/InfiniteScroll';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -25,6 +26,7 @@ export const LibraryPage: React.FC = () => {
 
   // Movies state
   const [movies, setMovies] = useState<MediaItem[]>([]);
+  const [visibleCount, setVisibleCount] = useState(50);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('recent');
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
@@ -82,7 +84,7 @@ export const LibraryPage: React.FC = () => {
         sortBy
       },
     })
-      .then((res) => setMovies(res.data.movies || []))
+      .then((res) => { setMovies(res.data.movies || []); setVisibleCount(50); })
       .catch(() => {})
       .finally(() => setLoading(false));
   };
@@ -414,7 +416,7 @@ export const LibraryPage: React.FC = () => {
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-              {movies.map((movie) => (
+              {movies.slice(0, visibleCount).map((movie) => (
                 <MediaCard
                   key={movie.id}
                   media={movie}
@@ -469,7 +471,7 @@ export const LibraryPage: React.FC = () => {
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {movies.map((vid) => {
+              {movies.slice(0, visibleCount).map((vid) => {
                 const thumbUrl = vid.stillPath || vid.posterPath || `/api/media/item/${vid.id}/thumbnail`;
                 const userProgress = (vid as any).userProgress || 0;
                 const duration = vid.durationSeconds || 0;
@@ -882,7 +884,7 @@ export const LibraryPage: React.FC = () => {
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                  {shows.map((show, idx) => (
+                  {shows.slice(0, visibleCount).map((show, idx) => (
                     <div
                       key={idx}
                       onClick={() => handleSelectShow(show)}

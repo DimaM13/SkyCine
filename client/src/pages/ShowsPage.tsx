@@ -1,4 +1,5 @@
 import { LazyImage } from '../components/library/LazyImage';
+import { InfiniteScroll } from '../components/library/InfiniteScroll';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -15,6 +16,7 @@ export const ShowsPage: React.FC = () => {
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const [shows, setShows] = useState<any[]>([]);
+  const [visibleCount, setVisibleCount] = useState(50);
   const [selectedShow, setSelectedShow] = useState<any | null>(null);
   const [episodes, setEpisodes] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -520,7 +522,7 @@ export const ShowsPage: React.FC = () => {
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-              {shows.map((show, idx) => (
+              {shows.slice(0, visibleCount).map((show, idx) => (
                 <div
                   key={idx}
                   onClick={() => handleSelectShow(show)}

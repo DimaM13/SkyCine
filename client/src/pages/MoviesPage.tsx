@@ -1,3 +1,4 @@
+import { InfiniteScroll } from '../components/library/InfiniteScroll';
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Film, Search, SlidersHorizontal } from 'lucide-react';
@@ -11,6 +12,7 @@ export const MoviesPage: React.FC = () => {
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const [movies, setMovies] = useState<MediaItem[]>([]);
+  const [visibleCount, setVisibleCount] = useState(50);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('recent');
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
@@ -22,7 +24,7 @@ export const MoviesPage: React.FC = () => {
     apiClient.get('/media/movies', {
       params: { search: search.trim() || undefined, sortBy },
     })
-      .then((res) => setMovies(res.data.movies || []))
+      .then((res) => { setMovies(res.data.movies || []); setVisibleCount(50); })
       .catch(() => {})
       .finally(() => setLoading(false));
   };
@@ -116,7 +118,7 @@ export const MoviesPage: React.FC = () => {
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-          {movies.map((movie) => (
+          {movies.slice(0, visibleCount).map((movie) => (
             <MediaCard
               key={movie.id}
               media={movie}

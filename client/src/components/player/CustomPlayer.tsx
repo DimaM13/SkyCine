@@ -173,7 +173,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   // to isolate the selected audio track and avoid browser multi-track audio playback/mixing.
   const isDirectPlay = useMemo(() => {
     const ext = (media.filePath || '').toLowerCase();
-    const isNativeContainer = ext.endsWith('.mp4') || ext.endsWith('.m4v') || ext.endsWith('.webm');
+    let isNativeContainer = ext.endsWith('.mp4') || ext.endsWith('.m4v') || ext.endsWith('.webm');
+    
+    // Chrome/Firefox support MKV natively
+    if (!isAppleDevice && ext.endsWith('.mkv')) {
+      isNativeContainer = true;
+    }
+    
     if (!isNativeContainer || selectedQuality !== 'original') return false;
 
     // Multi-track audio files must use HLS so FFmpeg delivers exactly one isolated audio track

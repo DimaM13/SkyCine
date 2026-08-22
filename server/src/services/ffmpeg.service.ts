@@ -202,7 +202,10 @@ class FFmpegService {
     // Check if video can be directly stream-copied without re-encoding (Lossless Direct Stream Copy)
     const supportedVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
     const isSupportedCodec = supportedVideoCodecs.includes(media.videoCodec?.toLowerCase() || '');
-    const canCopyVideo = quality === 'original' && isSupportedCodec;
+    const isVpxOrAv1Codec = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
+    
+    // Apple devices (AVPlayer) DO NOT support VP9 or AV1 in HLS. Must transcode.
+    const canCopyVideo = quality === 'original' && isSupportedCodec && !(isApple && isVpxOrAv1Codec);
 
     let trackAudioCodec = media.audioCodec?.toLowerCase() || '';
     if (audioIndex > 0) {
