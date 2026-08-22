@@ -320,6 +320,33 @@ export class StreamController {
         ffmpegService.startContinuousHlsSession(media, quality, audioIndex, prewarmStart, isApple, sessionId).catch(() => {});
       }
 
+      // If 'level' is not specified, generate a REAL Master Playlist
+      if (req.query.level !== '1') {
+        let videoCodecStr = 'avc1.42E01E'; // H.264 default
+        const rawVid = (media.videoCodec || '').toLowerCase();
+        if (rawVid === 'hevc' || rawVid === 'h265') videoCodecStr = 'hvc1.1.6.L93.B0';
+        else if (rawVid === 'vp9') videoCodecStr = 'vp09.00.10.08';
+        else if (rawVid === 'vp8') videoCodecStr = 'vp08.00.4.1.04.03.02.01';
+        else if (rawVid === 'av1') videoCodecStr = 'av01.0.05M.08';
+
+        let audioCodecStr = 'mp4a.40.2'; // AAC default
+        const rawAud = (media.audioCodec || '').toLowerCase();
+        if (rawAud === 'ac3') audioCodecStr = 'ac-3';
+        else if (rawAud === 'eac3') audioCodecStr = 'ec-3';
+        else if (rawAud === 'opus') audioCodecStr = 'opus';
+        else if (rawAud === 'flac') audioCodecStr = 'fLaC';
+
+        const codecs = `${videoCodecStr},${audioCodecStr}`;
+        const queryParams = new URLSearchParams(req.query as any);
+        queryParams.set('level', '1');
+
+        const master = `#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS="${codecs}"\n/api/stream/${id}/master.m3u8?${queryParams.toString()}\n`;
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-cache, no-store');
+        res.send(master);
+        return;
+      }
+
       const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');

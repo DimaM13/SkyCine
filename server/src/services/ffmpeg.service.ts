@@ -204,8 +204,8 @@ class FFmpegService {
     const isSupportedCodec = supportedVideoCodecs.includes(media.videoCodec?.toLowerCase() || '');
     const isVpxOrAv1Codec = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
     
-    // Apple devices (AVPlayer) DO NOT support VP9 or AV1 in HLS. Must transcode.
-    const canCopyVideo = quality === 'original' && isSupportedCodec && !(isApple && isVpxOrAv1Codec);
+    // Apple devices CAN play VP9 in FMP4 HLS, but it requires a Master Playlist with CODECS attribute to load quickly.
+    const canCopyVideo = quality === 'original' && isSupportedCodec;
 
     let trackAudioCodec = media.audioCodec?.toLowerCase() || '';
     if (audioIndex > 0) {
@@ -447,6 +447,7 @@ class FFmpegService {
 
     let m3u8 = `#EXTM3U\n`;
     m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
+    m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
     m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
     m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
