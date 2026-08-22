@@ -326,13 +326,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           setIsBuffering(false);
         });
       }
-    } else {
-      const isVpxOrAv1Codec = media.videoCodec === 'vp9' || media.videoCodec === 'vp8' || media.videoCodec === 'av1';
-      // iPad Safari supports MediaSource (MSE). Native AVPlayer has a 30s timeout for VP9 HLS.
-      // By forcing hls.js on iPad for VP9, we bypass AVPlayer and instantly invoke WebKit's software decoder!
-      const needsHlsJsFallback = isAppleDevice && isVpxOrAv1Codec && Hls.isSupported();
-
-      if (isAppleDevice && video.canPlayType('application/vnd.apple.mpegurl') && !needsHlsJsFallback) {
+    } else if (isAppleDevice && video.canPlayType('application/vnd.apple.mpegurl')) {
         // Native Apple Safari / iPad / iOS hardware HLS pipeline (Zero CPU, full hardware HEVC/H.264)
         if (hlsRef.current) {
           hlsRef.current.destroy();
@@ -351,7 +345,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           });
         }
       } else if (Hls.isSupported()) {
-        // PC Chrome / Edge / Firefox / Android (and iPad for VP9) via Hls.js MediaSource Extensions
+      // PC Chrome / Edge / Firefox / Android via Hls.js MediaSource Extensions
         let hls = hlsRef.current;
         if (!hls) {
         hls = new Hls({
@@ -439,7 +433,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       if (shouldPlay) {
         video.play().catch(() => {});
       }
-    }
     }
   }, [videoRef]);
 
