@@ -354,7 +354,7 @@ export class StreamController {
       res.setHeader('Cache-Control', 'no-cache, no-store');
       res.send(playlist);
     } catch (err) {
-      console.error('[Continuous HLS] getHlsMaster error:', err);
+      console.error("[CRITICAL ERROR] HLS failed!", err);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Ошибка генерации HLS плейлиста' });
       }
@@ -383,7 +383,7 @@ export class StreamController {
       res.setHeader('Cache-Control', 'no-cache, no-store');
       res.send(playlist);
     } catch (err) {
-      console.error('[Continuous HLS] getHlsSessionPlaylist error:', err);
+      console.error("[CRITICAL ERROR] HLS failed!", err);
       res.status(500).send('Session playlist error');
     }
   }
@@ -420,7 +420,7 @@ export class StreamController {
       res.setHeader('Cache-Control', 'public, max-age=3600');
       fs.createReadStream(segmentPath).pipe(res);
     } catch (err) {
-      console.error('[Continuous HLS] getHlsSessionSegment error:', err);
+      console.error("[CRITICAL ERROR] HLS failed!", err);
       res.status(500).send('Segment delivery error');
     }
   }
