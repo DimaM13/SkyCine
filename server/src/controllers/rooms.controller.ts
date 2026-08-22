@@ -1,3 +1,4 @@
+import { logger } from '../services/logger.service';
 import { Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
@@ -76,6 +77,7 @@ export class RoomsController {
 
       res.json({ rooms });
     } catch (err) {
+      logger.error('ROOM_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения списка комнат' });
     }
   }
@@ -178,7 +180,7 @@ export class RoomsController {
         },
       });
     } catch (err) {
-      console.error('createRoom error:', err);
+      logger.error('ROOM_ERR', 'createRoom error:', err);
       res.status(500).json({ error: 'Ошибка при создании комнаты' });
     }
   }
@@ -217,6 +219,7 @@ export class RoomsController {
 
       res.json({ room: { ...room, tracks } });
     } catch (err) {
+      logger.error('ROOM_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения комнаты' });
     }
   }
@@ -252,6 +255,7 @@ export class RoomsController {
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
       res.json({ message: 'Комната закрыта' });
     } catch (err) {
+      logger.error('ROOM_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка закрытия комнаты' });
     }
   }

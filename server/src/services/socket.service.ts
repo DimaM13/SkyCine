@@ -61,6 +61,23 @@ class SocketService {
     this.io = io;
 
     io.on('connection', (socket: Socket) => {
+      logger.info('SOCKET', `New client connected: ${socket.id} (IP: ${socket.handshake.address})`);
+
+      socket.onAny((event, ...args) => {
+        if (event !== 'sync:ping' && event !== 'room:host_heartbeat' && event !== 'room:buffer_status' && event !== 'room:request_host_sync') {
+          logger.info('SOCKET_IN', `[${socket.id}] received: ${event}`, args);
+        } else {
+          // Log ping/heartbeats only in debug so we don't spam the info console
+          logger.debug('SOCKET_IN_PING', `[${socket.id}] received: ${event}`, args);
+        }
+      });
+
+      socket.onAnyOutgoing((event, ...args) => {
+        if (event !== 'sync:pong' && event !== 'room:buffer_update' && event !== 'room:host_time_reply') {
+          logger.info('SOCKET_OUT', `[${socket.id}] emitted: ${event}`, args);
+        }
+      });
+
       // 1. Time Synchronization (NTP Protocol)
       socket.on('sync:ping', (data: { clientTimestamp: number }) => {
         socket.emit('sync:pong', {

@@ -1,3 +1,4 @@
+import { logger } from '../services/logger.service';
 import { Response } from 'express';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -354,7 +355,7 @@ export class StreamController {
       res.setHeader('Cache-Control', 'no-cache, no-store');
       res.send(playlist);
     } catch (err) {
-      console.error("[CRITICAL ERROR] HLS failed!", err);
+      logger.error("HLS_CRITICAL", "HLS failed!", err);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Ошибка генерации HLS плейлиста' });
       }
@@ -383,7 +384,7 @@ export class StreamController {
       res.setHeader('Cache-Control', 'no-cache, no-store');
       res.send(playlist);
     } catch (err) {
-      console.error("[CRITICAL ERROR] HLS failed!", err);
+      logger.error("HLS_CRITICAL", "HLS failed!", err);
       res.status(500).send('Session playlist error');
     }
   }
@@ -420,7 +421,7 @@ export class StreamController {
       res.setHeader('Cache-Control', 'public, max-age=3600');
       fs.createReadStream(segmentPath).pipe(res);
     } catch (err) {
-      console.error("[CRITICAL ERROR] HLS failed!", err);
+      logger.error("HLS_CRITICAL", "HLS failed!", err);
       res.status(500).send('Segment delivery error');
     }
   }

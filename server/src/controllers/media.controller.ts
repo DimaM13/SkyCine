@@ -1,3 +1,4 @@
+import { logger } from '../services/logger.service';
 import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -78,6 +79,7 @@ export class MediaController {
 
       res.json({ movies: parsedMovies });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения списка фильмов' });
     }
   }
@@ -118,6 +120,7 @@ export class MediaController {
       const shows = db.prepare(query).all(...params);
       res.json({ shows });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения списка сериалов' });
     }
   }
@@ -152,6 +155,7 @@ export class MediaController {
 
       res.json({ episodes: parsedEpisodes });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения серий сериала' });
     }
   }
@@ -191,6 +195,7 @@ export class MediaController {
 
       res.json({ media: { ...media, tracks } });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения информации о медиа' });
     }
   }
@@ -219,6 +224,7 @@ export class MediaController {
 
       res.json({ items });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка получения истории просмотров' });
     }
   }
@@ -254,6 +260,7 @@ export class MediaController {
 
       res.json({ success: true, isCompleted });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка сохранения прогресса' });
     }
   }
@@ -275,7 +282,7 @@ export class MediaController {
 
       res.json({ candidates });
     } catch (err: any) {
-      console.error('searchMatch error:', err);
+      logger.error('MEDIA_ERR', 'searchMatch error:', err);
       res.status(500).json({ error: err.message || 'Ошибка поиска в TMDB' });
     }
   }
@@ -314,7 +321,7 @@ export class MediaController {
 
       res.json({ message: 'Сопоставление успешно обновлено' });
     } catch (err: any) {
-      console.error('applyMatch error:', err);
+      logger.error('MEDIA_ERR', 'applyMatch error:', err);
       res.status(500).json({ error: err.message || 'Ошибка применения сопоставления' });
     }
   }
@@ -332,7 +339,7 @@ export class MediaController {
       const candidates = await tmdbService.searchCandidates(query, 'SHOW', year);
       res.json({ candidates });
     } catch (err: any) {
-      console.error('searchShowMatch error:', err);
+      logger.error('MEDIA_ERR', 'searchShowMatch error:', err);
       res.status(500).json({ error: err.message || 'Ошибка поиска сериала в TMDB' });
     }
   }
@@ -403,7 +410,7 @@ export class MediaController {
 
       res.json({ message: 'Сопоставление сериала и всех серий успешно обновлено', newShowTitle: title });
     } catch (err: any) {
-      console.error('applyShowMatch error:', err);
+      logger.error('MEDIA_ERR', 'applyShowMatch error:', err);
       res.status(500).json({ error: err.message || 'Ошибка применения сопоставления сериала' });
     }
   }
@@ -445,6 +452,7 @@ export class MediaController {
         }
       });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).send('Ошибка генерации миниатюры');
     }
   }
@@ -455,6 +463,7 @@ export class MediaController {
       db.prepare('DELETE FROM media_items WHERE id = ?').run(id);
       res.json({ message: 'Медиафайл удален из медиатеки' });
     } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).json({ error: 'Ошибка удаления медиафайла' });
     }
   }
