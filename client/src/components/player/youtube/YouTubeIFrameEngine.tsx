@@ -43,11 +43,15 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   onAttachGetIsPaused,
 }) => {
   const playerRef = useRef<any>(null);
+  const containerTargetRef = useRef<HTMLDivElement>(null);
   const isReadyRef = useRef(false);
   const isSeekingRef = useRef(false);
   const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const durationRef = useRef(0);
   const currentTimeRef = useRef(initialPosition || 0);
+
+  const roomStatePropRef = useRef(roomState);
+  roomStatePropRef.current = roomState;
 
   const onTimeUpdateRef = useRef(onTimeUpdate);
   onTimeUpdateRef.current = onTimeUpdate;
@@ -88,7 +92,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!playerRef.current || !isReadyRef.current) return;
+    if (!playerRef.current) return;
     try {
       if (isMuted || volume === 0) {
         playerRef.current.mute();
@@ -104,7 +108,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       currentTimeRef.current = pos;
       markSeeking();
 
-      if (playerRef.current && isReadyRef.current) {
+      if (playerRef.current) {
         try {
           playerRef.current.seekTo(pos, true);
           if (shouldPlay) {
@@ -118,7 +122,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachPlayHandler?.(() => {
-      if (playerRef.current && isReadyRef.current) {
+      if (playerRef.current) {
         try {
           playerRef.current.playVideo();
           disableCaptions(playerRef.current);
@@ -127,7 +131,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachPauseHandler?.(() => {
-      if (playerRef.current && isReadyRef.current) {
+      if (playerRef.current) {
         try {
           playerRef.current.pauseVideo();
         } catch (e) {}
@@ -135,7 +139,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachGetCurrentTime?.(() => {
-      if (playerRef.current && isReadyRef.current) {
+      if (playerRef.current) {
         try {
           return playerRef.current.getCurrentTime() || currentTimeRef.current;
         } catch (e) {}
@@ -144,7 +148,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachGetIsPaused?.(() => {
-      if (playerRef.current && isReadyRef.current) {
+      if (playerRef.current) {
         try {
           const state = playerRef.current.getPlayerState();
           return state !== 1;
@@ -166,7 +170,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   useEffect(() => {
     if (prevRoomStateRef.current !== roomState) {
       prevRoomStateRef.current = roomState;
-      if (playerRef.current && isReadyRef.current) {
+      if (playerRef.current) {
         try {
           if (roomState === 'PLAYING') {
             playerRef.current.playVideo();
@@ -200,8 +204,14 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
         } catch (e) {}
       }
 
-      playerRef.current = new window.YT.Player('yt-iframe-subplayer-target', {
+      if (!containerTargetRef.current) return;
+      const targetId = `yt-player-${Date.now()}`;
+      containerTargetRef.current.innerHTML = `<div id="${targetId}" style="width:100%;height:100%"></div>`;
+
+      playerRef.current = new window.YT.Player(targetId, {
         videoId: videoId,
+        width: '100%',
+        height: '100%',
         playerVars: {
           autoplay: 0,
           controls: 0,
@@ -211,16 +221,13 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
           disablekb: 1,
           iv_load_policy: 3,
           cc_load_policy: 0,
-          cc_lang_pref: 'none',
           playsinline: 1,
           enablejsapi: 1,
-          origin: typeof window !== 'undefined' ? window.location.origin : undefined,
         },
         events: {
           onReady: (event: any) => {
             if (isDisposed) return;
             isReadyRef.current = true;
-            isSeekingRef.current = false;
             onPlayerReadyChangeRef.current(true);
 
             const d = event.target.getDuration();
@@ -235,10 +242,10 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
               event.target.seekTo(initialPosition, true);
             }
 
-            if (prevRoomStateRef.current === 'PLAYING') {
-              event.target.playVideo();
+            if (roomStatePropRef.current === 'PLAYING') {
+              try { event.target.playVideo(); } catch (e) {}
             } else {
-              event.target.pauseVideo();
+              try { event.target.pauseVideo(); } catch (e) {}
             }
 
             onBufferStatusChangeRef.current(true, initialPosition, initialPosition, 100);
@@ -314,7 +321,10 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
 
   return (
     <div className="absolute inset-0 w-full h-full pointer-events-none flex items-center justify-center overflow-hidden">
-      <div id="yt-iframe-subplayer-target" className="w-full h-full scale-[1.01] pointer-events-none" />
+      <div
+        ref={containerTargetRef}
+        className="w-full h-full scale-[1.01] pointer-events-none [&>iframe]:w-full [&>iframe]:h-full [&>iframe]:border-0"
+      />
     </div>
   );
 };

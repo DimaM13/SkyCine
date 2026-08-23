@@ -490,6 +490,7 @@ export function useSyncPlayer({
   const sendPlay = useCallback(() => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
+    executePlay();
     const cur = getRealPos();
     const scheduledStart = getSyncedServerTime() + 350;
     socket.emit('room:action', {
@@ -499,7 +500,7 @@ export function useSyncPlayer({
       playbackRate: playbackRateRef.current,
       timestamp: scheduledStart,
     });
-  }, [socket, room?.id, getRealPos, getSyncedServerTime]);
+  }, [socket, room?.id, executePlay, getRealPos, getSyncedServerTime]);
 
   const sendPause = useCallback(() => {
     if (!socket || !room?.id) return;
