@@ -154,6 +154,22 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     onAttachGetIsPaused,
   ]);
 
+  const roomStateRef = useRef(roomState);
+  useEffect(() => {
+    roomStateRef.current = roomState;
+    if (playerRef.current && isReadyRef.current) {
+      try {
+        if (roomState === 'PLAYING') {
+          playerRef.current.playVideo();
+          onPlayingChange(true);
+        } else if (roomState === 'PAUSED') {
+          playerRef.current.pauseVideo();
+          onPlayingChange(false);
+        }
+      } catch (e) {}
+    }
+  }, [roomState, onPlayingChange]);
+
   // Load YouTube IFrame API
   useEffect(() => {
     if (!window.YT) {
@@ -191,7 +207,8 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
           cc_load_policy: 0,
           cc_lang_pref: 'none',
           playsinline: 1,
-          origin: window.location.origin,
+          enablejsapi: 1,
+          origin: typeof window !== 'undefined' ? window.location.origin : undefined,
         },
         events: {
           onReady: (event: any) => {
@@ -212,7 +229,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
               event.target.seekTo(initialPosition, true);
             }
 
-            if (roomState === 'PLAYING') {
+            if (roomStateRef.current === 'PLAYING') {
               event.target.playVideo();
               onPlayingChange(true);
             } else {
@@ -233,16 +250,11 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
             }
 
             if (event.data === 1) {
-              if (roomState !== 'PLAYING') {
-                try { event.target.pauseVideo(); } catch (e) {}
-                onPlayingChange(false);
-              } else {
-                onPlayingChange(true);
-                const d = event.target.getDuration();
-                if (d && d > 0) {
-                  durationRef.current = d;
-                  onTimeUpdate(event.target.getCurrentTime() || 0, d);
-                }
+              onPlayingChange(true);
+              const d = event.target.getDuration();
+              if (d && d > 0) {
+                durationRef.current = d;
+                onTimeUpdate(event.target.getCurrentTime() || 0, d);
               }
             } else if (event.data === 2 || event.data === 0) {
               onPlayingChange(false);
@@ -278,7 +290,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       isReadyRef.current = false;
       onPlayerReadyChange(false);
     };
-  }, [videoId, disableCaptions]);
+  }, [videoId, disableCaptions, onBufferStatusChange, onPlayerReadyChange, onPlayingChange, onTimeUpdate, onAgeRestrictedFallback, initialPosition]);
 
   // Periodic time & buffer tracking
   useEffect(() => {

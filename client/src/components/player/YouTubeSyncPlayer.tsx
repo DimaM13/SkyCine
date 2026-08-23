@@ -290,11 +290,14 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
       {/* Buffer Barrier Readiness Banner */}
       <BufferBarrierBanner
-        isVisible={!isPlaying && members.length > 1}
+        isVisible={!isPlaying && isBufferingBarrier && members.length > 1}
         members={members}
         isHost={isHost}
         onForcePlay={() => {
-          if (isHost) onPlayRequest();
+          if (isHost) {
+            onForceBarrierPlay?.();
+            onPlayRequest();
+          }
         }}
       />
 
