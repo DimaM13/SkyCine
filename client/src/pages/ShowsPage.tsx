@@ -397,8 +397,15 @@ export const ShowsPage: React.FC = () => {
                           <LazyImage
                             src={posterUrl}
                             alt={epTitle}
+                            loading="lazy"
                             onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).src = `/api/media/item/${ep.id}/thumbnail`;
+                              const target = e.currentTarget as HTMLImageElement;
+                              if (!target.src.includes('/thumbnail')) {
+                                target.src = `/api/media/item/${ep.id}/thumbnail`;
+                              } else {
+                                target.onerror = null;
+                                target.style.opacity = '0.3';
+                              }
                             }}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                           />

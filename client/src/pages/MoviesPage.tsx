@@ -1,5 +1,4 @@
-import { InfiniteScroll } from '../components/library/InfiniteScroll';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Film, Search, SlidersHorizontal } from 'lucide-react';
 import { apiClient } from '../api/client';
@@ -12,19 +11,21 @@ export const MoviesPage: React.FC = () => {
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const [movies, setMovies] = useState<MediaItem[]>([]);
-  const [visibleCount, setVisibleCount] = useState(50);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('recent');
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [visibleCount, setVisibleCount] = useState(36);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const fetchMovies = () => {
     setLoading(true);
+    setVisibleCount(36);
     apiClient.get('/media/movies', {
       params: { search: search.trim() || undefined, sortBy },
     })
-      .then((res) => { setMovies(res.data.movies || []); setVisibleCount(50); })
+      .then((res) => setMovies(res.data.movies || []))
       .catch(() => {})
       .finally(() => setLoading(false));
   };
@@ -32,6 +33,21 @@ export const MoviesPage: React.FC = () => {
   useEffect(() => {
     fetchMovies();
   }, [sortBy]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const threshold = document.documentElement.scrollHeight - 600;
+      if (scrollBottom >= threshold) {
+        setVisibleCount((prev) => prev + 36);
+      }
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll();
+
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [movies.length]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -130,6 +146,17 @@ export const MoviesPage: React.FC = () => {
               }}
             />
           ))}
+          {visibleCount < movies.length && (
+            <div className="col-span-full py-8 flex flex-col items-center justify-center gap-2">
+              <button
+                onClick={() => setVisibleCount((prev) => prev + 36)}
+                className="px-6 py-2.5 rounded-xl bg-cinema-800 hover:bg-cinema-700 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer shadow-lg hover:border-cinema-gold/40 flex items-center gap-2"
+              >
+                <span>Загрузить еще</span>
+                <span className="text-cinema-gold font-mono text-[11px]">({movies.length - visibleCount} осталось)</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 

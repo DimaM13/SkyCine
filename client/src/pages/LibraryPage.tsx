@@ -1,6 +1,4 @@
-import { LazyImage } from '../components/library/LazyImage';
-import { InfiniteScroll } from '../components/library/InfiniteScroll';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Film, Tv, Video, Search, SlidersHorizontal, RefreshCw,
@@ -23,10 +21,11 @@ export const LibraryPage: React.FC = () => {
   const [library, setLibrary] = useState<Library | null>(null);
   const [loading, setLoading] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(36);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   // Movies state
   const [movies, setMovies] = useState<MediaItem[]>([]);
-  const [visibleCount, setVisibleCount] = useState(50);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('recent');
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
@@ -102,14 +101,32 @@ export const LibraryPage: React.FC = () => {
   useEffect(() => {
     setSelectedShow(null);
     setSearch('');
+    setVisibleCount(36);
     fetchLibraryInfoAndData();
   }, [libraryId]);
 
   useEffect(() => {
+    setVisibleCount(36);
     if (library && library.type === 'MOVIES') {
       fetchMovies(library.id);
     }
   }, [sortBy]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const threshold = document.documentElement.scrollHeight - 600;
+      if (scrollBottom >= threshold) {
+        setVisibleCount((prev) => prev + 36);
+      }
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    // Run initial check to auto-fill large screens
+    handleScroll();
+
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [movies.length, shows.length, episodes.length]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -428,6 +445,17 @@ export const LibraryPage: React.FC = () => {
                   }}
                 />
               ))}
+              {visibleCount < movies.length && (
+                <div className="col-span-full py-8 flex flex-col items-center justify-center gap-2">
+                  <button
+                    onClick={() => setVisibleCount((prev) => prev + 36)}
+                    className="px-6 py-2.5 rounded-xl bg-cinema-800 hover:bg-cinema-700 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer shadow-lg hover:border-cinema-gold/40 flex items-center gap-2"
+                  >
+                    <span>Загрузить еще</span>
+                    <span className="text-cinema-gold font-mono text-[11px]">({movies.length - visibleCount} осталось)</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -489,12 +517,14 @@ export const LibraryPage: React.FC = () => {
                   >
                     {/* 16:9 Thumbnail Container */}
                     <div className="relative aspect-video w-full overflow-hidden bg-cinema-950">
-                      <LazyImage
+                      <img
                         src={thumbUrl}
                         alt={vid.title}
                         loading="lazy"
                         onError={(e) => {
-                          (e.currentTarget as HTMLImageElement).src = `/api/media/item/${vid.id}/thumbnail`;
+                          const target = e.currentTarget as HTMLImageElement;
+                          target.onerror = null;
+                          target.style.opacity = '0.3';
                         }}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
@@ -543,6 +573,17 @@ export const LibraryPage: React.FC = () => {
                   </div>
                 );
               })}
+              {visibleCount < movies.length && (
+                <div className="col-span-full py-8 flex flex-col items-center justify-center gap-2">
+                  <button
+                    onClick={() => setVisibleCount((prev) => prev + 36)}
+                    className="px-6 py-2.5 rounded-xl bg-cinema-800 hover:bg-cinema-700 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer shadow-lg hover:border-cinema-gold/40 flex items-center gap-2"
+                  >
+                    <span>Загрузить еще видео</span>
+                    <span className="text-cinema-gold font-mono text-[11px]">({movies.length - visibleCount} осталось)</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -582,9 +623,10 @@ export const LibraryPage: React.FC = () => {
 
                 <div className="relative z-10 p-6 md:p-8 flex flex-col md:flex-row gap-6 md:gap-8 items-start">
                   {selectedShow.posterPath ? (
-                    <LazyImage
+                    <img
                       src={selectedShow.posterPath}
                       alt={selectedShow.showTitle}
+                      loading="lazy"
                       className="w-36 md:w-52 aspect-[2/3] rounded-2xl object-cover shadow-2xl shrink-0 border border-white/10"
                     />
                   ) : (
@@ -767,11 +809,14 @@ export const LibraryPage: React.FC = () => {
                           >
                             {/* 16:9 Episode Thumbnail with Badges */}
                             <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
-                              <LazyImage
+                              <img
                                 src={posterUrl}
                                 alt={epTitle}
+                                loading="lazy"
                                 onError={(e) => {
-                                  (e.currentTarget as HTMLImageElement).src = `/api/media/item/${ep.id}/thumbnail`;
+                                  const target = e.currentTarget as HTMLImageElement;
+                                  target.onerror = null;
+                                  target.style.opacity = '0.3';
                                 }}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                               />
@@ -892,9 +937,10 @@ export const LibraryPage: React.FC = () => {
                     >
                       <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
                         {show.posterPath ? (
-                          <LazyImage
+                          <img
                             src={show.posterPath}
                             alt={show.showTitle}
+                            loading="lazy"
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                           />
                         ) : (
@@ -943,6 +989,17 @@ export const LibraryPage: React.FC = () => {
                       </div>
                     </div>
                   ))}
+                  {visibleCount < shows.length && (
+                    <div className="col-span-full py-8 flex flex-col items-center justify-center gap-2">
+                      <button
+                        onClick={() => setVisibleCount((prev) => prev + 36)}
+                        className="px-6 py-2.5 rounded-xl bg-cinema-800 hover:bg-cinema-700 text-slate-300 hover:text-white border border-white/10 text-xs font-semibold transition-all cursor-pointer shadow-lg hover:border-cinema-gold/40 flex items-center gap-2"
+                      >
+                        <span>Загрузить еще сериалы</span>
+                        <span className="text-cinema-gold font-mono text-[11px]">({shows.length - visibleCount} осталось)</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </>
@@ -1036,9 +1093,10 @@ export const LibraryPage: React.FC = () => {
                         className="p-3.5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/5 hover:border-white/15 transition-all flex items-start gap-4"
                       >
                         {cand.posterPath ? (
-                          <LazyImage
+                          <img
                             src={cand.posterPath}
                             alt={cand.title}
+                            loading="lazy"
                             className="w-14 aspect-[2/3] object-cover rounded-xl shadow-md shrink-0"
                           />
                         ) : (

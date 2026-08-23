@@ -145,5 +145,64 @@ export class AdminController {
       res.status(500).json({ error: err.message || 'Ошибка чтения файловой системы' });
     }
   }
+
+  public static async restartServer(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      res.json({ message: 'Сервер перезагружается...' });
+
+      setTimeout(async () => {
+        console.log('[SERVER] 🔄 Перезагрузка сервера по запросу администратора...');
+        try {
+          const { ffmpegService } = await import('../services/ffmpeg.service');
+          for (const s of (ffmpegService as any).continuousSessions?.values() || []) {
+            try { (ffmpegService as any).terminateProcess(s.process); } catch (e) {}
+          }
+        } catch (e) {}
+
+        const isDev = process.env.TS_NODE_DEV || __filename.endsWith('.ts');
+        if (isDev) {
+          // In ts-node-dev: touching src/index.ts triggers an instant in-place reload in the existing console window
+          try {
+            const fs = await import('fs');
+            const path = await import('path');
+            const indexPath = path.resolve(__dirname, '../index.ts');
+            if (fs.existsSync(indexPath)) {
+              fs.utimesSync(indexPath, new Date(), new Date());
+              console.log('[SERVER] ⚡ In-place ts-node-dev reload triggered via index.ts touch');
+              return;
+            }
+          } catch (e) {
+            console.error('[SERVER] Failed in-place reload, falling back to process exit:', e);
+          }
+        }
+
+        const { spawn } = await import('child_process');
+        const path = await import('path');
+        const serverDir = path.resolve(__dirname, '../..');
+
+        const isWin = process.platform === 'win32';
+        if (isWin) {
+          const child = spawn('cmd.exe', ['/c', 'timeout /t 2 /nobreak >nul && npm run dev'], {
+            cwd: serverDir,
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          child.unref();
+        } else {
+          const child = spawn('sh', ['-c', 'sleep 2 && npm run dev'], {
+            cwd: serverDir,
+            detached: true,
+            stdio: 'ignore',
+          });
+          child.unref();
+        }
+
+        process.exit(0);
+      }, 500);
+    } catch (err) {
+      res.status(500).json({ error: 'Ошибка перезагрузки сервера' });
+    }
+  }
 }
 

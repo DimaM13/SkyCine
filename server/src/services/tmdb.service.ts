@@ -28,7 +28,7 @@ export interface TMDBEpisodeMetadata {
 class TMDBService {
   private getApiKey(): string {
     const row = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('tmdbApiKey') as { value: string } | undefined;
-    return row?.value || process.env.TMDB_API_KEY || '';
+    return row?.value || process.env.TMDB_API_KEY || 'af51bdc93df8ab4cf422aaba091d83d1';
   }
 
   public async searchMovie(title: string, year?: number): Promise<TMDBMetadata | null> {

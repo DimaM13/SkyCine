@@ -168,18 +168,16 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Direct Play eligibility check:
-  // Direct Play is used for native MP4/M4V/WebM with 1 audio track.
+  // Direct Play is used for native containers with 1 audio track.
   // Files with multiple audio tracks MUST use Direct Stream (HLS with direct stream copy)
   // to isolate the selected audio track and avoid browser multi-track audio playback/mixing.
   const isDirectPlay = useMemo(() => {
     const ext = (media.filePath || '').toLowerCase();
-    let isNativeContainer = ext.endsWith('.mp4') || ext.endsWith('.m4v') || ext.endsWith('.webm');
-    
-    // Chrome/Firefox support MKV natively
-    if (!isAppleDevice && ext.endsWith('.mkv')) {
-      isNativeContainer = true;
-    }
-    
+    const pcContainers = ['.mp4', '.m4v', '.webm', '.mkv'];
+    const appleContainers = ['.mp4', '.m4v', '.webm'];
+    const isNativeContainer = isAppleDevice
+      ? appleContainers.some(c => ext.endsWith(c))
+      : pcContainers.some(c => ext.endsWith(c));
     if (!isNativeContainer || selectedQuality !== 'original') return false;
 
     // Multi-track audio files must use HLS so FFmpeg delivers exactly one isolated audio track
@@ -187,39 +185,41 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       return false;
     }
 
-    const rawVideoCodec = (media.videoCodec || 'h264').toLowerCase();
-    const supportedVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    if (!supportedVideoCodecs.includes(rawVideoCodec)) {
-      return false;
-    }
+    const selectedTrack = audioTracks.find(t => t.streamIndex === selectedAudioTrack) || audioTracks[0];
+    const rawAudioCodec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
+    const rawVideoCodec = (media.videoCodec || '').toLowerCase();
 
     if (isAppleDevice) {
-      const selectedTrack = audioTracks[0];
-      const codec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
-      const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac', 'flac'].some(c => codec.includes(c));
-      return isNativeAppleAudio;
+      const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac'].some(c => rawAudioCodec.includes(c));
+      const isNativeAppleVideo = ['h264', 'hevc', 'h265'].includes(rawVideoCodec);
+      return isNativeAppleAudio && isNativeAppleVideo;
     } else {
-      const selectedTrack = audioTracks[0];
-      const codec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
-      const isNativePcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'].some(c => codec.includes(c));
-      return isNativePcAudio;
+      const isNativePcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'].some(c => rawAudioCodec.includes(c));
+      const isNativePcVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'].includes(rawVideoCodec);
+      return isNativePcAudio && isNativePcVideo;
     }
-  }, [media.filePath, media.videoCodec, media.audioCodec, selectedQuality, audioTracks, isAppleDevice]);
+  }, [media.filePath, media.audioCodec, media.videoCodec, selectedQuality, audioTracks, selectedAudioTrack, isAppleDevice]);
 
   // Stream mode status for user transparency
   const streamMode = useMemo(() => {
     const selectedTrackObj = audioTracks.find(t => t.streamIndex === selectedAudioTrack) || audioTracks[0];
     const rawAudioCodec = (selectedTrackObj?.codec || media.audioCodec || 'aac').toLowerCase();
     const rawVideoCodec = (media.videoCodec || 'h264').toLowerCase();
+    const channels = selectedTrackObj?.channels || 2;
+    const channelsLabel = channels >= 6 ? '5.1' : channels === 8 ? '7.1' : '2.0';
 
-    const appleAudioCodecs = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus', 'flac'];
+    // Apple supports AC3/EAC3/AAC/MP3/ALAC natively. PC/Android browsers natively support AAC/MP3/Opus/FLAC/Vorbis/WAV.
+    const appleAudioCodecs = ['aac', 'ac3', 'eac3', 'mp3', 'alac'];
     const pcAudioCodecs = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
-
     const isDirectAudio = isAppleDevice
       ? appleAudioCodecs.some(c => rawAudioCodec.includes(c))
       : pcAudioCodecs.some(c => rawAudioCodec.includes(c));
 
-    const isSupportedVideoCodec = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'].includes(rawVideoCodec);
+    const appleVideoCodecs = ['h264', 'hevc', 'h265'];
+    const pcVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    const isSupportedVideoCodec = isAppleDevice
+      ? appleVideoCodecs.includes(rawVideoCodec)
+      : pcVideoCodecs.includes(rawVideoCodec);
     const isDirectVideo = selectedQuality === 'original' && isSupportedVideoCodec;
 
     const audioDisplayName = rawAudioCodec.toUpperCase();
@@ -231,10 +231,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         label: 'Direct Play',
         color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30',
         dot: 'bg-emerald-400',
-        title: 'Прямой файл (Direct Play)',
-        description: 'Оригинальный файл отдается напрямую без HLS и без перекодирования.',
-        videoDesc: `${videoDisplayName} (Оригинал, 0% нагрузки)`,
-        audioDesc: `${audioDisplayName} (Прямой звук, 0% нагрузки)`
+        title: 'Прямое воспроизведение (Direct Play)',
+        description: 'Файл воспроизводится напрямую в исходном качестве без перекодирования.',
+        videoDesc: `${videoDisplayName} • Оригинал`,
+        audioDesc: `${audioDisplayName} ${channelsLabel} • Оригинал`
       };
     }
 
@@ -243,40 +243,53 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         // Both video and audio are passed 100% losslessly untouched!
         return {
           type: 'direct_stream_lossless',
-          label: 'Direct Stream (Оригинал)',
+          label: 'Прямой поток (Оригинал)',
           color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30',
           dot: 'bg-emerald-400',
-          title: 'Прямой стрим (Direct Stream • 100% Оригинал)',
-          description: 'Видео и звук передаются напрямую в оригинале без сжатия (Direct Stream Copy, 0% нагрузки на GPU/CPU).',
-          videoDesc: `${videoDisplayName} (100% Оригинал, Direct Copy)`,
-          audioDesc: `${audioDisplayName} (100% Нативный звук, Direct Copy)`
+          title: 'Прямой поток (Direct Stream)',
+          description: 'Видео и звук передаются напрямую без перекодирования (Direct Copy).',
+          videoDesc: `${videoDisplayName} • Оригинал (Direct Copy)`,
+          audioDesc: `${audioDisplayName} ${channelsLabel} • Оригинал (Direct Copy)`
         };
       } else {
-        // Video is direct, but audio is converted to universal AAC for PC/browser support
+        // Video is direct, but audio is converted to universal multi-channel AAC
         return {
           type: 'direct_stream_audio_conv',
-          label: 'Direct Video + AAC HD',
+          label: 'Прямое видео + AAC',
           color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30',
           dot: 'bg-emerald-400',
-          title: 'Прямое видео + Аудио поток (Direct Stream)',
-          description: `Видео передается в 100% оригинале без сжатия, аудио (${audioDisplayName}) бережно переводится в AAC 320 kbps для поддержки на ПК/Android.`,
-          videoDesc: `${videoDisplayName} (100% Оригинал, Direct Copy)`,
-          audioDesc: `AAC 320 kbps (из ${audioDisplayName})`
+          title: 'Прямое видео + Аудиопоток',
+          description: `Видеопоток передается в оригинале без сжатия. Аудио (${audioDisplayName}) кодируется в многоканальный AAC ${channelsLabel} для совместимости.`,
+          videoDesc: `${videoDisplayName} • Оригинал (Direct Copy)`,
+          audioDesc: `AAC ${channelsLabel} (${channels >= 6 ? '512 kbps' : '320 kbps'})`
         };
       }
     }
 
+    if (selectedQuality === 'original') {
+      return {
+        type: 'transcode_original',
+        label: 'Транскодирование (Оригинал)',
+        color: 'bg-sky-500/20 text-sky-300 border-sky-500/40 hover:bg-sky-500/30',
+        dot: 'bg-sky-400',
+        title: 'Транскодирование видео (Исходное качество)',
+        description: `Видеопоток (${videoDisplayName}) перекодируется в H.264 с сохранением исходного разрешения и качества (Visually Lossless).`,
+        videoDesc: `H.264 • Оригинал (Аппаратный энкодер)`,
+        audioDesc: `AAC ${channelsLabel} (${channels >= 6 ? '512 kbps' : '320 kbps'})`
+      };
+    }
+
     return {
       type: 'transcode',
-      label: `GPU Transcode (${selectedQuality})`,
+      label: `Транскодирование (${selectedQuality})`,
       color: 'bg-sky-500/20 text-sky-300 border-sky-500/40 hover:bg-sky-500/30',
       dot: 'bg-sky-400',
-      title: 'Аппаратное преобразование (GPU)',
-      description: `Видеопоток масштабируется в ${selectedQuality} через аппаратный энкодер видеокарты.`,
-      videoDesc: `H.264 ${selectedQuality} (NVIDIA NVENC)`,
-      audioDesc: isDirectAudio ? `${audioDisplayName} (Прямой звук)` : `AAC 320 kbps (Синхронизированный поток)`
+      title: `Транскодирование (${selectedQuality})`,
+      description: `Видеопоток масштабируется в ${selectedQuality} через аппаратный энкодер.`,
+      videoDesc: `H.264 ${selectedQuality} (Аппаратный энкодер)`,
+      audioDesc: `AAC ${channelsLabel} (${channels >= 6 ? '512 kbps' : '320 kbps'})`
     };
-  }, [isDirectPlay, media.videoCodec, media.audioCodec, selectedQuality, selectedAudioTrack, audioTracks]);
+  }, [isDirectPlay, media.videoCodec, media.audioCodec, selectedQuality, selectedAudioTrack, audioTracks, isAppleDevice]);
 
   const hlsRef = useRef<Hls | null>(null);
 
@@ -1687,7 +1700,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                             selectedQuality === q ? 'bg-cinema-gold/20 text-cinema-gold font-bold' : 'hover:bg-white/10'
                           }`}
                         >
-                          <span>{q === 'original' ? 'Оригинал (Исходное)' : q}</span>
+                          <span>{q === 'original' ? 'Оригинал (Исходное качество)' : q}</span>
                           {selectedQuality === q && <span>✓</span>}
                         </button>
                       ))}
@@ -1704,6 +1717,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                       </button>
                       {audioTracks.map((t: MediaTrack) => {
                         const isSelected = selectedAudioTrack === t.streamIndex;
+                        const channelsStr = t.channels ? (t.channels >= 6 ? '5.1' : t.channels === 8 ? '7.1' : '2.0') : '';
                         return (
                           <button
                             key={t.id || t.streamIndex}
@@ -1717,7 +1731,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                           >
                             <div className="truncate pr-2">
                               <p className="font-semibold text-xs">{t.title || `Дорожка #${t.streamIndex}`}</p>
-                              <p className="text-[10px] text-slate-400 uppercase">{t.language || 'Не указан'} • {t.codec || 'Audio'}</p>
+                              <p className="text-[10px] text-slate-400 uppercase">
+                                {t.language || 'Не указан'} • {t.codec || 'Audio'}{channelsStr ? ` • ${channelsStr}` : ''}
+                              </p>
                             </div>
                             {isSelected && <span>✓</span>}
                           </button>

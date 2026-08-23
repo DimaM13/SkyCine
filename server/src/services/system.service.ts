@@ -4,6 +4,9 @@ import { TranscodeSession } from '../types';
 
 class SystemService {
   private activeSessions: Map<string, TranscodeSession> = new Map();
+  private cachedStats: any = null;
+  private lastStatsFetch = 0;
+  private isFetchingStats = false;
 
   public registerSession(session: TranscodeSession) {
     this.activeSessions.set(session.sessionId, session);
@@ -25,6 +28,25 @@ class SystemService {
   }
 
   public async getSystemStats() {
+    const now = Date.now();
+    // Cache slow hardware/disk stats for 5 seconds to prevent event loop blocking
+    if (this.cachedStats && (now - this.lastStatsFetch < 5000)) {
+      return {
+        ...this.cachedStats,
+        activeStreamsCount: this.activeSessions.size,
+        uptimeSeconds: os.uptime(),
+      };
+    }
+
+    if (this.isFetchingStats && this.cachedStats) {
+      return {
+        ...this.cachedStats,
+        activeStreamsCount: this.activeSessions.size,
+        uptimeSeconds: os.uptime(),
+      };
+    }
+
+    this.isFetchingStats = true;
     try {
       const [cpuLoad, mem, fsSize, graphics] = await Promise.all([
         si.currentLoad(),
@@ -49,7 +71,7 @@ class SystemService {
         mount: d.mount,
       }));
 
-      return {
+      this.cachedStats = {
         cpu: {
           cores: os.cpus().length,
           model: os.cpus()[0]?.model || 'Unknown CPU',
@@ -64,6 +86,11 @@ class SystemService {
         },
         disks,
         gpus,
+      };
+      this.lastStatsFetch = Date.now();
+
+      return {
+        ...this.cachedStats,
         activeStreamsCount: this.activeSessions.size,
         uptimeSeconds: os.uptime(),
       };
@@ -76,6 +103,8 @@ class SystemService {
         activeStreamsCount: this.activeSessions.size,
         uptimeSeconds: os.uptime(),
       };
+    } finally {
+      this.isFetchingStats = false;
     }
   }
 }

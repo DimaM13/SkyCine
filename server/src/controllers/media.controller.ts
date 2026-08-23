@@ -10,6 +10,36 @@ import { MediaItem } from '../types';
 import { tmdbService } from '../services/tmdb.service';
 import { permissionService } from '../services/permission.service';
 
+const activeThumbnailTasks = new Map<string, Promise<string | null>>();
+const failedThumbnailIds = new Map<string, number>();
+let currentRunningThumbJobs = 0;
+const MAX_CONCURRENT_THUMBS = 2;
+const thumbJobQueue: Array<() => void> = [];
+
+function queueThumbnailJob<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const execute = () => {
+      currentRunningThumbJobs++;
+      fn()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          currentRunningThumbJobs--;
+          if (thumbJobQueue.length > 0) {
+            const next = thumbJobQueue.shift();
+            if (next) next();
+          }
+        });
+    };
+
+    if (currentRunningThumbJobs < MAX_CONCURRENT_THUMBS) {
+      execute();
+    } else {
+      thumbJobQueue.push(execute);
+    }
+  });
+}
+
 export class MediaController {
   public static async getMovies(req: AuthRequest, res: Response): Promise<void> {
     try {
@@ -417,7 +447,25 @@ export class MediaController {
 
   public static async getThumbnail(req: Request, res: Response): Promise<void> {
     try {
-      const { id } = req.params;
+      const id = String(req.params.id || '');
+
+      const thumbDir = path.resolve(__dirname, '../../data/thumbnails');
+      const thumbFile = path.join(thumbDir, `${id}.jpg`);
+
+      // 1. Fast cache check (0ms response)
+      if (fs.existsSync(thumbFile)) {
+        res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+        res.sendFile(thumbFile);
+        return;
+      }
+
+      // 2. Fast failed-cache check (0ms response)
+      const failedTime = failedThumbnailIds.get(id);
+      if (failedTime && Date.now() - failedTime < 60000) {
+        res.status(404).send('Миниатюра недоступна');
+        return;
+      }
+
       const media = db.prepare('SELECT filePath, posterPath, durationSeconds FROM media_items WHERE id = ?').get(id) as { filePath: string; posterPath: string; durationSeconds: number } | undefined;
 
       if (!media || !fs.existsSync(media.filePath)) {
@@ -425,32 +473,43 @@ export class MediaController {
         return;
       }
 
-      const thumbDir = path.resolve(__dirname, '../../data/thumbnails');
       if (!fs.existsSync(thumbDir)) {
-        fs.mkdirSync(thumbDir, { recursive: true });
+        try { fs.mkdirSync(thumbDir, { recursive: true }); } catch (e) {}
       }
 
-      const thumbFile = path.join(thumbDir, `${id}.jpg`);
-      if (fs.existsSync(thumbFile)) {
-        res.sendFile(thumbFile);
-        return;
+      // 3. Deduplicate in-flight generation for the same media ID
+      let task = activeThumbnailTasks.get(id);
+      if (!task) {
+        task = queueThumbnailJob(async () => {
+          return new Promise<string | null>((resolve) => {
+            const seekSec = Math.min(120, Math.max(10, Math.floor((media.durationSeconds || 300) * 0.15)));
+            const ffmpegCmd = `ffmpeg -y -ss ${seekSec} -i "${media.filePath}" -vframes 1 -q:v 4 -vf "scale=480:-1" "${thumbFile}"`;
+
+            exec(ffmpegCmd, { timeout: 8000 }, (err) => {
+              if (err || !fs.existsSync(thumbFile)) {
+                failedThumbnailIds.set(id, Date.now());
+                resolve(null);
+              } else {
+                resolve(thumbFile);
+              }
+            });
+          });
+        }).finally(() => {
+          activeThumbnailTasks.delete(id);
+        });
+
+        activeThumbnailTasks.set(id, task);
       }
 
-      // Generate video frame thumbnail using ffmpeg
-      const seekSec = Math.min(120, Math.max(10, Math.floor((media.durationSeconds || 300) * 0.15)));
-      const ffmpegCmd = `ffmpeg -y -ss ${seekSec} -i "${media.filePath}" -vframes 1 -q:v 3 -vf "scale=640:-1" "${thumbFile}"`;
-
-      exec(ffmpegCmd, (err) => {
-        if (err || !fs.existsSync(thumbFile)) {
-          if (media.posterPath) {
-            res.redirect(media.posterPath);
-          } else {
-            res.status(404).send('Не удалось создать миниатюру');
-          }
-        } else {
-          res.sendFile(thumbFile);
-        }
-      });
+      const resultFile = await task;
+      if (resultFile && fs.existsSync(resultFile)) {
+        res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+        res.sendFile(resultFile);
+      } else if (media.posterPath) {
+        res.redirect(media.posterPath);
+      } else {
+        res.status(404).send('Не удалось создать миниатюру');
+      }
     } catch (err) {
       logger.error('MEDIA_ERR', 'API Error:', err);
       res.status(500).send('Ошибка генерации миниатюры');

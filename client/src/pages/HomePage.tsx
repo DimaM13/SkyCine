@@ -152,16 +152,23 @@ export const HomePage: React.FC = () => {
  className="group relative rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
  >
  <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
- <LazyImage
+ <img
  src={thumbUrl}
  alt={item.title}
+ loading="lazy"
  onError={(e) => {
- (e.currentTarget as HTMLImageElement).src = `/api/media/item/${item.mediaId}/thumbnail`;
+ const target = e.currentTarget as HTMLImageElement;
+ if (!target.src.includes('/thumbnail')) {
+ target.src = `/api/media/item/${item.mediaId}/thumbnail`;
+ } else {
+ target.onerror = null;
+ target.style.opacity = '0.3';
+ }
  }}
  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
  />
  {/* Progress Bar */}
- <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/80">
+ <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/50">
  <div className="h-full bg-cinema-gold shadow-[0_0_8px_rgba(229,160,13,0.9)]" style={{ width: `${percent}%` }} />
  </div>
  </div>

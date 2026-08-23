@@ -233,7 +233,7 @@ export function initDatabase() {
   `);
 
   insertSetting.run('serverName', 'SkyCine Server');
-  insertSetting.run('tmdbApiKey', ''); // Can be configured in UI
+  insertSetting.run('tmdbApiKey', 'af51bdc93df8ab4cf422aaba091d83d1');
   insertSetting.run('transcodeHardware', 'auto');
   insertSetting.run('maxTranscodeBitrate', '20000'); // 20 Mbps
   insertSetting.run('allowPublicRegistration', 'true');

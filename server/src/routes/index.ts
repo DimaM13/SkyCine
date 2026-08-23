@@ -98,5 +98,6 @@ router.delete('/admin/users/:userId', requireAdmin, AdminController.deleteUser);
 router.get('/admin/logs', requireAdmin, AdminController.getLogs);
 router.delete('/admin/logs', requireAdmin, AdminController.clearLogs);
 router.get('/admin/fs/browse', requireAdmin, AdminController.browseFilesystem);
+router.post('/admin/restart', requireAdmin, AdminController.restartServer);
 
 export default router;

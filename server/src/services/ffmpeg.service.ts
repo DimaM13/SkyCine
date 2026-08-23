@@ -200,30 +200,46 @@ class FFmpegService {
     }
 
     // Check if video can be directly stream-copied without re-encoding (Lossless Direct Stream Copy)
-    const supportedVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const isSupportedCodec = supportedVideoCodecs.includes(media.videoCodec?.toLowerCase() || '');
-    const isVpxOrAv1Codec = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
-    
-    // Apple devices CAN play VP9 in FMP4 HLS, but it requires a Master Playlist with CODECS attribute to load quickly.
+    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    const appleSupportedCodecs = ['h264', 'hevc', 'h265'];
+    const isSupportedCodec = isApple
+      ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
+      : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
     const canCopyVideo = quality === 'original' && isSupportedCodec;
 
     let trackAudioCodec = media.audioCodec?.toLowerCase() || '';
+    let trackChannels = 2;
     if (audioIndex > 0) {
       try {
-        const track = db.prepare('SELECT codec FROM media_tracks WHERE mediaItemId = ? AND streamIndex = ?').get(media.id, audioIndex) as { codec: string } | undefined;
+        const track = db.prepare('SELECT codec, channels FROM media_tracks WHERE mediaItemId = ? AND streamIndex = ?').get(media.id, audioIndex) as { codec: string; channels: number } | undefined;
         if (track?.codec) {
           trackAudioCodec = track.codec.toLowerCase();
+        }
+        if (track?.channels) {
+          trackChannels = track.channels;
+        }
+      } catch (e) {}
+    } else {
+      try {
+        const track = db.prepare('SELECT codec, channels FROM media_tracks WHERE mediaItemId = ? AND type = "AUDIO" ORDER BY isDefault DESC, streamIndex ASC LIMIT 1').get(media.id) as { codec: string; channels: number } | undefined;
+        if (track?.codec) {
+          trackAudioCodec = track.codec.toLowerCase();
+        }
+        if (track?.channels) {
+          trackChannels = track.channels;
         }
       } catch (e) {}
     }
 
-    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac']; // Removed opus and flac
+    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac'];
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
-    const canCopyAudio = isApple ? isAppleNativeAudio : isPcNativeAudio;
+    // Direct audio stream copy is only safe if video is ALSO direct copied (otherwise seeking causes audio/video PTS drift).
+    const canCopyAudio = canCopyVideo && (isApple ? isAppleNativeAudio : isPcNativeAudio);
 
-    console.log(`[Continuous HLS] 🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iPad' : 'PC/Android'}): Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY - NO COMPRESSION' : `TRANSCODE ${encoder}`}), Audio=${trackAudioCodec || 'default'} (${canCopyAudio ? 'DIRECT COPY (Lossless)' : 'TRANSPARENT AAC 320k'}), StartPos=${cleanStartTime}s`);
+    const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
+    console.log(`[Continuous HLS] 🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iPad' : 'PC/Android'}): Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY - NO COMPRESSION' : `TRANSCODE ${encoder}`}), Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY (Lossless)' : `TRANSPARENT AAC ${audioBitrate} (${trackChannels}ch Multi-channel)`}), StartPos=${cleanStartTime}s`);
 
     if (canCopyVideo) {
       args.push('-c:v', 'copy');
@@ -249,11 +265,26 @@ class FFmpegService {
     if (canCopyAudio) {
       args.push('-c:a', 'copy');
     } else {
-      args.push(
-        '-c:a', 'aac',
-        '-b:a', '320k',
-        '-ac', '2'
-      );
+      if (isApple && trackChannels >= 6) {
+        // Apple devices natively decode Dolby Digital 5.1 (AC-3 640 kbps) with Spatial Audio
+        args.push(
+          '-c:a', 'ac3',
+          '-b:a', '640k'
+        );
+      } else if (trackChannels >= 6) {
+        // PC / Android: Clean standard 5.1 layout mapping without PCE artifacts
+        args.push(
+          '-c:a', 'aac',
+          '-b:a', '512k',
+          '-af', 'aformat=channel_layouts=5.1'
+        );
+      } else {
+        // Stereo: High-bitrate 320 kbps AAC
+        args.push(
+          '-c:a', 'aac',
+          '-b:a', '320k'
+        );
+      }
     }
 
     args.push(

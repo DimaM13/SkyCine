@@ -98,9 +98,15 @@ export const EpisodeModal: React.FC<EpisodeModalProps> = ({
           <img
             src={episodePoster}
             alt={episode.title}
+            loading="lazy"
             onError={(e) => {
-              // If image fails, fallback to thumbnail generator
-              (e.currentTarget as HTMLImageElement).src = `/api/media/item/${episode.id}/thumbnail`;
+              const target = e.currentTarget as HTMLImageElement;
+              if (!target.src.includes('/thumbnail')) {
+                target.src = `/api/media/item/${episode.id}/thumbnail`;
+              } else {
+                target.onerror = null;
+                target.style.opacity = '0.3';
+              }
             }}
             className="w-full h-full object-cover"
           />
