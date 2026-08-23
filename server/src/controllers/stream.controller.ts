@@ -323,19 +323,28 @@ export class StreamController {
 
       // If 'level' is not specified, generate a REAL Master Playlist
       if (req.query.level !== '1') {
-        let videoCodecStr = 'avc1.42E01E'; // H.264 default
         const rawVid = (media.videoCodec || '').toLowerCase();
-        if (rawVid === 'hevc' || rawVid === 'h265') videoCodecStr = 'hvc1.1.6.L93.B0';
-        else if (rawVid === 'vp9') videoCodecStr = 'vp09.00.10.08';
-        else if (rawVid === 'vp8') videoCodecStr = 'vp08.00.4.1.04.03.02.01';
-        else if (rawVid === 'av1') videoCodecStr = 'av01.0.05M.08';
+        const appleSupported = ['h264', 'hevc', 'h265'];
+        const isSupportedOnDevice = isApple ? appleSupported.includes(rawVid) : true;
+        const willDirectCopy = quality === 'original' && isSupportedOnDevice;
+
+        let videoCodecStr = 'avc1.42E01E'; // H.264 default
+        if (willDirectCopy) {
+          if (rawVid === 'hevc' || rawVid === 'h265') videoCodecStr = 'hvc1.1.6.L93.B0';
+          else if (rawVid === 'vp9') videoCodecStr = 'vp09.00.10.08';
+          else if (rawVid === 'vp8') videoCodecStr = 'vp08.00.4.1.04.03.02.01';
+          else if (rawVid === 'av1') videoCodecStr = 'av01.0.05M.08';
+        } else {
+          // When transcoded, it is always encoded to standard H.264 High Profile (AVC1)
+          videoCodecStr = 'avc1.42E01E';
+        }
 
         let audioCodecStr = 'mp4a.40.2'; // AAC default
         const rawAud = (media.audioCodec || '').toLowerCase();
         if (rawAud === 'ac3') audioCodecStr = 'ac-3';
         else if (rawAud === 'eac3') audioCodecStr = 'ec-3';
-        else if (rawAud === 'opus') audioCodecStr = 'opus';
-        else if (rawAud === 'flac') audioCodecStr = 'fLaC';
+        else if (rawAud === 'opus' && !isApple) audioCodecStr = 'opus';
+        else if (rawAud === 'flac' && !isApple) audioCodecStr = 'fLaC';
 
         const codecs = `${videoCodecStr},${audioCodecStr}`;
         const queryParams = new URLSearchParams(req.query as any);

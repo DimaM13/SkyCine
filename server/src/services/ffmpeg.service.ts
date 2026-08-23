@@ -316,15 +316,11 @@ class FFmpegService {
     // we force BOTH iPad and PC to use the SAME container format (mpegts for H.264).
     // Hls.js on PC supports mpegts perfectly fine.
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVpxOrAv1 = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
     const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
-    let useFmp4: boolean;
-    if (isRoomSession && !isHevc && !isVpxOrAv1) {
-      // Watch Together + H.264: force mpegts for ALL devices to ensure identical PTS
-      useFmp4 = false;
-    } else {
-      useFmp4 = !isApple || isHevc || isVpxOrAv1; // Normal: PC gets fmp4, iPad gets mpegts (except HEVC/VPx/AV1)
-    }
+    // Apple strictly uses mpegts for H.264 (both native H.264 and transcoded H.264 from VP8/VP9/AV1/VC1).
+    // Apple only uses fmp4 for direct copy HEVC (H.265).
+    // PC uses fmp4 for everything (except Watch Together H.264 rooms where mpegts is used for exact sync).
+    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || (isHevc && canCopyVideo));
 
     if (cleanStartTime > 0) {
       args.push('-output_ts_offset', cleanStartTime.toString());
@@ -405,7 +401,8 @@ class FFmpegService {
       const isApple = sessionId.includes('_apple');
       const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
       const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
-      const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || isHevc);
+      const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265'].includes(media.videoCodec?.toLowerCase() || '') : true);
+      const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || (isHevc && canCopyVideo));
 
       if (useFmp4) {
         try {
@@ -461,17 +458,10 @@ class FFmpegService {
     const totalSegments = Math.ceil(duration / segmentDuration);
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVpxOrAv1 = media.videoCodec === 'vp8' || media.videoCodec === 'vp9' || media.videoCodec === 'av1';
     const isApple = sessionId.includes('_apple');
     const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
-    const canCopyVideo = sessionId.includes('_qoriginal_');
-    let useFmp4: boolean;
-    if (isRoomSession && !isHevc && !isVpxOrAv1) {
-      // Watch Together + H.264: mpegts for ALL devices (matches FFmpeg output)
-      useFmp4 = false;
-    } else {
-      useFmp4 = !isApple || isHevc || isVpxOrAv1;
-    }
+    const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265'].includes(media.videoCodec?.toLowerCase() || '') : true);
+    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || (isHevc && canCopyVideo));
     const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
