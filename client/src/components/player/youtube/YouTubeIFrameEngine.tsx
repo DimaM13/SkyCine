@@ -49,6 +49,21 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   const durationRef = useRef(0);
   const currentTimeRef = useRef(initialPosition || 0);
 
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  onTimeUpdateRef.current = onTimeUpdate;
+
+  const onPlayingChangeRef = useRef(onPlayingChange);
+  onPlayingChangeRef.current = onPlayingChange;
+
+  const onBufferStatusChangeRef = useRef(onBufferStatusChange);
+  onBufferStatusChangeRef.current = onBufferStatusChange;
+
+  const onPlayerReadyChangeRef = useRef(onPlayerReadyChange);
+  onPlayerReadyChangeRef.current = onPlayerReadyChange;
+
+  const onAgeRestrictedFallbackRef = useRef(onAgeRestrictedFallback);
+  onAgeRestrictedFallbackRef.current = onAgeRestrictedFallback;
+
   const disableCaptions = useCallback((player: any) => {
     if (!player) return;
     try {
@@ -72,7 +87,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     }, 700);
   }, []);
 
-  // Sync volume and mute state to YouTube player
   useEffect(() => {
     if (!playerRef.current || !isReadyRef.current) return;
     try {
@@ -85,7 +99,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     } catch (e) {}
   }, [volume, isMuted]);
 
-  // Attach control hooks
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
       currentTimeRef.current = pos;
@@ -96,10 +109,8 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
           playerRef.current.seekTo(pos, true);
           if (shouldPlay) {
             playerRef.current.playVideo();
-            onPlayingChange(true);
           } else {
             playerRef.current.pauseVideo();
-            onPlayingChange(false);
           }
           disableCaptions(playerRef.current);
         } catch (e) {}
@@ -110,7 +121,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       if (playerRef.current && isReadyRef.current) {
         try {
           playerRef.current.playVideo();
-          onPlayingChange(true);
           disableCaptions(playerRef.current);
         } catch (e) {}
       }
@@ -120,7 +130,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       if (playerRef.current && isReadyRef.current) {
         try {
           playerRef.current.pauseVideo();
-          onPlayingChange(false);
         } catch (e) {}
       }
     });
@@ -146,7 +155,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   }, [
     markSeeking,
     disableCaptions,
-    onPlayingChange,
     onAttachSeekHandler,
     onAttachPlayHandler,
     onAttachPauseHandler,
@@ -154,23 +162,22 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     onAttachGetIsPaused,
   ]);
 
-  const roomStateRef = useRef(roomState);
+  const prevRoomStateRef = useRef<string>(roomState);
   useEffect(() => {
-    roomStateRef.current = roomState;
-    if (playerRef.current && isReadyRef.current) {
-      try {
-        if (roomState === 'PLAYING') {
-          playerRef.current.playVideo();
-          onPlayingChange(true);
-        } else if (roomState === 'PAUSED') {
-          playerRef.current.pauseVideo();
-          onPlayingChange(false);
-        }
-      } catch (e) {}
+    if (prevRoomStateRef.current !== roomState) {
+      prevRoomStateRef.current = roomState;
+      if (playerRef.current && isReadyRef.current) {
+        try {
+          if (roomState === 'PLAYING') {
+            playerRef.current.playVideo();
+          } else if (roomState === 'PAUSED') {
+            playerRef.current.pauseVideo();
+          }
+        } catch (e) {}
+      }
     }
-  }, [roomState, onPlayingChange]);
+  }, [roomState]);
 
-  // Load YouTube IFrame API
   useEffect(() => {
     if (!window.YT) {
       const tag = document.createElement('script');
@@ -180,7 +187,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     }
   }, []);
 
-  // Initialize player
   useEffect(() => {
     if (!videoId) return;
 
@@ -215,12 +221,12 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
             if (isDisposed) return;
             isReadyRef.current = true;
             isSeekingRef.current = false;
-            onPlayerReadyChange(true);
+            onPlayerReadyChangeRef.current(true);
 
             const d = event.target.getDuration();
             if (d && d > 0) {
               durationRef.current = d;
-              onTimeUpdate(initialPosition || 0, d);
+              onTimeUpdateRef.current(initialPosition || 0, d);
             }
 
             disableCaptions(event.target);
@@ -229,42 +235,37 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
               event.target.seekTo(initialPosition, true);
             }
 
-            if (roomStateRef.current === 'PLAYING') {
+            if (prevRoomStateRef.current === 'PLAYING') {
               event.target.playVideo();
-              onPlayingChange(true);
             } else {
               event.target.pauseVideo();
-              onPlayingChange(false);
             }
 
-            // Immediately declare ready state upon onReady
-            onBufferStatusChange(true, initialPosition, initialPosition, 100);
+            onBufferStatusChangeRef.current(true, initialPosition, initialPosition, 100);
           },
           onStateChange: (event: any) => {
             if (isDisposed) return;
             disableCaptions(event.target);
 
-            // YT.PlayerState: UNSTARTED (-1), ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
             if (event.data === 1 || event.data === 2 || event.data === 0 || event.data === 5 || event.data === -1) {
               isSeekingRef.current = false;
             }
 
             if (event.data === 1) {
-              onPlayingChange(true);
+              onPlayingChangeRef.current(true);
               const d = event.target.getDuration();
               if (d && d > 0) {
                 durationRef.current = d;
-                onTimeUpdate(event.target.getCurrentTime() || 0, d);
+                onTimeUpdateRef.current(event.target.getCurrentTime() || 0, d);
               }
             } else if (event.data === 2 || event.data === 0) {
-              onPlayingChange(false);
+              onPlayingChangeRef.current(false);
             }
           },
           onError: (event: any) => {
-            // Code 100/101/150/153/2/5: Embed blocked / age restricted / unavailable in iframe
             if (event.data === 101 || event.data === 150 || event.data === 100 || event.data === 153 || event.data === 2 || event.data === 5) {
-              console.warn(`[YouTube IFrame] Embed error code ${event.data}, falling back to server 1080p stream`);
-              onAgeRestrictedFallback();
+              console.warn(`[YouTube IFrame] Embed error code ${event.data}, falling back to server stream`);
+              onAgeRestrictedFallbackRef.current();
             }
           },
         },
@@ -288,11 +289,10 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
         playerRef.current = null;
       }
       isReadyRef.current = false;
-      onPlayerReadyChange(false);
+      onPlayerReadyChangeRef.current(false);
     };
-  }, [videoId, disableCaptions, onBufferStatusChange, onPlayerReadyChange, onPlayingChange, onTimeUpdate, onAgeRestrictedFallback, initialPosition]);
+  }, [videoId, disableCaptions, initialPosition]);
 
-  // Periodic time & buffer tracking
   useEffect(() => {
     const interval = setInterval(() => {
       if (!playerRef.current || !isReadyRef.current) return;
@@ -300,25 +300,17 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       try {
         const cur = playerRef.current.getCurrentTime() || 0;
         const dur = playerRef.current.getDuration() || durationRef.current || 0;
-        const fraction = playerRef.current.getVideoLoadedFraction() || 0;
-        const loadedSec = fraction * dur;
-        const ytState = playerRef.current.getPlayerState();
 
         currentTimeRef.current = cur;
         if (dur > 0) {
           durationRef.current = dur;
         }
-        onTimeUpdate(cur, dur);
-
-        const isReady = isReadyRef.current;
-        const bufferPercent = isReady ? 100 : (loadedSec > 0 ? Math.min(99, Math.round((loadedSec / (dur || 1)) * 100)) : 50);
-
-        onBufferStatusChange(isReady, loadedSec, cur, bufferPercent);
+        onTimeUpdateRef.current(cur, dur);
       } catch (e) {}
-    }, 350);
+    }, 500);
 
     return () => clearInterval(interval);
-  }, [onTimeUpdate, onBufferStatusChange]);
+  }, []);
 
   return (
     <div className="absolute inset-0 w-full h-full pointer-events-none flex items-center justify-center overflow-hidden">
