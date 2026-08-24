@@ -731,6 +731,16 @@ class FFmpegService {
     return null;
   }
 
+  public touchSessionByMediaId(mediaId: string): void {
+    const now = Date.now();
+    for (const s of this.continuousSessions.values()) {
+      if (s.mediaId === mediaId) s.lastAccess = now;
+    }
+    for (const s of this.closingSessions.values()) {
+      if (s.mediaId === mediaId) s.lastAccess = now;
+    }
+  }
+
   public extractSubtitle(filePath: string, streamIndex: number, format: 'vtt' | 'ass'): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = [
@@ -759,8 +769,8 @@ class FFmpegService {
     try {
       const now = Date.now();
       for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
-        // If inactive for > 25 seconds (no segment or playlist requested), terminate FFmpeg immediately!
-        if (now - session.lastAccess > 25000) {
+        // If inactive for > 45 seconds (no segment or playlist requested), terminate FFmpeg (was 25s — too aggressive for HDD wakeup & background)
+        if (now - session.lastAccess > 45000) {
           console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>25s) for ${sessionId}, terminating process...`);
           this.terminateProcess(session.process);
           // Move to closing sessions so in-flight segment requests can still be served

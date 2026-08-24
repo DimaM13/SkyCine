@@ -288,6 +288,9 @@ export class MediaController {
         `).run(uuidv4(), userId, mediaItemId, progressSeconds, durationSeconds, isCompleted);
       }
 
+      // Keep HLS session alive while video is playing (fixes idle timeout during playback with no segment request)
+      try { const { ffmpegService } = await import('../services/ffmpeg.service'); ffmpegService.touchSessionByMediaId(mediaItemId); } catch (e) {}
+
       res.json({ success: true, isCompleted });
     } catch (err) {
       logger.error('MEDIA_ERR', 'API Error:', err);

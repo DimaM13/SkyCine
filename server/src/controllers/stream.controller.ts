@@ -383,9 +383,14 @@ export class StreamController {
       const segmentPath = await ffmpegService.ensureSegmentReady(sessionOrMediaId, segmentName, media);
       
       if (!segmentPath || !fs.existsSync(segmentPath)) {
-        // Suppress spam for room sessions after leave (client may still hammer) — debug only
-        if (!sessionOrMediaId.includes('_r')) {
-          console.warn(`[Continuous HLS] ⚠️ Segment not found after wait: ${segmentName} for ${sessionOrMediaId}`);
+        // Throttle spam: log once per 60s per session (prevents 95× seg_1409 spam after idle timeout)
+        const now = Date.now();
+        const key = `${sessionOrMediaId}`;
+        const last = (global as any)._hlsWarnThrottle?.get(key) || 0;
+        if (now - last > 60000) {
+          if (!(global as any)._hlsWarnThrottle) (global as any)._hlsWarnThrottle = new Map();
+          (global as any)._hlsWarnThrottle.set(key, now);
+          console.warn(`[Continuous HLS] ⚠️ Segment not found after wait: ${segmentName} for ${sessionOrMediaId} (throttled)`);
         }
         res.status(404).send('Segment not found');
         return;
