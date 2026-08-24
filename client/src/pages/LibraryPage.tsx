@@ -31,12 +31,23 @@ export const LibraryPage: React.FC = () => {
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
-  // Shows state
+  // Shows state — persist per library so back from player returns to same show/season
   const [shows, setShows] = useState<any[]>([]);
-  const [selectedShow, setSelectedShow] = useState<any | null>(null);
+  const [selectedShow, setSelectedShow] = useState<any | null>(() => {
+    try {
+      // try generic then per-library key (libraryId not known yet at init, fallback to generic)
+      const g = localStorage.getItem('skycine_library_selectedShow');
+      return g ? JSON.parse(g) : null;
+    } catch { return null; }
+  });
   const [episodes, setEpisodes] = useState<MediaItem[]>([]);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
-  const [selectedSeason, setSelectedSeason] = useState<number | 'all'>('all');
+  const [selectedSeason, setSelectedSeason] = useState<number | 'all'>(() => {
+    try {
+      const s = localStorage.getItem('skycine_library_selectedSeason');
+      return s ? JSON.parse(s) : 'all';
+    } catch { return 'all'; }
+  });
   const [accessModalShowTitle, setAccessModalShowTitle] = useState<string | null>(null);
 
   // Episode Modal state
@@ -98,8 +109,59 @@ export const LibraryPage: React.FC = () => {
       .finally(() => setLoading(false));
   };
 
+  // Persist library show/season (same as ShowsPage) — so player Back returns to same place
   useEffect(() => {
-    setSelectedShow(null);
+    if (selectedShow) {
+      localStorage.setItem('skycine_library_selectedShow', JSON.stringify(selectedShow));
+      if (libraryId) localStorage.setItem(`skycine_lib_${libraryId}_selectedShow`, JSON.stringify(selectedShow));
+    } else {
+      localStorage.removeItem('skycine_library_selectedShow');
+      if (libraryId) localStorage.removeItem(`skycine_lib_${libraryId}_selectedShow`);
+    }
+  }, [selectedShow, libraryId]);
+
+  useEffect(() => {
+    localStorage.setItem('skycine_library_selectedSeason', JSON.stringify(selectedSeason));
+    if (libraryId) localStorage.setItem(`skycine_lib_${libraryId}_selectedSeason`, JSON.stringify(selectedSeason));
+  }, [selectedSeason, libraryId]);
+
+  // Restore episodes if we came back from player with saved show
+  useEffect(() => {
+    if (selectedShow && episodes.length === 0 && libraryId) {
+      setLoadingEpisodes(true);
+      apiClient.get(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/episodes`)
+        .then((res) => setEpisodes(res.data.episodes || []))
+        .catch(() => {
+          setSelectedShow(null);
+          localStorage.removeItem('skycine_library_selectedShow');
+        })
+        .finally(() => setLoadingEpisodes(false));
+    }
+  }, [selectedShow?.showTitle]);
+
+  useEffect(() => {
+    // Don't wipe selectedShow if we have a saved one for this library — keep user on same show after Back
+    const saved = libraryId ? localStorage.getItem(`skycine_lib_${libraryId}_selectedShow`) : null;
+    const generic = localStorage.getItem('skycine_library_selectedShow');
+    const toRestore = saved || generic;
+    if (toRestore) {
+      try {
+        const parsed = JSON.parse(toRestore);
+        // only restore if still null (i.e., first mount after Back), not when user explicitly switched library
+        if (!selectedShow || selectedShow.showTitle !== parsed.showTitle) {
+          // defer set to next tick so fetchLibraryInfoAndData already started
+          setTimeout(() => setSelectedShow(parsed), 0);
+          const seasonSaved = libraryId ? localStorage.getItem(`skycine_lib_${libraryId}_selectedSeason`) : null;
+          const seasonGeneric = localStorage.getItem('skycine_library_selectedSeason');
+          const seasonToRestore = seasonSaved || seasonGeneric;
+          if (seasonToRestore) {
+            try { setTimeout(() => setSelectedSeason(JSON.parse(seasonToRestore)), 0); } catch {}
+          }
+        }
+      } catch {}
+    } else {
+      setSelectedShow(null);
+    }
     setSearch('');
     setVisibleCount(36);
     fetchLibraryInfoAndData();
@@ -174,6 +236,8 @@ export const LibraryPage: React.FC = () => {
   const handleSelectShow = (show: any) => {
     setSelectedShow(show);
     setSelectedSeason('all');
+    localStorage.setItem('skycine_library_selectedSeason', JSON.stringify('all'));
+    if (libraryId) localStorage.setItem(`skycine_lib_${libraryId}_selectedSeason`, JSON.stringify('all'));
     setLoadingEpisodes(true);
     apiClient.get(`/media/shows/${encodeURIComponent(show.showTitle)}/episodes`)
       .then((res) => {

@@ -33,11 +33,23 @@ export const DirectPlayerPage: React.FC = () => {
   }
 
   const handleBack = () => {
+    // For series episodes keep user on the show's episode list, not catalog root
+    const mediaAny = media as any;
+    const isEpisode = !!(mediaAny?.showTitle || mediaAny?.seasonNumber || mediaAny?.episodeNumber);
+    // Try history back first - ShowsPage restores selectedShow/selectedSeason from localStorage
     if (window.history.length > 1) {
       navigate(-1);
-    } else {
-      navigate('/');
+      // Fallback if history back didn't stay inside app (e.g., direct link) - ensure shows page
+      setTimeout(() => {
+        if (isEpisode && window.location.pathname.startsWith('/watch')) {
+          navigate('/shows');
+        }
+      }, 300);
+      return;
     }
+    if (isEpisode) navigate('/shows');
+    else if ((media as any)?.type === 'MOVIE' || (media as any)?.libraryType === 'movies') navigate('/movies');
+    else navigate('/');
   };
 
   // Determine initial position: URL query ?start= overrides saved progress; otherwise use saved userProgress

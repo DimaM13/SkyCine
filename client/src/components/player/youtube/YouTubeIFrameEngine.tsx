@@ -170,15 +170,10 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   useEffect(() => {
     if (prevRoomStateRef.current !== roomState) {
       prevRoomStateRef.current = roomState;
-      if (playerRef.current) {
-        try {
-          if (roomState === 'PLAYING') {
-            playerRef.current.playVideo();
-          } else if (roomState === 'PAUSED') {
-            playerRef.current.pauseVideo();
-          }
-        } catch (e) {}
-      }
+      // In Watch Together, don't auto-play/pause on roomState changes from the server.
+      // The sync mechanism (room:sync_state) handles precise synchronized playback via
+      // attached play/pause handlers. Auto-playing here would bypass the buffer barrier
+      // and cause the host to play ahead of other members.
     }
   }, [roomState]);
 

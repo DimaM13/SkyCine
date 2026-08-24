@@ -17,11 +17,21 @@ export const ShowsPage: React.FC = () => {
   const { isAdmin } = useAuth();
   const [shows, setShows] = useState<any[]>([]);
   const [visibleCount, setVisibleCount] = useState(50);
-  const [selectedShow, setSelectedShow] = useState<any | null>(null);
+  const [selectedShow, setSelectedShow] = useState<any | null>(() => {
+    try {
+      const saved = localStorage.getItem('skycine_selectedShow');
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
   const [episodes, setEpisodes] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
-  const [selectedSeason, setSelectedSeason] = useState<number | 'all'>('all');
+  const [selectedSeason, setSelectedSeason] = useState<number | 'all'>(() => {
+    try {
+      const saved = localStorage.getItem('skycine_selectedSeason');
+      return saved ? JSON.parse(saved) : 'all';
+    } catch { return 'all'; }
+  });
 
   // Episode Modal state
   const [selectedEpisode, setSelectedEpisode] = useState<MediaItem | null>(null);
@@ -51,9 +61,41 @@ export const ShowsPage: React.FC = () => {
     fetchShows();
   }, []);
 
+  // Persist selected show and season to localStorage
+  useEffect(() => {
+    if (selectedShow) {
+      localStorage.setItem('skycine_selectedShow', JSON.stringify(selectedShow));
+    } else {
+      localStorage.removeItem('skycine_selectedShow');
+    }
+  }, [selectedShow]);
+
+  useEffect(() => {
+    localStorage.setItem('skycine_selectedSeason', JSON.stringify(selectedSeason));
+  }, [selectedSeason]);
+
+  // Restore episodes when selectedShow is loaded from localStorage on mount
+  useEffect(() => {
+    if (selectedShow && episodes.length === 0) {
+      setLoadingEpisodes(true);
+      apiClient.get(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/episodes`)
+        .then((res) => {
+          const eps = res.data.episodes || [];
+          setEpisodes(eps);
+        })
+        .catch(() => {
+          // Show might no longer exist, clear saved state
+          setSelectedShow(null);
+          localStorage.removeItem('skycine_selectedShow');
+        })
+        .finally(() => setLoadingEpisodes(false));
+    }
+  }, [selectedShow?.showTitle]);
+
   const handleSelectShow = (show: any) => {
     setSelectedShow(show);
     setSelectedSeason('all');
+    localStorage.setItem('skycine_selectedSeason', JSON.stringify('all'));
     setLoadingEpisodes(true);
     apiClient.get(`/media/shows/${encodeURIComponent(show.showTitle)}/episodes`)
       .then((res) => {
@@ -195,7 +237,12 @@ export const ShowsPage: React.FC = () => {
         <div className="flex flex-col gap-8 animate-fade-in">
           {/* Back button */}
           <button
-            onClick={() => setSelectedShow(null)}
+            onClick={() => {
+              setSelectedShow(null);
+              setSelectedSeason('all');
+              localStorage.removeItem('skycine_selectedShow');
+              localStorage.removeItem('skycine_selectedSeason');
+            }}
             className="flex items-center gap-2 text-xs font-bold text-cinema-gold hover:text-yellow-300 transition-colors w-fit group cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4 transition-transform group-hover:-translate-x-1" />

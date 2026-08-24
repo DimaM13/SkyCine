@@ -21,6 +21,7 @@ class SocketService {
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set of socketIds
   private roomMembers: Map<string, Map<string, RoomMember>> = new Map(); // roomId -> (socketId -> RoomMember)
   private pendingBarriers: Map<string, { targetPosition: number; action: string; playbackRate: number; timer?: NodeJS.Timeout }> = new Map();
+  private lastMembersBroadcast: Map<string, number> = new Map(); // roomId -> last broadcast timestamp
 
   private startBarrierPlayback(roomId: string, targetPosition: number, playbackRate: number, initiatedBy: string, initiatedByUserId: string) {
     if (this.pendingBarriers.has(roomId)) {
@@ -315,25 +316,6 @@ class SocketService {
         });
       });
 
-      // Query Host Direct Sync
-      socket.on('room:request_host_sync', (data: { roomId: string }) => {
-        const { roomId } = data;
-        const roomMap = this.roomMembers.get(roomId);
-        if (!roomMap) return;
-        const room = db.prepare('SELECT hostUserId FROM rooms WHERE id = ?').get(roomId) as any;
-        if (!room) return;
-        const hostMember = Array.from(roomMap.values()).find(m => m.userId === room.hostUserId && m.socketId !== socket.id);
-        if (hostMember) {
-          io.to(hostMember.socketId).emit('room:query_host_time', { requesterSocketId: socket.id });
-        }
-      });
-
-      socket.on('room:host_time_reply', (data: { roomId: string; position: number; requesterSocketId: string }) => {
-        if (data?.requesterSocketId && data.position >= 0) {
-          io.to(data.requesterSocketId).emit('room:host_time_reply', { position: data.position });
-        }
-      });
-
       // Host Force Sync All Participants
       socket.on('room:force_sync_all', (data: { roomId: string; position: number }) => {
         const { roomId, position } = data;
@@ -461,8 +443,8 @@ class SocketService {
           m.pingMs = pingMs;
           if (bufferPercent !== undefined) m.bufferPercent = bufferPercent;
 
-          // Notify room about member states (for UI sync indicators)
-          io.to(roomId).emit('room:members_status', Array.from(members.values()));
+          // Throttled broadcast of member states (max once per 1.5s)
+          this.emitRoomMembers(roomId);
 
           // Check if active barrier is ready to trigger synchronized play
           if (this.pendingBarriers.has(roomId)) {
@@ -669,12 +651,18 @@ class SocketService {
     }
   }
 
-  private emitRoomMembers(roomId: string) {
+  private emitRoomMembers(roomId: string, force: boolean = false) {
     if (!this.io) return;
     const members = this.roomMembers.get(roomId);
-    if (members) {
-      this.io.to(roomId).emit('room:members', Array.from(members.values()));
-    }
+    if (!members) return;
+    
+    // Throttle broadcasts to max once per 1.5 seconds unless forced
+    const now = Date.now();
+    const lastBroadcast = this.lastMembersBroadcast.get(roomId) || 0;
+    if (!force && now - lastBroadcast < 1500) return;
+    this.lastMembersBroadcast.set(roomId, now);
+    
+    this.io.to(roomId).emit('room:members', Array.from(members.values()));
   }
 
   private broadcastPresence(userId: string, status: string, activity?: string) {

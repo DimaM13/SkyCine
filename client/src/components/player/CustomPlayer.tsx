@@ -191,7 +191,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     if (isAppleDevice) {
       const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac'].some(c => rawAudioCodec.includes(c));
-      const isNativeAppleVideo = ['h264', 'hevc', 'h265'].includes(rawVideoCodec);
+      const isNativeAppleVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(rawVideoCodec);
       return isNativeAppleAudio && isNativeAppleVideo;
     } else {
       const isNativePcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'].some(c => rawAudioCodec.includes(c));
@@ -208,14 +208,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const channels = selectedTrackObj?.channels || 2;
     const channelsLabel = channels >= 6 ? '5.1' : channels === 8 ? '7.1' : '2.0';
 
-    // Apple supports AC3/EAC3/AAC/MP3/ALAC natively. PC/Android browsers natively support AAC/MP3/Opus/FLAC/Vorbis/WAV.
-    const appleAudioCodecs = ['aac', 'ac3', 'eac3', 'mp3', 'alac'];
+    // Must match server ffmpeg.service appleAudio/pcAudio exactly (server: apple includes opus)
+    const appleAudioCodecs = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus'];
     const pcAudioCodecs = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isDirectAudio = isAppleDevice
       ? appleAudioCodecs.some(c => rawAudioCodec.includes(c))
       : pcAudioCodecs.some(c => rawAudioCodec.includes(c));
 
-    const appleVideoCodecs = ['h264', 'hevc', 'h265'];
+    const appleVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const pcVideoCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
     const isSupportedVideoCodec = isAppleDevice
       ? appleVideoCodecs.includes(rawVideoCodec)
@@ -292,10 +292,23 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [isDirectPlay, media.videoCodec, media.audioCodec, selectedQuality, selectedAudioTrack, audioTracks, isAppleDevice]);
 
   const hlsRef = useRef<Hls | null>(null);
+  // For JIT VOD HLS the server truncates playlist: media time 0 = absolute startTime.
+  // video.currentTime 0 => absolute hlsStartOffset, so UI must translate.
+  const hlsStartOffsetRef = useRef<number>(0);
+  // keep offset in sync with initialPosition when NOT direct play
+  useEffect(() => {
+    if (!isDirectPlay && initialPosition && initialPosition > 0) {
+      hlsStartOffsetRef.current = Math.floor(initialPosition / 4) * 4;
+    } else {
+      hlsStartOffsetRef.current = 0;
+    }
+  }, [initialPosition, isDirectPlay]);
 
   const loadStreamSource = useCallback((url: string, isDirect: boolean, shouldPlay: boolean = false, startPos: number = 0) => {
     const video = videoRef.current;
     if (!video) return;
+    // For truncated VOD HLS, engine time 0 = absolute offset, so never seek to absolute startPos
+    const engineStartPos = isDirect ? startPos : 0;
 
     if (isDirect) {
       if (hlsRef.current) {
@@ -317,12 +330,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           }
         }
       };
-      // Seek to initial start position if resuming
-      if (startPos > 0) {
+      // Seek to initial start position if resuming (direct only)
+      if (engineStartPos > 0) {
         const applyInitialSeek = () => {
           try {
-            if (video.currentTime < startPos - 1 || video.currentTime === 0) {
-              video.currentTime = startPos;
+            if (video.currentTime < engineStartPos - 1 || video.currentTime === 0) {
+              video.currentTime = engineStartPos;
             }
           } catch (e) {}
         };
@@ -342,13 +355,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     } else {
       if (isAppleDevice && video.canPlayType('application/vnd.apple.mpegurl')) {
         // Native Apple Safari / iPad / iOS hardware HLS pipeline (Zero CPU, full hardware HEVC/H.264)
+        // VOD playlist is truncated: video 0 == absolute hlsStartOffset, so engine always starts at 0
         if (hlsRef.current) {
           hlsRef.current.destroy();
           hlsRef.current = null;
         }
         video.src = url;
         video.load();
-        video.currentTime = startPos;
+        if (engineStartPos > 0) { try { video.currentTime = engineStartPos; } catch (e) {} }
         if (shouldPlay) {
           video.play().then(() => {
             setIsPlaying(true);
@@ -411,7 +425,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       // We use .once so it only fires for this specific load event,
       // and closure over the CORRECT startPos!
       hls.once(Hls.Events.MANIFEST_PARSED, () => {
-        try { video.currentTime = startPos; } catch (e) {}
+        if (engineStartPos > 0) try { video.currentTime = engineStartPos; } catch (e) {}
         if (shouldPlay) {
           video.play().then(() => {
             setIsPlaying(true);
@@ -423,15 +437,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         }
       });
 
-      // Reset currentTime to startPos
-      try { video.currentTime = startPos; } catch (e) {}
+      if (engineStartPos > 0) try { video.currentTime = engineStartPos; } catch (e) {}
       hls.loadSource(url);
-      hls.startLoad(startPos);
+      hls.startLoad(engineStartPos);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Native Apple Safari fallback
+      // Native Apple Safari fallback - truncated VOD starts at 0
       video.src = url;
       video.load();
-      try { video.currentTime = startPos; } catch (e) {}
+      if (engineStartPos > 0) try { video.currentTime = engineStartPos; } catch (e) {}
       if (shouldPlay) {
         video.play().then(() => {
           setIsPlaying(true);
@@ -531,7 +544,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     return `/api/stream/${media.id}/master.m3u8?${params}`;
   }, [media.id, isDirectPlay, isAppleDevice, isWatchTogether, room?.id, initialPosition]);
 
-  // Perform seek
+  // Perform seek - translate absolute time to engine time for truncated VOD HLS
   const doSeek = useCallback((targetTime: number, forcePlayState?: boolean) => {
     const video = videoRef.current;
     if (!video) return;
@@ -542,8 +555,25 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
     console.log(`[Player] ⚡ Seeking: target=${safePos.toFixed(1)}s`);
-
-    video.currentTime = safePos;
+    const offset = !isDirectPlay ? (hlsStartOffsetRef.current || 0) : 0;
+    // Backward seek before truncated start -> need to reload HLS at new startTime
+    if (!isDirectPlay && safePos < offset - 0.5 && safePos >= 0) {
+      const newOffset = Math.floor(safePos / 4) * 4;
+      hlsStartOffsetRef.current = newOffset;
+      const token = localStorage.getItem('myplex_token');
+      const tokenParam = token ? `token=${encodeURIComponent(token)}` : '';
+      const roomParam = isWatchTogether && room?.id ? `roomId=${room.id}` : '';
+      const isAppleParam = isAppleDevice ? '1' : '0';
+      const startParam = `startTime=${Math.floor(safePos)}`;
+      const params = [`quality=${selectedQuality}`, `audioIndex=${selectedAudioTrack}`, `isApple=${isAppleParam}`, startParam, tokenParam, roomParam].filter(Boolean).join('&');
+      const newUrl = `/api/stream/${media.id}/master.m3u8?${params}`;
+      console.log(`[Player] 🔄 Reload HLS at new offset ${newOffset}s for seek ${safePos}s`);
+      const enginePos = Math.max(0, safePos - newOffset);
+      loadStreamSource(newUrl, false, shouldPlay, enginePos);
+      return;
+    }
+    const enginePos = Math.max(0, safePos - offset);
+    try { video.currentTime = enginePos; } catch (e) {}
     if (shouldPlay) {
       video.play().catch(() => {});
       setIsPlaying(true);
@@ -551,7 +581,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       video.pause();
       setIsPlaying(false);
     }
-  }, [effectiveDuration]);
+  }, [effectiveDuration, isDirectPlay, isWatchTogether, room?.id, isAppleDevice, selectedQuality, selectedAudioTrack, media.id, loadStreamSource]);
 
   // Lazy Web Audio Gain Booster
   const setupAudioGain = useCallback(() => {
@@ -594,9 +624,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     onAttachGetCurrentTime?.(() => {
       const video = videoRef.current;
       if (!video) return 0;
-      return video.currentTime || 0;
+      const offset = !isDirectPlay ? (hlsStartOffsetRef.current || 0) : 0;
+      return (video.currentTime || 0) + offset;
     });
-  }, [onAttachGetCurrentTime]);
+  }, [onAttachGetCurrentTime, isDirectPlay]);
 
   const prevMediaIdRef = useRef<string>('');
 
@@ -650,7 +681,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
     }
 
-    const currentPos = video.currentTime || 0;
+    const currentPos = (video.currentTime || 0) + (!isDirectPlay ? (hlsStartOffsetRef.current || 0) : 0);
     const wasPlaying = !video.paused;
     const url = buildStreamUrl(selectedQuality, selectedAudioTrack);
     loadStreamSource(url, isDirectPlay, wasPlaying, currentPos);
@@ -667,18 +698,21 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setIsPlaying(actualIsPlaying);
     }
 
-    const totalPos = video.currentTime;
+    const offset = !isDirectPlay ? (hlsStartOffsetRef.current || 0) : 0;
+    const totalPos = (video.currentTime || 0) + offset;
 
     if (!isScrubbing) {
       setCurrentTime(totalPos);
     }
 
     if ((!media.durationSeconds || media.durationSeconds <= 0) && video.duration && !isNaN(video.duration) && isFinite(video.duration)) {
-      setDuration(video.duration);
+      // For truncated HLS VOD, video.duration is short; use full duration
+      const dur = isDirectPlay ? video.duration : video.duration + offset;
+      setDuration(dur);
     }
 
     if (video.buffered.length > 0) {
-      const bufEnd = video.buffered.end(video.buffered.length - 1);
+      const bufEnd = video.buffered.end(video.buffered.length - 1) + offset;
       setBufferedTime(bufEnd);
     }
   };
@@ -689,7 +723,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const reportProgress = useCallback((overridePos?: number) => {
     const video = videoRef.current;
     if (!video || !media?.id) return;
-    const pos = overridePos !== undefined ? overridePos : video.currentTime;
+    const offset = !isDirectPlay ? (hlsStartOffsetRef.current || 0) : 0;
+    const pos = overridePos !== undefined ? overridePos : (video.currentTime || 0) + offset;
     const dur = video.duration || media.durationSeconds || duration || 0;
 
     if (pos > 5 && dur > 0) {
@@ -938,9 +973,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const skip = (seconds: number) => {
     const video = videoRef.current;
     if (!video) return;
+    const offset = !isDirectPlay ? (hlsStartOffsetRef.current || 0) : 0;
     const base = pendingSeekTargetRef.current !== null
       ? pendingSeekTargetRef.current
-      : video.currentTime;
+      : (video.currentTime + offset);
     const newPos = Math.max(0, Math.min(effectiveDuration, base + seconds));
     triggerSeek(newPos);
   };

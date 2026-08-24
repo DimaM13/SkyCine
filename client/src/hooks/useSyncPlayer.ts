@@ -210,10 +210,6 @@ export function useSyncPlayer({
       setMembers(updatedMembers);
     });
 
-    socket.on('room:members_status', (updatedMembers: RoomMember[]) => {
-      setMembers(updatedMembers);
-    });
-
     socket.on('room:buffer_barrier', (data: { isBuffering: boolean; targetPosition?: number }) => {
       setIsBufferingBarrier(!!data.isBuffering);
       if (data.targetPosition !== undefined) {
@@ -359,7 +355,6 @@ export function useSyncPlayer({
       socket.off('room:initial_state');
       socket.off('room:host_time_reply');
       socket.off('room:members');
-      socket.off('room:members_status');
       socket.off('room:buffer_barrier');
       socket.off('room:sync_state');
       socket.off('room:time_anchor');

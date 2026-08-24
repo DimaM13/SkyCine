@@ -24,6 +24,8 @@ interface ContinuousHlsSession {
 class FFmpegService {
   private continuousSessions: Map<string, ContinuousHlsSession> = new Map();
   private closingSessions: Map<string, ContinuousHlsSession> = new Map();
+  private closingCreatedAt: Map<string, number> = new Map();
+  private closingServeCount: Map<string, number> = new Map(); // throttle spam: seg_0000 loop
   private detectedEncoder: string | null = null;
 
   constructor() {
@@ -140,7 +142,7 @@ class FFmpegService {
       setTimeout(async () => {
         try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
         this.closingSessions.delete(sId);
-      }, 10000);
+      }, 30000);
       this.continuousSessions.delete(sessionId);
     }
 
@@ -201,7 +203,7 @@ class FFmpegService {
 
     // Check if video can be directly stream-copied without re-encoding (Lossless Direct Stream Copy)
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = ['h264', 'hevc', 'h265'];
+    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedCodec = isApple
       ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
       : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
@@ -231,7 +233,7 @@ class FFmpegService {
       } catch (e) {}
     }
 
-    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac'];
+    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus'];
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
@@ -316,11 +318,11 @@ class FFmpegService {
     // we force BOTH iPad and PC to use the SAME container format (mpegts for H.264).
     // Hls.js on PC supports mpegts perfectly fine.
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
     const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
-    // Apple strictly uses mpegts for H.264 (both native H.264 and transcoded H.264 from VP8/VP9/AV1/VC1).
-    // Apple only uses fmp4 for direct copy HEVC (H.265).
+    // Apple uses fmp4 for HEVC/VP9/VP8 direct copy, mpegts for H.264.
     // PC uses fmp4 for everything (except Watch Together H.264 rooms where mpegts is used for exact sync).
-    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || (isHevc && canCopyVideo));
+    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
 
     if (cleanStartTime > 0) {
       args.push('-output_ts_offset', cleanStartTime.toString());
@@ -400,9 +402,10 @@ class FFmpegService {
       }
       const isApple = sessionId.includes('_apple');
       const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+      const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
       const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
-      const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265'].includes(media.videoCodec?.toLowerCase() || '') : true);
-      const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || (isHevc && canCopyVideo));
+      const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(media.videoCodec?.toLowerCase() || '') : true);
+      const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
 
       if (useFmp4) {
         try {
@@ -437,11 +440,14 @@ class FFmpegService {
         this.continuousSessions.delete(sId);
         const dirToDelete = sess.sessionDir;
         this.closingSessions.set(sId, sess);
+        this.closingCreatedAt.set(sId, Date.now());
         this.terminateProcess(sess.process);
         setTimeout(async () => {
           this.closingSessions.delete(sId);
+          this.closingCreatedAt.delete(sId);
+          this.closingServeCount.delete(sId);
           try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
-        }, 10000);
+        }, 30000);
       }
     }
 
@@ -456,12 +462,14 @@ class FFmpegService {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200; // fallback 2h
     const segmentDuration = 4;
     const totalSegments = Math.ceil(duration / segmentDuration);
+    const startSegment = Math.floor(Math.max(0, startTime) / segmentDuration);
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
     const isApple = sessionId.includes('_apple');
     const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
-    const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265'].includes(media.videoCodec?.toLowerCase() || '') : true);
-    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || (isHevc && canCopyVideo));
+    const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(media.videoCodec?.toLowerCase() || '') : true);
+    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
     const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
@@ -470,14 +478,14 @@ class FFmpegService {
     m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
     m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
     m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
-    m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
+    m3u8 += `#EXT-X-MEDIA-SEQUENCE:${startSegment}\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
     
     if (useFmp4) {
       m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
     }
 
-    for (let i = 0; i < totalSegments; i++) {
+    for (let i = startSegment; i < totalSegments; i++) {
       const numStr = i.toString().padStart(4, '0');
       m3u8 += `#EXTINF:${segmentDuration.toFixed(6)},\n`;
       m3u8 += `/api/stream/hls/session/${sessionId}/seg_${numStr}${ext}${tokenParam}\n`;
@@ -526,17 +534,37 @@ class FFmpegService {
          return this.waitForSegment(session.sessionDir, segmentName);
        }
        
-       // CRITICAL: The segment must be >= session.startSegmentNumber (cannot wait for past segments before start!)
-       // and <= session.latestSegmentIndex + 25 (future buffer)
-       if (segmentIndex >= session.startSegmentNumber && segmentIndex <= session.latestSegmentIndex + 25) {
-         const foundPath = await this.waitForSegment(session.sessionDir, segmentName);
-         if (foundPath) {
-           session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
-         }
-         return foundPath;
-       }
-       
-       console.log(`[JIT HLS] Segment ${segmentIndex} outside session range [${session.startSegmentNumber}..${session.latestSegmentIndex}]. Restarting FFmpeg from ${targetStartTime}s...`);
+          // Segment is before the session start - check closing sessions as fallback
+          if (segmentIndex < session.startSegmentNumber) {
+            // Check closing sessions for the segment (same media only)
+            for (const [, closing] of this.closingSessions) {
+              if (closing.mediaId !== media.id) continue;
+              const closingPath = path.join(closing.sessionDir, segmentName);
+              if (fs.existsSync(closingPath) && fs.statSync(closingPath).size > 100) {
+                return closingPath;
+              }
+            }
+            // Not found in closing sessions either - restart FFmpeg from the requested position
+            console.log(`[JIT HLS] Segment ${segmentIndex} before session start ${session.startSegmentNumber}, unavailable in closing sessions. Restarting from ${targetStartTime}s...`);
+          } else if (segmentIndex <= session.latestSegmentIndex + 25) {
+           // Segment is within the valid range - wait for it
+           const foundPath = await this.waitForSegment(session.sessionDir, segmentName, sessionId);
+           if (foundPath) {
+             session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
+           }
+           return foundPath;
+          } else {
+           console.log(`[JIT HLS] Segment ${segmentIndex} ahead of session range [${session.startSegmentNumber}..${session.latestSegmentIndex}]. Restarting FFmpeg from ${targetStartTime}s...`);
+          }
+    } else {
+      // 2b. No active session — do NOT serve from closing after manual kill
+      //     iPad keeps hammering seg_0021..0047 after navigation, which kept audio playing in background.
+      //     Return 404 immediately to break loop and avoid zombie FFmpeg spawn; matching mediaId check prevents cross-show bleed.
+      if (!isInit) {
+        for (const [, closing] of this.closingSessions) {
+          if (closing.mediaId === media.id) return null;
+        }
+      }
     }
 
     // 3. If init.mp4 requested when no session exists, briefly wait for a segment request or start at 0s
@@ -547,7 +575,7 @@ class FFmpegService {
         await inFlightAfter;
         session = this.continuousSessions.get(sessionId);
         if (session) {
-          return this.waitForSegment(session.sessionDir, segmentName);
+         return this.waitForSegment(session.sessionDir, segmentName, sessionId);
         }
       }
     }
@@ -557,7 +585,7 @@ class FFmpegService {
     
     const newSession = this.continuousSessions.get(sessionId);
     if (!newSession) return null;
-    return this.waitForSegment(newSession.sessionDir, segmentName);
+    return this.waitForSegment(newSession.sessionDir, segmentName, sessionId);
   }
 
   public killSession(sessionId: string): void {
@@ -569,13 +597,16 @@ class FFmpegService {
       const closingId = `${sessionId}_closing_${Date.now()}`;
       
       this.closingSessions.set(closingId, sessionToClose);
+      this.closingCreatedAt.set(closingId, Date.now());
       this.terminateProcess(sessionToClose.process);
       setTimeout(async () => {
         try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
           console.error(`[Continuous HLS] Failed to delete session dir: ${dirToDelete}`, e);
         }
         this.closingSessions.delete(closingId);
-      }, 10000);
+        this.closingCreatedAt.delete(closingId);
+        this.closingServeCount.delete(closingId);
+      }, 30000);
       
       this.continuousSessions.delete(sessionId);
     }
@@ -599,10 +630,14 @@ class FFmpegService {
     }
   }
 
-    private async waitForSegment(sessionDir: string, segmentName: string): Promise<string | null> {
+     private async waitForSegment(sessionDir: string, segmentName: string, sessionId?: string): Promise<string | null> {
       const segPath = path.join(sessionDir, segmentName);
       // Wait up to 30 seconds (150 * 200ms) for external HDDs to spin up
       for (let i = 0; i < 150; i++) {
+        // Abort early if session was killed/superseded while we were waiting
+        if (sessionId && !this.continuousSessions.has(sessionId) && !this.closingSessions.has(sessionId)) {
+          return null;
+        }
         try {
           const stats = await fs.promises.stat(segPath);
           if (stats.size > 100) {
@@ -692,8 +727,18 @@ class FFmpegService {
         if (now - session.lastAccess > 25000) {
           console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>25s) for ${sessionId}, terminating process...`);
           this.terminateProcess(session.process);
-          try { await fs.promises.rm(session.sessionDir, { recursive: true, force: true, maxRetries: 3 }); } catch (e) {}
+          // Move to closing sessions so in-flight segment requests can still be served
+          const closingId = `${sessionId}_closing_${Date.now()}`;
+          const dirToDelete = session.sessionDir;
+          this.closingSessions.set(closingId, session);
+          this.closingCreatedAt.set(closingId, Date.now());
           this.continuousSessions.delete(sessionId);
+          setTimeout(async () => {
+            this.closingSessions.delete(closingId);
+            this.closingCreatedAt.delete(closingId);
+            this.closingServeCount.delete(closingId);
+            try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
+          }, 30000);
         }
       }
 
