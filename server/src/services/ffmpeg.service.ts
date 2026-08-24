@@ -157,6 +157,33 @@ class FFmpegService {
     }
   }
 
+  // External HDD warmup: non-blocking stat with retry, logs when disk is waking (fixes 12s master.m3u8)
+  public async warmupFile(filePath: string): Promise<void> {
+    const start = Date.now();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await fs.promises.stat(filePath);
+        const elapsed = Date.now() - start;
+        if (elapsed > 2000) {
+          console.log(`[HDD] ⏳ External disk wakeup took ${elapsed}ms for ${path.basename(filePath)} (attempt ${attempt + 1})`);
+        }
+        return;
+      } catch (e: any) {
+        const elapsed = Date.now() - start;
+        if (elapsed > 8000) break;
+        // Disk sleeping — wait a bit and retry (spinup)
+        await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+      }
+    }
+    // Final fire-and-forget warmup read (first byte) to trigger spinup without blocking
+    try {
+      const fd = await fs.promises.open(filePath, 'r');
+      const buf = Buffer.alloc(1);
+      await fd.read(buf, 0, 1, 0).catch(() => {});
+      await fd.close();
+    } catch (e) {}
+  }
+
   private async _createContinuousHlsSession(
     media: MediaItem,
     quality: string,
@@ -166,6 +193,9 @@ class FFmpegService {
     sessionId: string,
     deviceSuffix: string
   ): Promise<{ sessionId: string }> {
+    // Warmup external HDD before spawning FFmpeg (prevents 12s master + segment not found spam)
+    await this.warmupFile(media.filePath);
+
     const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
     const baseTempDir = tempDirSetting?.value || path.resolve(__dirname, '../../../data/transcodes');
 
@@ -434,8 +464,14 @@ class FFmpegService {
     // Gracefully clean up previous sessions for the same media item and device
     // 1. Immediately kill old FFmpeg process so it stops saturating disk I/O and CPU
     // 2. Keep session directory for 5 seconds so in-flight segment downloads finish cleanly with HTTP 200
+    // 3. Don't kill a session that is still warming up (isReady false && age < 8s) — prevents HDD spinup thrashing (1113-1207 spam)
     for (const [sId, sess] of this.continuousSessions.entries()) {
       if (sess.mediaId === media.id && sId.includes(`_${deviceSuffix}`) && sId !== sessionId) {
+        const age = Date.now() - sess._createdAt;
+        if (!sess.isReady && age < 8000) {
+          console.log(`[Continuous HLS] ⏳ Skip retirement for warming-up session: ${sId} (age ${age}ms)`);
+          continue;
+        }
         console.log(`[Continuous HLS] 🧹 Graceful retirement for previous seek session: ${sId}`);
         this.continuousSessions.delete(sId);
         const dirToDelete = sess.sessionDir;

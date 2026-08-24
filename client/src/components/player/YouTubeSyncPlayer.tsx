@@ -288,7 +288,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         className="absolute inset-0 z-10 cursor-pointer"
       />
 
-      {/* Buffer Barrier Readiness Banner */}
+      {/* Buffer Barrier — only for HLS, YouTube iframe is simple: each presses Play locally */}
       <BufferBarrierBanner
         isVisible={!isPlaying && isBufferingBarrier && members.length > 1}
         members={members}

@@ -23,9 +23,15 @@ export class StreamController {
       }
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
-      if (!media || !fs.existsSync(media.filePath)) {
-        res.status(404).json({ error: 'Видеофайл не найден на диске' });
+      if (!media) {
+        res.status(404).json({ error: 'Медиафайл не найден' });
         return;
+      }
+      // External HDD warmup — don't block master.m3u8 for 12s with sync existsSync, warmup async and return playlist immediately
+      if (!fs.existsSync(media.filePath)) {
+        // Fire-and-forget warmup, client will retry with backoff
+        ffmpegService.warmupFile(media.filePath).catch(() => {});
+        // Still return playlist so client can start loading; segments will wait for warmup
       }
 
       const quality = (req.query.quality as string) || 'original';
@@ -377,7 +383,10 @@ export class StreamController {
       const segmentPath = await ffmpegService.ensureSegmentReady(sessionOrMediaId, segmentName, media);
       
       if (!segmentPath || !fs.existsSync(segmentPath)) {
-        console.warn(`[Continuous HLS] ⚠️ Segment not found after wait: ${segmentName} for ${sessionOrMediaId}`);
+        // Suppress spam for room sessions after leave (client may still hammer) — debug only
+        if (!sessionOrMediaId.includes('_r')) {
+          console.warn(`[Continuous HLS] ⚠️ Segment not found after wait: ${segmentName} for ${sessionOrMediaId}`);
+        }
         res.status(404).send('Segment not found');
         return;
       }

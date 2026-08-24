@@ -257,6 +257,15 @@ export function useSyncPlayer({
         if (Math.abs(cur - data.currentPosition) > 2.5) {
           executeSeek(data.currentPosition, false);
         }
+        // HLS — как было: 3с после PLAY всегда (YouTube — отдельно в useEffect, пока плашка — не триггерит)
+        if (room?.sourceType !== 'YOUTUBE') {
+          setTimeout(() => {
+            if (userRef.current?.id === room.hostUserId && socket.connected) {
+              const hostCur = getRealPos();
+              socket.emit('room:force_sync_all', { roomId: room.id, position: hostCur });
+            }
+          }, 3000);
+        }
 
         if (delay > 0) {
           scheduledPlayTimer.current = setTimeout(() => {
@@ -385,6 +394,19 @@ export function useSyncPlayer({
 
   const smoothedDiffRef = useRef<number>(0);
 
+  // Auto-align 3s after successful unpause — ONLY for YouTube (iframe/server_stream), HLS untouched
+  useEffect(() => {
+    if (room?.sourceType !== 'YOUTUBE') return;
+    if (roomState !== 'PLAYING' || isBufferingBarrier || !isHost || members.length <= 1 || !room?.id) return;
+    const timer = setTimeout(() => {
+      if (userRef.current?.id === room.hostUserId && socket?.connected) {
+        const hostCur = getRealPos();
+        socket.emit('room:force_sync_all', { roomId: room.id, position: hostCur });
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [roomState, isBufferingBarrier, isHost, members.length, socket, room?.id, room?.hostUserId, room?.sourceType, getRealPos]);
+
   // Pure Tracking / Drift calculation (Clean informational indicator, NO disruptive auto-seek loops)
   useEffect(() => {
     const interval = setInterval(() => {
@@ -481,21 +503,24 @@ export function useSyncPlayer({
   // Check if all participants are ready
   const allMembersReady = members.length <= 1 || members.every((m) => m.isReady);
 
+  const lastPlayEmitRef = useRef<number>(0);
   // Client Action Triggers
   const sendPlay = useCallback(() => {
     if (!socket || !room?.id) return;
     if (isInternalAction.current) return;
-    executePlay();
+    const now = Date.now();
+    if (now - lastPlayEmitRef.current < 800) return; // debounce YouTube spam (6× in 3s)
+    lastPlayEmitRef.current = now;
+    // Do NOT play locally — wait for server's scheduled sync_state (host-align, like force_sync) so initiator and peers start together
     const cur = getRealPos();
-    const scheduledStart = getSyncedServerTime() + 350;
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PLAY',
       position: cur,
       playbackRate: playbackRateRef.current,
-      timestamp: scheduledStart,
+      timestamp: getSyncedServerTime(),
     });
-  }, [socket, room?.id, executePlay, getRealPos, getSyncedServerTime]);
+  }, [socket, room?.id, getRealPos, getSyncedServerTime]);
 
   const sendPause = useCallback(() => {
     if (!socket || !room?.id) return;

@@ -245,8 +245,31 @@ class SocketService {
         }
 
         if (action === 'PLAY') {
+          // YouTube IFrame — simple logic: each presses Play locally, no barrier, just sync position/pause/seek + 3s auto-align. Don't touch HLS.
+          const roomInfo = db.prepare('SELECT sourceType, youtubeEngine FROM rooms WHERE id = ?').get(roomId) as any;
+          const isYouTubeIframe = roomInfo?.sourceType === 'YOUTUBE' && roomInfo?.youtubeEngine === 'iframe';
+          if (isYouTubeIframe) {
+            const scheduledPlayAt = now + 50;
+            try { db.prepare(`UPDATE rooms SET state='PLAYING', currentPosition=?, serverTimestamp=?, playbackRate=? WHERE id=?`).run(position, scheduledPlayAt, playbackRate, roomId); } catch (e) {}
+            io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
+            io.to(roomId).emit('room:sync_state', {
+              state: 'PLAYING',
+              currentPosition: position,
+              serverTimestamp: scheduledPlayAt,
+              playbackRate,
+              action: 'PLAY',
+              initiatedBy: user?.username || 'Host',
+              initiatedByUserId: user?.userId || '',
+            });
+            return;
+          }
           if (memberCount > 1) {
-            // Multi-user room: engage Buffer Barrier lockstep!
+            // Debounce: ignore duplicate PLAY spam (YouTube iframe fires 6× in 3s) — keep first barrier
+            const existingBarrier = this.pendingBarriers.get(roomId);
+            if (existingBarrier && existingBarrier.action === 'PLAY' && Math.abs(existingBarrier.targetPosition - position) < 0.5) {
+              return;
+            }
+            // Multi-user room: engage Buffer Barrier lockstep (host waits for peers — no 2s gap, initiator does NOT play immediately, fixed in sendPlay)
             if (roomMap) {
               for (const member of roomMap.values()) {
                 member.isReady = false;
