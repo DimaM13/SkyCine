@@ -216,12 +216,22 @@ class FFmpegService {
 
     const encoder = await this.detectHardwareEncoder();
     const args: string[] = [
+      '-loglevel', 'error',
       '-err_detect', 'ignore_err',
       '-fflags', '+genpts+discardcorrupt+nobuffer',
     ];
 
-    // Always pass -ss (even 0) so FFmpeg resets the container PTS to exactly 0.0s for the first segment
+    // Fast seek для DIRECT COPY: -noaccurate_seek прыгает на ближайший I-frame, иначе copy не может резать между кадрами и seg_0017 пропускается
     args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
+    // Троттлинг только для больших файлов >5ГБ → 3x, мелкие на полной скорости SSD
+    try {
+      const fsize = media.fileSize && media.fileSize > 0 ? media.fileSize : (fs.existsSync(media.filePath) ? fs.statSync(media.filePath).size : 0);
+      const gb = fsize / (1024 * 1024 * 1024);
+      if (gb > 5) {
+        args.push('-readrate_initial_burst', '2');
+        args.push('-readrate', '3');
+      }
+    } catch {}
     args.push('-i', media.filePath);
 
     args.push('-map', '0:v:0');
@@ -321,12 +331,9 @@ class FFmpegService {
 
     args.push(
       '-muxdelay', '0',
-      '-muxpreload', '0'
+      '-muxpreload', '0',
+      '-avoid_negative_ts', 'make_zero'
     );
-
-    if (cleanStartTime === 0) {
-      args.push('-avoid_negative_ts', 'make_zero');
-    }
 
     args.push(
       '-f', 'hls',
@@ -396,15 +403,17 @@ class FFmpegService {
     this.continuousSessions.set(sessionId, sessionObj);
 
     proc.stderr?.on('data', (d) => {
-      const msg = d.toString();
-      const isDecoderNoise = msg.includes('Not all references are available') || 
-                             msg.includes('Error submitting packet to decoder') || 
-                             msg.includes('zero_bit out of range') || 
-                             msg.includes('Failed to read frame header') ||
-                             msg.includes('Failed to read unit') ||
-                             msg.includes('Decoding error: Invalid data');
-      if (!isDecoderNoise && (msg.includes('Fatal') || msg.includes('Conversion failed') || msg.includes('Cannot allocate'))) {
-        console.error(`[Continuous HLS stderr] ${sessionId}:`, msg.trim());
+      const raw = d.toString().trim();
+      if (!raw) return;
+      const isDecoderNoise = raw.includes('Not all references are available') || 
+                             raw.includes('Error submitting packet to decoder') || 
+                             raw.includes('zero_bit out of range') || 
+                             raw.includes('Failed to read frame header') ||
+                             raw.includes('Failed to read unit') ||
+                             raw.includes('Decoding error: Invalid data');
+      if (isDecoderNoise) return;
+      if (raw.includes('Non-monotonous DTS') || raw.includes('Error muxing') || raw.includes('non monotonically increasing dts') || raw.includes('Fatal') || raw.includes('Conversion failed') || raw.includes('Invalid data')) {
+        console.error(`[FFMPEG][${sessionId}] ${raw}`);
       }
     });
 
@@ -494,11 +503,10 @@ class FFmpegService {
     return this.continuousSessions.has(sessionId) || this.closingSessions.has(sessionId);
   }
 
-  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0): string {
+  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, _startTime: number = 0): string {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200; // fallback 2h
     const segmentDuration = 4;
     const totalSegments = Math.ceil(duration / segmentDuration);
-    const startSegment = Math.floor(Math.max(0, startTime) / segmentDuration);
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
@@ -514,14 +522,15 @@ class FFmpegService {
     m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
     m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
     m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
-    m3u8 += `#EXT-X-MEDIA-SEQUENCE:${startSegment}\n`;
+    // Seamless JIT VOD: всегда полный манифест от 0 для Safari (Священный Грааль Jellyfin/Emby)
+    m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
     
     if (useFmp4) {
       m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
     }
 
-    for (let i = startSegment; i < totalSegments; i++) {
+    for (let i = 0; i < totalSegments; i++) {
       const numStr = i.toString().padStart(4, '0');
       m3u8 += `#EXTINF:${segmentDuration.toFixed(6)},\n`;
       m3u8 += `/api/stream/hls/session/${sessionId}/seg_${numStr}${ext}${tokenParam}\n`;
@@ -546,8 +555,8 @@ class FFmpegService {
     const audioMatch = sessionId.match(/_a(\d+)_/);
     const quality = qualityMatch ? qualityMatch[1] : 'original';
     const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
-    // Align restart target 2 segments (8s) before requested segment for keyframe pre-roll
-    const targetStartTime = Math.max(0, (segmentIndex - 2) * 4);
+    // Seamless JIT VOD: старт строго с запрошенного сегмента, без пре-ролла (иначе Safari ждет seg_0017 а FFmpeg генерит 0013-0016)
+    const targetStartTime = segmentIndex * 4;
 
     // 1. If session creation is already in flight, wait for it!
     const inFlight = this.sessionCreationPromises.get(sessionId);

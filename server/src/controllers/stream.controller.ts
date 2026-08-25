@@ -323,7 +323,7 @@ export class StreamController {
       const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
 
       if (startTime > 0 && !ffmpegService.hasSession(sessionId)) {
-        const prewarmStart = Math.max(0, startTime - 16);
+        const prewarmStart = startTime;
         ffmpegService.startContinuousHlsSession(media, quality, audioIndex, prewarmStart, isApple, sessionId).catch(() => {});
       }
 
