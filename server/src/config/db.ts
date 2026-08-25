@@ -237,7 +237,8 @@ export function initDatabase() {
   insertSetting.run('transcodeHardware', 'auto');
   insertSetting.run('maxTranscodeBitrate', '20000'); // 20 Mbps
   insertSetting.run('allowPublicRegistration', 'true');
-  insertSetting.run('transcodeTempDir', path.resolve(dataDir, 'transcodes'));
+  // RAM disk: always force transcodeTempDir to R:\Temp for HLS chunk storage
+  db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('transcodeTempDir', 'R:\\Temp');
 
   // Ensure transcode temp directory exists
   const tempDir = path.resolve(dataDir, 'transcodes');

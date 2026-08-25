@@ -18,8 +18,16 @@ interface ContinuousHlsSession {
   startSegmentNumber: number;
   isReady: boolean;
   latestSegmentIndex: number;
+  lastRequestedSegmentIndex: number;
+  isSuspended: boolean;
   _createdAt: number;
+  _watcherInterval?: ReturnType<typeof setInterval>;
 }
+
+// Sliding window constants
+const WINDOW_AHEAD = 8;   // Max segments FFmpeg can produce ahead of last requested
+const WINDOW_BEHIND = 3;  // Segments to keep behind last requested (for rebuffer)
+const RESUME_THRESHOLD = 4; // Resume FFmpeg when client is within this many segments
 
 class FFmpegService {
   private continuousSessions: Map<string, ContinuousHlsSession> = new Map();
@@ -29,10 +37,23 @@ class FFmpegService {
   private detectedEncoder: string | null = null;
 
   constructor() {
+    // Validate RAM disk exists at startup
+    this.validateRamDisk();
     // Initial cleanup of old orphaned transcodes on server launch
     this.cleanupOrphanedTranscodes();
     // Periodically cleanup dead HLS sessions (idle > 25 seconds)
     setInterval(() => this.cleanupIdleSessions(), 5000);
+  }
+
+  private validateRamDisk(): void {
+    const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
+    const baseTempDir = tempDirSetting?.value || 'R:\\Temp';
+    if (!fs.existsSync(baseTempDir)) {
+      console.error(`[FFmpeg] ❌ FATAL: RAM disk temp directory does not exist: ${baseTempDir}`);
+      console.error(`[FFmpeg] ❌ Make sure your RAM disk is mounted at R:\\ and R:\\Temp directory exists.`);
+      throw new Error(`RAM disk temp directory not found: ${baseTempDir}`);
+    }
+    console.log(`[FFmpeg] ✅ RAM disk validated: ${baseTempDir}`);
   }
 
   public terminateProcess(proc: ChildProcess): void {
@@ -50,12 +71,151 @@ class FFmpegService {
     }
   }
 
+  // ── Sliding Window: delete old segments behind playback position ──
+  private cleanupOldSegments(session: ContinuousHlsSession, currentSegmentIndex: number): void {
+    const minToKeep = currentSegmentIndex - WINDOW_BEHIND;
+    if (minToKeep <= session.startSegmentNumber) return; // nothing old to clean
+
+    // Fire-and-forget async cleanup
+    fs.promises.readdir(session.sessionDir).then(files => {
+      for (const file of files) {
+        const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
+        if (!match) continue;
+        const idx = parseInt(match[1], 10);
+        if (idx < minToKeep) {
+          fs.promises.unlink(path.join(session.sessionDir, file)).catch(() => {});
+        }
+      }
+    }).catch(() => {});
+  }
+
+  // ── FFmpeg Process Suspend (Windows NtSuspendProcess via PowerShell) ──
+  private suspendFFmpeg(session: ContinuousHlsSession): void {
+    if (session.isSuspended || !session.process?.pid || session.process.killed) return;
+    if (process.platform !== 'win32') return;
+
+    const pid = session.process.pid;
+    session.isSuspended = true; // Set immediately to prevent double-suspend
+
+    const psCmd = [
+      `Add-Type 'using System;using System.Runtime.InteropServices;public class NtSusp{[DllImport("ntdll.dll")]public static extern int NtSuspendProcess(IntPtr h);}';`,
+      `$h=(Get-Process -Id ${pid} -ErrorAction Stop).Handle;`,
+      `[NtSusp]::NtSuspendProcess($h)`
+    ].join('');
+
+    const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { windowsHide: true, stdio: 'ignore' });
+    ps.on('close', (code) => {
+      if (code !== 0) {
+        session.isSuspended = false; // Failed, reset flag
+      } else {
+        console.log(`[HLS Throttle] ⏸️ Suspended FFmpeg PID ${pid} (session ${session.sessionId}, ahead by ${session.latestSegmentIndex - session.lastRequestedSegmentIndex} segments)`);
+      }
+    });
+    ps.on('error', () => { session.isSuspended = false; });
+  }
+
+  // ── FFmpeg Process Resume (Windows NtResumeProcess via PowerShell) ──
+  private resumeFFmpeg(session: ContinuousHlsSession): Promise<void> {
+    return new Promise((resolve) => {
+      if (!session.isSuspended || !session.process?.pid || session.process.killed) {
+        session.isSuspended = false;
+        resolve();
+        return;
+      }
+
+      const pid = session.process.pid;
+      session.isSuspended = false; // Set immediately so new requests don't queue up
+
+      const psCmd = [
+        `Add-Type 'using System;using System.Runtime.InteropServices;public class NtRes{[DllImport("ntdll.dll")]public static extern int NtResumeProcess(IntPtr h);}';`,
+        `$h=(Get-Process -Id ${pid} -ErrorAction Stop).Handle;`,
+        `[NtRes]::NtResumeProcess($h)`
+      ].join('');
+
+      const ps = spawn('powershell', ['-NoProfile', '-Command', psCmd], { windowsHide: true, stdio: 'ignore' });
+
+      let resolved = false;
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+
+      ps.on('close', (code) => {
+        if (code === 0) {
+          console.log(`[HLS Throttle] ▶️ Resumed FFmpeg PID ${pid} (session ${session.sessionId})`);
+        }
+        done();
+      });
+      ps.on('error', () => done());
+
+      // Safety timeout: don't block segment delivery forever if PowerShell hangs
+      setTimeout(done, 2000);
+    });
+  }
+
+  // ── Segment Watcher: monitors produced segments and triggers suspend when too far ahead ──
+  private startSegmentWatcher(session: ContinuousHlsSession): void {
+    if (session._watcherInterval) return; // already watching
+
+    session._watcherInterval = setInterval(() => {
+      // Stop watching if process is dead
+      if (!session.process || session.process.killed || session.process.exitCode !== null) {
+        this.stopSegmentWatcher(session);
+        return;
+      }
+
+      try {
+        const files = fs.readdirSync(session.sessionDir);
+        let maxIdx = session.latestSegmentIndex;
+        for (const file of files) {
+          const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
+          if (match) {
+            const idx = parseInt(match[1], 10);
+            // Only count files > 100 bytes (skip partial writes via temp_file flag)
+            try {
+              const size = fs.statSync(path.join(session.sessionDir, file)).size;
+              if (size > 100 && idx > maxIdx) {
+                maxIdx = idx;
+              }
+            } catch {}
+          }
+        }
+        session.latestSegmentIndex = maxIdx;
+
+        // Check if FFmpeg is too far ahead → suspend
+        const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
+        if (!session.isSuspended && ahead > WINDOW_AHEAD && session.isReady) {
+          this.suspendFFmpeg(session);
+        }
+      } catch {}
+    }, 500);
+  }
+
+  private stopSegmentWatcher(session: ContinuousHlsSession): void {
+    if (session._watcherInterval) {
+      clearInterval(session._watcherInterval);
+      session._watcherInterval = undefined;
+    }
+  }
+
   private cleanupOrphanedTranscodes() {
     try {
       const transcodeDirs = [
         path.resolve(__dirname, '../../../data/transcodes'),
         path.resolve(__dirname, '../../data/transcodes'),
       ];
+      // Also clean RAM disk HLS sessions on startup
+      try {
+        const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
+        const ramDiskDir = tempDirSetting?.value || 'R:\\Temp';
+        const hlsSessionsDir = path.join(ramDiskDir, 'hls_sessions');
+        if (fs.existsSync(hlsSessionsDir)) {
+          transcodeDirs.push(hlsSessionsDir);
+        }
+      } catch {}
+
       for (const dir of transcodeDirs) {
         if (fs.existsSync(dir)) {
           fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 });
@@ -135,6 +295,14 @@ class FFmpegService {
       if (cleanStartTime >= currentStart && cleanStartTime < currentStart + 120) {
         return { sessionId };
       }
+      // Stop watcher before retiring
+      this.stopSegmentWatcher(existing);
+      // Resume if suspended so taskkill works cleanly
+      if (existing.isSuspended) {
+        existing.isSuspended = false;
+        // Fire-and-forget resume before kill
+        this.resumeFFmpeg(existing).catch(() => {});
+      }
       const sId = `${sessionId}_closing_${Date.now()}`;
       const dirToDelete = existing.sessionDir;
       this.closingSessions.set(sId, existing);
@@ -197,10 +365,10 @@ class FFmpegService {
     await this.warmupFile(media.filePath);
 
     const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
-    const baseTempDir = tempDirSetting?.value || path.resolve(__dirname, '../../../data/transcodes');
+    const baseTempDir = tempDirSetting?.value || 'R:\\Temp';
 
     if (!fs.existsSync(baseTempDir)) {
-      fs.mkdirSync(baseTempDir, { recursive: true });
+      throw new Error(`RAM disk temp directory not found: ${baseTempDir}. Ensure R:\\ is mounted.`);
     }
 
     const uniqueId = Date.now().toString() + '_' + Math.random().toString(36).substring(7);
@@ -223,15 +391,7 @@ class FFmpegService {
 
     // Fast seek для DIRECT COPY: -noaccurate_seek прыгает на ближайший I-frame, иначе copy не может резать между кадрами и seg_0017 пропускается
     args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
-    // Троттлинг только для больших файлов >5ГБ → 3x, мелкие на полной скорости SSD
-    try {
-      const fsize = media.fileSize && media.fileSize > 0 ? media.fileSize : (fs.existsSync(media.filePath) ? fs.statSync(media.filePath).size : 0);
-      const gb = fsize / (1024 * 1024 * 1024);
-      if (gb > 5) {
-        args.push('-readrate_initial_burst', '2');
-        args.push('-readrate', '3');
-      }
-    } catch {}
+    // No readrate throttling: FFmpeg suspend/resume handles buffer limits (WINDOW_AHEAD=8 chunks)
     args.push('-i', media.filePath);
 
     args.push('-map', '0:v:0');
@@ -398,9 +558,14 @@ class FFmpegService {
       startSegmentNumber: startNumber,
       isReady: false,
       latestSegmentIndex: startNumber,
+      lastRequestedSegmentIndex: startNumber,
+      isSuspended: false,
       _createdAt: Date.now()
     };
     this.continuousSessions.set(sessionId, sessionObj);
+
+    // Start segment watcher for automatic suspend/resume throttling
+    this.startSegmentWatcher(sessionObj);
 
     proc.stderr?.on('data', (d) => {
       const raw = d.toString().trim();
@@ -482,6 +647,11 @@ class FFmpegService {
           continue;
         }
         console.log(`[Continuous HLS] 🧹 Graceful retirement for previous seek session: ${sId}`);
+        // Stop watcher and resume before killing
+        this.stopSegmentWatcher(sess);
+        if (sess.isSuspended) {
+          this.resumeFFmpeg(sess).catch(() => {});
+        }
         this.continuousSessions.delete(sId);
         const dirToDelete = sess.sessionDir;
         this.closingSessions.set(sId, sess);
@@ -568,15 +738,40 @@ class FFmpegService {
 
     // 2. If session exists, check if segment is on disk or within valid encoding range
     if (session) {
+       // Update last requested segment index for sliding window
+       if (!isInit) {
+         session.lastRequestedSegmentIndex = Math.max(session.lastRequestedSegmentIndex, segmentIndex);
+       }
+
        const segPath = path.join(session.sessionDir, segmentName);
        if (fs.existsSync(segPath) && fs.statSync(segPath).size > 100) {
          session.lastAccess = Date.now();
          session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
+
+         // Sliding window: cleanup old segments behind current position
+         if (!isInit) {
+           this.cleanupOldSegments(session, segmentIndex);
+         }
+
+         // Check if FFmpeg needs to be suspended (too far ahead)
+         if (!session.isSuspended && !isInit) {
+           const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
+           if (ahead > WINDOW_AHEAD) {
+             this.suspendFFmpeg(session);
+           }
+         }
+
          return segPath;
        }
        
        if (isInit) {
          return this.waitForSegment(session.sessionDir, segmentName);
+       }
+
+       // If FFmpeg is suspended and we need a segment that's not on disk — resume it
+       if (session.isSuspended) {
+         console.log(`[HLS Throttle] ▶️ Resuming FFmpeg for segment ${segmentIndex} (session ${session.sessionId})`);
+         await this.resumeFFmpeg(session);
        }
        
           // Segment is before the session start - check closing sessions as fallback
@@ -596,6 +791,8 @@ class FFmpegService {
            const foundPath = await this.waitForSegment(session.sessionDir, segmentName, sessionId);
            if (foundPath) {
              session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
+             // Sliding window cleanup after receiving segment
+             this.cleanupOldSegments(session, segmentIndex);
            }
            return foundPath;
           } else {
@@ -637,6 +834,11 @@ class FFmpegService {
     const session = this.continuousSessions.get(sessionId);
     if (session) {
       console.log(`[Continuous HLS] 🛑 Manual kill requested for session: ${sessionId}`);
+      // Stop watcher and resume before killing
+      this.stopSegmentWatcher(session);
+      if (session.isSuspended) {
+        this.resumeFFmpeg(session).catch(() => {});
+      }
       const sessionToClose = session;
       const dirToDelete = session.sessionDir;
       const closingId = `${sessionId}_closing_${Date.now()}`;
@@ -781,6 +983,11 @@ class FFmpegService {
         // If inactive for > 45 seconds (no segment or playlist requested), terminate FFmpeg (was 25s — too aggressive for HDD wakeup & background)
         if (now - session.lastAccess > 45000) {
           console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>25s) for ${sessionId}, terminating process...`);
+          // Stop watcher and resume before killing
+          this.stopSegmentWatcher(session);
+          if (session.isSuspended) {
+            this.resumeFFmpeg(session).catch(() => {});
+          }
           this.terminateProcess(session.process);
           // Move to closing sessions so in-flight segment requests can still be served
           const closingId = `${sessionId}_closing_${Date.now()}`;
@@ -799,7 +1006,7 @@ class FFmpegService {
 
       // Clean orphaned session folders older than 5 minutes
       const tempDirSetting = db.prepare('SELECT value FROM server_settings WHERE key = ?').get('transcodeTempDir') as { value: string } | undefined;
-      const baseTempDir = tempDirSetting?.value || path.resolve(__dirname, '../../../data/transcodes');
+      const baseTempDir = tempDirSetting?.value || 'R:\\Temp';
       const sessionsRoot = path.join(baseTempDir, 'hls_sessions');
       
       try {
