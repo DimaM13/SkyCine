@@ -22,6 +22,7 @@ interface ContinuousHlsSession {
   isSuspended: boolean;
   _createdAt: number;
   _watcherInterval?: ReturnType<typeof setInterval>;
+  _fsWatcher?: fs.FSWatcher;
 }
 
 // Sliding window constants
@@ -155,12 +156,54 @@ class FFmpegService {
     });
   }
 
-  // ── Segment Watcher: monitors produced segments and triggers suspend when too far ahead ──
-  private startSegmentWatcher(session: ContinuousHlsSession): void {
-    if (session._watcherInterval) return; // already watching
+  // ── Immediately purge all segment files in a session directory (for fast RAM disk cleanup on seek) ──
+  private purgeSessionDir(sessionDir: string): void {
+    fs.promises.readdir(sessionDir).then(files => {
+      for (const file of files) {
+        if (file.startsWith('seg_') || file === 'playlist.m3u8' || file === 'init.mp4') {
+          fs.promises.unlink(path.join(sessionDir, file)).catch(() => {});
+        }
+      }
+    }).catch(() => {});
+  }
 
+  // ── Segment Watcher: fs.watch for instant detection + backup poll ──
+  private startSegmentWatcher(session: ContinuousHlsSession): void {
+    if (session._fsWatcher) return; // already watching
+
+    // Primary: fs.watch — reacts instantly when FFmpeg renames .tmp → .ts/.m4s
+    try {
+      session._fsWatcher = fs.watch(session.sessionDir, (eventType, filename) => {
+        if (!filename || session.isSuspended || session.process?.killed) return;
+
+        // Only react to completed segment files (not .tmp)
+        const match = filename.match(/^seg_(\d+)\.(ts|m4s)$/);
+        if (!match) return;
+
+        const idx = parseInt(match[1], 10);
+
+        // Verify file is ready (not partial / temp_file still writing)
+        try {
+          const size = fs.statSync(path.join(session.sessionDir, filename)).size;
+          if (size <= 100) return;
+        } catch { return; }
+
+        session.latestSegmentIndex = Math.max(session.latestSegmentIndex, idx);
+
+        // Immediate suspend check
+        const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
+        if (ahead > WINDOW_AHEAD && session.isReady) {
+          this.suspendFFmpeg(session);
+        }
+      });
+
+      session._fsWatcher.on('error', () => {
+        // Silently handle watcher errors (directory deleted, etc.)
+      });
+    } catch {}
+
+    // Backup: polling every 2s as safety net (in case fs.watch misses events)
     session._watcherInterval = setInterval(() => {
-      // Stop watching if process is dead
       if (!session.process || session.process.killed || session.process.exitCode !== null) {
         this.stopSegmentWatcher(session);
         return;
@@ -173,27 +216,23 @@ class FFmpegService {
           const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
           if (match) {
             const idx = parseInt(match[1], 10);
-            // Only count files > 100 bytes (skip partial writes via temp_file flag)
-            try {
-              const size = fs.statSync(path.join(session.sessionDir, file)).size;
-              if (size > 100 && idx > maxIdx) {
-                maxIdx = idx;
-              }
-            } catch {}
+            if (idx > maxIdx) maxIdx = idx;
           }
         }
         session.latestSegmentIndex = maxIdx;
 
-        // Check if FFmpeg is too far ahead → suspend
-        const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
-        if (!session.isSuspended && ahead > WINDOW_AHEAD && session.isReady) {
+        if (!session.isSuspended && session.latestSegmentIndex - session.lastRequestedSegmentIndex > WINDOW_AHEAD && session.isReady) {
           this.suspendFFmpeg(session);
         }
       } catch {}
-    }, 500);
+    }, 2000);
   }
 
   private stopSegmentWatcher(session: ContinuousHlsSession): void {
+    if (session._fsWatcher) {
+      try { session._fsWatcher.close(); } catch {}
+      session._fsWatcher = undefined;
+    }
     if (session._watcherInterval) {
       clearInterval(session._watcherInterval);
       session._watcherInterval = undefined;
@@ -307,10 +346,12 @@ class FFmpegService {
       const dirToDelete = existing.sessionDir;
       this.closingSessions.set(sId, existing);
       this.terminateProcess(existing.process);
+      // Immediately purge segment files to free RAM disk space
+      this.purgeSessionDir(dirToDelete);
       setTimeout(async () => {
         try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
         this.closingSessions.delete(sId);
-      }, 30000);
+      }, 1500);
       this.continuousSessions.delete(sessionId);
     }
 
@@ -657,12 +698,14 @@ class FFmpegService {
         this.closingSessions.set(sId, sess);
         this.closingCreatedAt.set(sId, Date.now());
         this.terminateProcess(sess.process);
+        // Immediately purge segment files to free RAM disk space
+        this.purgeSessionDir(dirToDelete);
         setTimeout(async () => {
           this.closingSessions.delete(sId);
           this.closingCreatedAt.delete(sId);
           this.closingServeCount.delete(sId);
           try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
-        }, 30000);
+        }, 1500);
       }
     }
 
@@ -846,6 +889,8 @@ class FFmpegService {
       this.closingSessions.set(closingId, sessionToClose);
       this.closingCreatedAt.set(closingId, Date.now());
       this.terminateProcess(sessionToClose.process);
+      // Immediately purge segment files to free RAM disk space
+      this.purgeSessionDir(dirToDelete);
       setTimeout(async () => {
         try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {
           console.error(`[Continuous HLS] Failed to delete session dir: ${dirToDelete}`, e);
@@ -853,7 +898,7 @@ class FFmpegService {
         this.closingSessions.delete(closingId);
         this.closingCreatedAt.delete(closingId);
         this.closingServeCount.delete(closingId);
-      }, 30000);
+      }, 1500);
       
       this.continuousSessions.delete(sessionId);
     }
@@ -995,12 +1040,14 @@ class FFmpegService {
           this.closingSessions.set(closingId, session);
           this.closingCreatedAt.set(closingId, Date.now());
           this.continuousSessions.delete(sessionId);
+          // Immediately purge segment files to free RAM disk space
+          this.purgeSessionDir(dirToDelete);
           setTimeout(async () => {
             this.closingSessions.delete(closingId);
             this.closingCreatedAt.delete(closingId);
             this.closingServeCount.delete(closingId);
             try { await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 }); } catch (e) {}
-          }, 30000);
+          }, 1500);
         }
       }
 
