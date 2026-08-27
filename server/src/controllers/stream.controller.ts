@@ -231,7 +231,8 @@ export class StreamController {
 
       const deviceSuffix = isApple ? 'apple' : 'pc';
       const roomSuffix = roomId ? `_r${roomId}` : '';
-      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
+      const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
+      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
 
       // Start / Prewarm continuous session
       ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
@@ -245,6 +246,7 @@ export class StreamController {
 
   public static async endHlsSession(req: AuthRequest, res: Response): Promise<void> {
     try {
+      const userId = req.user?.id || '';
       const mediaId = req.body?.mediaId || (req.query.mediaId as string);
       const quality = req.body?.quality || (req.query.quality as string);
       const audioIndex = req.body?.audioIndex !== undefined ? req.body.audioIndex : (req.query.audioIndex !== undefined ? parseInt(req.query.audioIndex as string, 10) : undefined);
@@ -254,7 +256,14 @@ export class StreamController {
       if (roomId) {
         const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(roomId);
         if (room) {
-          res.json({ success: true, message: 'Room session kept alive for active participants' });
+          if (mediaId && quality && audioIndex !== undefined) {
+            const deviceSuffix = isApple ? 'apple' : 'pc';
+            const roomSuffix = `_r${roomId}`;
+            const userSuffix = userId ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
+            const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
+            ffmpegService.killSession(sessionId);
+          }
+          res.json({ success: true, message: 'User room session ended' });
           return;
         }
       }
@@ -263,7 +272,8 @@ export class StreamController {
         if (quality && audioIndex !== undefined) {
           const deviceSuffix = isApple ? 'apple' : 'pc';
           const roomSuffix = roomId ? `_r${roomId}` : '';
-          const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
+          const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
+          const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
           ffmpegService.killSession(sessionId);
         }
         if (!roomId) {
@@ -305,7 +315,8 @@ export class StreamController {
 
       const deviceSuffix = isApple ? 'apple' : 'pc';
       const roomSuffix = roomId ? `_r${roomId}` : '';
-      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
+      const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
+      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
 
       // Start/prewarm session
       ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});

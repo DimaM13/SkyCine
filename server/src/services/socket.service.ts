@@ -76,7 +76,14 @@ class SocketService {
         }
 
         const roomMap = this.roomMembers.get(roomId)!;
-        const isAlreadyInRoom = roomMap.has(socket.id);
+        const isAlreadyInRoom = Array.from(roomMap.values()).some(m => m.userId === userId);
+
+        // Remove any old stale socket for the same user in this room
+        for (const [sId, m] of Array.from(roomMap.entries())) {
+          if (m.userId === userId && sId !== socket.id) {
+            roomMap.delete(sId);
+          }
+        }
 
         const member: RoomMember = {
           userId: userId || 'guest',
@@ -114,10 +121,16 @@ class SocketService {
           livePosition += elapsed;
         }
 
+        // Deduplicated unique members list
+        const uniqueMembers = new Map<string, RoomMember>();
+        for (const m of roomMap.values()) {
+          uniqueMembers.set(m.userId, m);
+        }
+
         // Send initial state to newly joined client
         socket.emit('room:initial_state', {
           room,
-          members: Array.from(roomMap.values()),
+          members: Array.from(uniqueMembers.values()),
           serverTimestamp: now,
           livePosition,
         });
@@ -381,7 +394,11 @@ class SocketService {
     if (!this.io) return;
     const members = this.roomMembers.get(roomId);
     if (members) {
-      this.io.to(roomId).emit('room:members', Array.from(members.values()));
+      const unique = new Map<string, RoomMember>();
+      for (const m of members.values()) {
+        unique.set(m.userId, m);
+      }
+      this.io.to(roomId).emit('room:members', Array.from(unique.values()));
     }
   }
 

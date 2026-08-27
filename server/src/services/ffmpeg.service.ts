@@ -433,7 +433,7 @@ class FFmpegService {
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
+    const isRoomSession = sessionId.includes('_r');
     const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
 
     if (cleanStartTime > 0) {
@@ -528,7 +528,7 @@ class FFmpegService {
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
     const isApple = sessionId.includes('_apple');
-    const isRoomSession = /_r[a-zA-Z0-9]/.test(sessionId.split('_apple').pop() || sessionId.split('_pc').pop() || '');
+    const isRoomSession = sessionId.includes('_r');
     const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(media.videoCodec?.toLowerCase() || '') : true);
     const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
     const ext = useFmp4 ? '.m4s' : '.ts';
@@ -603,9 +603,12 @@ class FFmpegService {
         return this.waitForSegment(session.sessionDir, segmentName, sessionId);
       }
 
-      // Resume if suspended
+      // Resume if suspended and buffer is low (ahead <= 4)
       if (session.isSuspended) {
-        await this.resumeFFmpeg(session);
+        const ahead = session.latestSegmentIndex - segmentIndex;
+        if (ahead <= 4) {
+          await this.resumeFFmpeg(session);
+        }
       }
 
       // If segment is within reachable range, wait for it

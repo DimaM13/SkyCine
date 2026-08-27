@@ -69,6 +69,7 @@ export const RoomsPage: React.FC = () => {
 
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreating) return;
     setCreateError('');
     setIsCreating(true);
 
