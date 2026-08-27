@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Users, Share2, Sparkles, Film, Video } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { CustomPlayer } from '../components/player/CustomPlayer';
 import { YouTubeSyncPlayer } from '../components/player/YouTubeSyncPlayer';
@@ -53,7 +52,7 @@ export const RoomPage: React.FC = () => {
           });
         }
       })
-      .catch((err) => {
+      .catch(() => {
         alert('Комната не найдена');
         navigate('/rooms');
       })
@@ -73,22 +72,16 @@ export const RoomPage: React.FC = () => {
     members,
     messages,
     reactions,
-    syncDiffMs,
-    syncQuality,
-    syncToHost,
-    forceSyncAll,
+    syncDiffSec,
     isHost,
-    allMembersReady,
-    isBufferingBarrier,
-    barrierTargetPosition,
-    forceBarrierPlay,
     sendPlay,
     sendPause,
     sendSeek,
+    forceSyncAll,
+    syncToHost,
     sendMessage,
     sendReaction,
     sendFriendInvite,
-    reportBufferStatus,
   } = useSyncPlayer({
     room,
     videoRef,
@@ -97,9 +90,7 @@ export const RoomPage: React.FC = () => {
         doSeekRef.current(pos, shouldPlay);
       } else if (videoRef.current) {
         videoRef.current.currentTime = pos;
-        if (shouldPlay) {
-          videoRef.current.play().catch(() => {});
-        }
+        if (shouldPlay) videoRef.current.play().catch(() => {});
       }
     },
     onPlay: () => {
@@ -134,7 +125,7 @@ export const RoomPage: React.FC = () => {
     return (
       <div className="h-[80vh] flex flex-col items-center justify-center gap-3 text-slate-400">
         <div className="w-10 h-10 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
-        <span className="text-xs">Подключение к комнате совместного просмотра...</span>
+        <span className="text-xs">Подключение к комнате...</span>
       </div>
     );
   }
@@ -143,19 +134,13 @@ export const RoomPage: React.FC = () => {
 
   return (
     <div className="w-full h-full flex flex-col md:flex-row overflow-hidden bg-black relative select-none touch-none">
-      {/* Main Screen Area */}
       <div className="flex-1 flex flex-col h-full relative overflow-hidden bg-black">
         <div className="flex-1 w-full h-full">
           {isYouTubeRoom ? (
             <YouTubeSyncPlayer
               room={room}
               roomState={roomState}
-              syncDiffMs={syncDiffMs}
-              syncQuality={syncQuality}
               isHost={isHost}
-              allMembersReady={allMembersReady}
-              isBufferingBarrier={isBufferingBarrier}
-              onForceBarrierPlay={forceBarrierPlay}
               onForceSyncAll={forceSyncAll}
               onSyncToHost={syncToHost}
               members={members}
@@ -165,12 +150,10 @@ export const RoomPage: React.FC = () => {
               onPlayRequest={sendPlay}
               onPauseRequest={sendPause}
               onSeekRequest={sendSeek}
-              onBufferStatusChange={reportBufferStatus}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
               isSidebarOpen={isSidebarOpen}
               onBack={() => navigate('/rooms')}
               onInvite={() => setIsInviteModalOpen(true)}
-              onSendReaction={sendReaction}
               onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
               onAttachPlayHandler={(fn) => { doPlayRef.current = fn; }}
               onAttachPauseHandler={(fn) => { doPauseRef.current = fn; }}
@@ -182,25 +165,18 @@ export const RoomPage: React.FC = () => {
               media={media}
               room={room}
               roomState={roomState}
-              syncDiffMs={syncDiffMs}
-              syncQuality={syncQuality}
+              syncDiffSec={syncDiffSec}
               isWatchTogether={true}
               isHost={isHost}
-              allMembersReady={allMembersReady}
-              isBufferingBarrier={isBufferingBarrier}
-              onForceBarrierPlay={forceBarrierPlay}
-              onForceSyncAll={forceSyncAll}
-              onSyncToHost={syncToHost}
               members={members}
               currentUserId={user?.id}
-              hostUserId={room.hostUserId}
               reactions={reactions}
               initialPosition={room.currentPosition || 0}
-              initialPlaying={room.state === 'PLAYING'}
               onPlayRequest={sendPlay}
               onPauseRequest={sendPause}
               onSeekRequest={sendSeek}
-              onBufferStatusChange={reportBufferStatus}
+              onSyncToHost={syncToHost}
+              onForceSyncAll={forceSyncAll}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
               isSidebarOpen={isSidebarOpen}
               onBack={() => navigate('/rooms')}
@@ -213,7 +189,6 @@ export const RoomPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Room Sidebar (Members, Live Chat, Reactions) */}
       {isSidebarOpen && (
         <RoomSidebar
           members={members}
@@ -225,7 +200,6 @@ export const RoomPage: React.FC = () => {
         />
       )}
 
-      {/* Invite Friends Modal */}
       <InviteFriendsModal
         room={room}
         isOpen={isInviteModalOpen}

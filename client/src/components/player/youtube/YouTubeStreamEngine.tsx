@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Loader2, Zap } from 'lucide-react';
 import { apiClient } from '../../../api/client';
 
@@ -8,10 +8,8 @@ interface YouTubeStreamEngineProps {
   initialPosition: number;
   volume: number;
   isMuted: boolean;
-  onPlayerReadyChange: (ready: boolean) => void;
   onTimeUpdate: (currentTime: number, duration: number) => void;
   onPlayingChange: (isPlaying: boolean) => void;
-  onBufferStatusChange: (isReady: boolean, bufferedPos?: number, currentPos?: number, bufferPercent?: number) => void;
   onAttachSeekHandler?: (fn: (pos: number, shouldPlay?: boolean) => void) => void;
   onAttachPlayHandler?: (fn: () => void) => void;
   onAttachPauseHandler?: (fn: () => void) => void;
@@ -25,10 +23,8 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
   initialPosition,
   volume,
   isMuted,
-  onPlayerReadyChange,
   onTimeUpdate,
   onPlayingChange,
-  onBufferStatusChange,
   onAttachSeekHandler,
   onAttachPlayHandler,
   onAttachPauseHandler,
@@ -39,7 +35,6 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
   const [streamSrc, setStreamSrc] = useState<string>('');
   const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
   const [downloadPercent, setDownloadPercent] = useState<number>(0);
-  const [isReady, setIsReady] = useState(false);
 
   const durationRef = useRef<number>(0);
   const currentTimeRef = useRef<number>(initialPosition || 0);
@@ -50,12 +45,6 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
   const onPlayingChangeRef = useRef(onPlayingChange);
   onPlayingChangeRef.current = onPlayingChange;
 
-  const onBufferStatusChangeRef = useRef(onBufferStatusChange);
-  onBufferStatusChangeRef.current = onBufferStatusChange;
-
-  const onPlayerReadyChangeRef = useRef(onPlayerReadyChange);
-  onPlayerReadyChangeRef.current = onPlayerReadyChange;
-
   // Sync volume and mute
   useEffect(() => {
     if (!videoRef.current) return;
@@ -63,7 +52,7 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
     videoRef.current.muted = isMuted;
   }, [volume, isMuted]);
 
-  // Poll 1080p download status from backend (stops once ready)
+  // Poll 1080p download status from backend
   useEffect(() => {
     if (!videoId || downloadStatus === 'ready') return;
 
@@ -99,15 +88,6 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
     };
   }, [videoId, downloadStatus]);
 
-  // Force load metadata on Safari / iOS when src is ready
-  useEffect(() => {
-    if (videoRef.current && streamSrc) {
-      try {
-        videoRef.current.load();
-      } catch (e) {}
-    }
-  }, [streamSrc]);
-
   // Attach control hooks
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
@@ -126,20 +106,9 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
 
     onAttachPlayHandler?.(() => {
       if (videoRef.current) {
-        const p = videoRef.current.play();
-        if (p !== undefined) {
-          p.then(() => {
-            onPlayingChangeRef.current(true);
-          }).catch((err) => {
-            console.warn('[YouTubeStreamEngine] Autoplay prevented, playing muted to stay in sync:', err);
-            if (videoRef.current) {
-              videoRef.current.muted = true;
-              videoRef.current.play().then(() => {
-                onPlayingChangeRef.current(true);
-              }).catch(() => {});
-            }
-          });
-        }
+        videoRef.current.play().then(() => {
+          onPlayingChangeRef.current(true);
+        }).catch(() => {});
       }
     });
 
@@ -165,7 +134,7 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
     onAttachGetIsPaused,
   ]);
 
-  // Periodic time tracking (500ms without spamming room:buffer_status)
+  // Periodic time tracking
   useEffect(() => {
     const interval = setInterval(() => {
       const video = videoRef.current;
@@ -194,8 +163,6 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
           preload="auto"
           className="w-full h-full object-contain pointer-events-none"
           onLoadedMetadata={() => {
-            setIsReady(true);
-            onPlayerReadyChangeRef.current(true);
             if (videoRef.current?.duration) {
               durationRef.current = videoRef.current.duration;
               onTimeUpdateRef.current(initialPosition || 0, videoRef.current.duration);
@@ -203,34 +170,12 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
             if (initialPosition > 0 && videoRef.current) {
               videoRef.current.currentTime = initialPosition;
             }
-            onBufferStatusChangeRef.current(true, 5, initialPosition || 0, 100);
             if (roomState === 'PLAYING') {
-              const p = videoRef.current?.play();
-              if (p !== undefined) {
-                p.then(() => onPlayingChangeRef.current(true)).catch(() => {
-                  if (videoRef.current) {
-                    videoRef.current.muted = true;
-                    videoRef.current.play().then(() => onPlayingChangeRef.current(true)).catch(() => {});
-                  }
-                });
-              }
+              videoRef.current?.play().then(() => onPlayingChangeRef.current(true)).catch(() => {});
             } else {
               videoRef.current?.pause();
               onPlayingChangeRef.current(false);
             }
-          }}
-          onLoadedData={() => {
-            setIsReady(true);
-            onPlayerReadyChangeRef.current(true);
-            onBufferStatusChangeRef.current(true, 5, currentTimeRef.current, 100);
-          }}
-          onCanPlay={() => {
-            setIsReady(true);
-            onPlayerReadyChangeRef.current(true);
-            onBufferStatusChangeRef.current(true, 5, currentTimeRef.current, 100);
-          }}
-          onWaiting={() => {
-            onBufferStatusChangeRef.current(false, 0, currentTimeRef.current, 50);
           }}
           onPlay={() => onPlayingChangeRef.current(true)}
           onPause={() => onPlayingChangeRef.current(false)}
@@ -244,7 +189,7 @@ export const YouTubeStreamEngine: React.FC<YouTubeStreamEngineProps> = ({
           <div className="flex flex-col gap-1">
             <h3 className="text-white font-bold text-base">Подготовка видео в 1080p Full HD</h3>
             <p className="text-slate-400 text-xs">
-              Загружаем видео без возрастных ограничений на сервер SkyCine...
+              Загружаем видео без возрастных ограничений на сервер...
             </p>
           </div>
           <div className="w-full bg-white/10 h-2.5 rounded-full overflow-hidden p-0.5 border border-white/10">

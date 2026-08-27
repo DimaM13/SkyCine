@@ -1,9 +1,8 @@
 import { Server, Socket } from 'socket.io';
 import { db } from '../config/db';
-import { Room, RoomMember, RoomState } from '../types';
+import { RoomMember, RoomState } from '../types';
 import { logger } from './logger.service';
-import { extractYouTubeId, fetchYouTubeInfo } from '../controllers/rooms.controller';
-import { YouTubeController } from '../controllers/youtube.controller';
+import { ffmpegService } from './ffmpeg.service';
 
 interface ConnectedUser {
   userId: string;
@@ -11,73 +10,21 @@ interface ConnectedUser {
   avatarUrl?: string;
   socketId: string;
   currentRoomId?: string;
-  status: string; // e.g., 'online', 'watching', 'idle'
-  activity?: string; // e.g., 'Watching Inception'
+  status: string;
+  activity?: string;
 }
 
 class SocketService {
   private io: Server | null = null;
   private users: Map<string, ConnectedUser> = new Map(); // socketId -> user
-  private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set of socketIds
+  private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set<socketId>
   private roomMembers: Map<string, Map<string, RoomMember>> = new Map(); // roomId -> (socketId -> RoomMember)
-  private pendingBarriers: Map<string, { targetPosition: number; action: string; playbackRate: number; timer?: NodeJS.Timeout }> = new Map();
-  private lastMembersBroadcast: Map<string, number> = new Map(); // roomId -> last broadcast timestamp
-
-  private startBarrierPlayback(roomId: string, targetPosition: number, playbackRate: number, initiatedBy: string, initiatedByUserId: string) {
-    if (this.pendingBarriers.has(roomId)) {
-      const b = this.pendingBarriers.get(roomId)!;
-      if (b.timer) clearTimeout(b.timer);
-      this.pendingBarriers.delete(roomId);
-    }
-
-    const now = Date.now();
-    const scheduledPlayAt = now + 350; // 350ms synchronized lockstep
-
-    try {
-      db.prepare(`
-        UPDATE rooms SET
-          state = 'PLAYING',
-          currentPosition = ?,
-          serverTimestamp = ?,
-          playbackRate = ?
-        WHERE id = ?
-      `).run(targetPosition, scheduledPlayAt, playbackRate, roomId);
-    } catch (e) {}
-
-    logger.info('BARRIER_RESOLVED', `Room ${roomId} all members ready. Starting playback from ${targetPosition.toFixed(1)}s (lockstep in 350ms)`);
-
-    this.io?.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
-    this.io?.to(roomId).emit('room:sync_state', {
-      state: 'PLAYING',
-      currentPosition: targetPosition,
-      serverTimestamp: scheduledPlayAt,
-      playbackRate,
-      action: 'PLAY',
-      initiatedBy,
-      initiatedByUserId,
-    });
-  }
 
   public init(io: Server) {
     this.io = io;
 
     io.on('connection', (socket: Socket) => {
-      logger.info('SOCKET', `New client connected: ${socket.id} (IP: ${socket.handshake.address})`);
-
-      socket.onAny((event, ...args) => {
-        if (event !== 'sync:ping' && event !== 'room:host_heartbeat' && event !== 'room:buffer_status' && event !== 'room:request_host_sync') {
-          logger.info('SOCKET_IN', `[${socket.id}] received: ${event}`, args);
-        } else {
-          // Log ping/heartbeats only in debug so we don't spam the info console
-          logger.debug('SOCKET_IN_PING', `[${socket.id}] received: ${event}`, args);
-        }
-      });
-
-      socket.onAnyOutgoing((event, ...args) => {
-        if (event !== 'sync:pong' && event !== 'room:buffer_update' && event !== 'room:host_time_reply') {
-          logger.info('SOCKET_OUT', `[${socket.id}] emitted: ${event}`, args);
-        }
-      });
+      logger.info('SOCKET', `Client connected: ${socket.id}`);
 
       // 1. Time Synchronization (NTP Protocol)
       socket.on('sync:ping', (data: { clientTimestamp: number }) => {
@@ -89,9 +36,10 @@ class SocketService {
 
       // 2. User Presence
       socket.on('user:connect', (userData: { userId: string; username: string; avatarUrl?: string }) => {
+        if (!userData?.userId) return;
         const user: ConnectedUser = {
           userId: userData.userId,
-          username: userData.username,
+          username: userData.username || 'User',
           avatarUrl: userData.avatarUrl,
           socketId: socket.id,
           status: 'online',
@@ -116,9 +64,11 @@ class SocketService {
         }
       });
 
-      // 3. Room Management & Watch Together
+      // 3. Room Join / Leave
       socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string }) => {
         const { roomId, userId, username, avatarUrl } = data;
+        if (!roomId) return;
+
         socket.join(roomId);
 
         if (!this.roomMembers.has(roomId)) {
@@ -126,13 +76,11 @@ class SocketService {
         }
 
         const roomMap = this.roomMembers.get(roomId)!;
-        
-        // Track whether this exact socket was already in room
-        const isReconnectingSameSocket = roomMap.has(socket.id);
+        const isAlreadyInRoom = roomMap.has(socket.id);
 
         const member: RoomMember = {
-          userId,
-          username,
+          userId: userId || 'guest',
+          username: username || 'Гость',
           avatarUrl,
           socketId: socket.id,
           isReady: true,
@@ -149,9 +97,9 @@ class SocketService {
           user.currentRoomId = roomId;
         }
 
-        logger.info('ROOM_JOIN', `User ${username} (socket: ${socket.id}, userId: ${userId}) joined room ${roomId}. Total members in room: ${roomMap.size}`);
+        logger.info('ROOM_JOIN', `User ${username} joined room ${roomId}. Total members: ${roomMap.size}`);
 
-        // Fetch room state from DB
+        // Fetch room state
         const room = db.prepare(`
           SELECT r.*, m.title as mediaTitle, m.durationSeconds, m.posterPath, m.backdropPath
           FROM rooms r
@@ -159,354 +107,171 @@ class SocketService {
           WHERE r.id = ?
         `).get(roomId) as any;
 
-        if (room) {
-          // If host is connected and watching, use host's live position
-          const hostMember = Array.from(roomMap.values()).find(m => m.userId === room.hostUserId && m.socketId !== socket.id);
-          if (hostMember && hostMember.currentPosition > 0) {
-            room.currentPosition = hostMember.currentPosition;
-            room.serverTimestamp = Date.now();
-          } else if (room.state === 'PLAYING' && room.serverTimestamp) {
-            const elapsed = Math.max(0, (Date.now() - room.serverTimestamp) / 1000 * (room.playbackRate || 1.0));
-            room.currentPosition = room.currentPosition + elapsed;
-            room.serverTimestamp = Date.now();
-          }
+        const now = Date.now();
+        let livePosition = room?.currentPosition || 0;
+        if (room && room.state === 'PLAYING' && room.serverTimestamp) {
+          const elapsed = Math.max(0, (now - room.serverTimestamp) / 1000 * (room.playbackRate || 1.0));
+          livePosition += elapsed;
         }
 
-        // Broadcast updated room members
-        this.emitRoomMembers(roomId);
-
-        // Send full room state to the newly joined client
+        // Send initial state to newly joined client
         socket.emit('room:initial_state', {
           room,
           members: Array.from(roomMap.values()),
-          serverTimestamp: Date.now(),
+          serverTimestamp: now,
+          livePosition,
         });
 
-        // Notify room ONLY IF first time joining (not reconnect)
-        if (!isReconnectingSameSocket) {
+        // Broadcast updated members list to the room
+        this.emitRoomMembers(roomId);
+
+        if (!isAlreadyInRoom) {
           io.to(roomId).emit('room:system_message', {
             text: `Пользователь ${username} присоединился к просмотру`,
             type: 'join',
-            timestamp: Date.now(),
+            timestamp: now,
           });
         }
       });
 
       socket.on('room:leave', (data: { roomId: string }) => {
-        this.handleLeaveRoom(socket, data.roomId);
+        if (data?.roomId) {
+          this.handleLeaveRoom(socket, data.roomId);
+        }
       });
 
-      // 4. Room Actions (Play, Pause, Seek, Rate)
+      // 4. Clean Unified Room Play / Pause / Seek Actions
       socket.on('room:action', (data: {
         roomId: string;
-        action: 'PLAY' | 'PAUSE' | 'SEEK' | 'RATE';
+        action: 'PLAY' | 'PAUSE' | 'SEEK';
         position: number;
         playbackRate?: number;
-        isPlaying?: boolean;
+        shouldPlay?: boolean;
       }) => {
-        const { roomId, action, position, playbackRate = 1.0 } = data;
+        const { roomId, action, position, playbackRate = 1.0, shouldPlay } = data;
+        if (!roomId) return;
+
         const now = Date.now();
-        const roomMap = this.roomMembers.get(roomId);
-        const memberCount = roomMap ? roomMap.size : 1;
-
-        const currentRoom = db.prepare('SELECT state FROM rooms WHERE id = ?').get(roomId) as any;
-        const wasPlaying = currentRoom?.state === 'PLAYING';
         const user = this.users.get(socket.id);
+        const initiatedBy = user?.username || 'Участник';
 
-        // Cancel previous pending barrier if any
-        if (this.pendingBarriers.has(roomId)) {
-          const existing = this.pendingBarriers.get(roomId)!;
-          if (existing.timer) clearTimeout(existing.timer);
-          this.pendingBarriers.delete(roomId);
-        }
+        if (action === 'PAUSE') {
+          try {
+            db.prepare(`
+              UPDATE rooms SET state = 'PAUSED', currentPosition = ?, serverTimestamp = ?, playbackRate = ? WHERE id = ?
+            `).run(position, now, playbackRate, roomId);
+          } catch {}
 
-        if (action === 'PAUSE' || action === 'SEEK') {
-          // Immediate Pause or Seek (Seek always stays in PAUSED state until user presses PLAY)
-          db.prepare(`
-            UPDATE rooms SET
-              state = 'PAUSED',
-              currentPosition = ?,
-              serverTimestamp = ?,
-              playbackRate = ?
-            WHERE id = ?
-          `).run(position, now, playbackRate, roomId);
-
-          io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
           io.to(roomId).emit('room:sync_state', {
             state: 'PAUSED',
             currentPosition: position,
             serverTimestamp: now,
             playbackRate,
-            action,
-            initiatedBy: user?.username || 'Host',
+            action: 'PAUSE',
+            initiatedBy,
             initiatedByUserId: user?.userId || '',
           });
-          return;
-        }
-
-        if (action === 'PLAY') {
-          // YouTube IFrame — simple logic: each presses Play locally, no barrier, just sync position/pause/seek + 3s auto-align. Don't touch HLS.
-          const roomInfo = db.prepare('SELECT sourceType, youtubeEngine FROM rooms WHERE id = ?').get(roomId) as any;
-          const isYouTubeIframe = roomInfo?.sourceType === 'YOUTUBE' && roomInfo?.youtubeEngine === 'iframe';
-          if (isYouTubeIframe) {
-            const scheduledPlayAt = now + 50;
-            try { db.prepare(`UPDATE rooms SET state='PLAYING', currentPosition=?, serverTimestamp=?, playbackRate=? WHERE id=?`).run(position, scheduledPlayAt, playbackRate, roomId); } catch (e) {}
-            io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
-            io.to(roomId).emit('room:sync_state', {
-              state: 'PLAYING',
-              currentPosition: position,
-              serverTimestamp: scheduledPlayAt,
-              playbackRate,
-              action: 'PLAY',
-              initiatedBy: user?.username || 'Host',
-              initiatedByUserId: user?.userId || '',
-            });
-            return;
-          }
-          if (memberCount > 1) {
-            // Debounce: ignore duplicate PLAY spam (YouTube iframe fires 6× in 3s) — keep first barrier
-            const existingBarrier = this.pendingBarriers.get(roomId);
-            if (existingBarrier && existingBarrier.action === 'PLAY' && Math.abs(existingBarrier.targetPosition - position) < 0.5) {
-              return;
-            }
-            // Multi-user room: engage Buffer Barrier lockstep (host waits for peers — no 2s gap, initiator does NOT play immediately, fixed in sendPlay)
-            if (roomMap) {
-              for (const member of roomMap.values()) {
-                member.isReady = false;
-                member.currentPosition = position;
-              }
-              io.to(roomId).emit('room:members_status', Array.from(roomMap.values()));
-            }
-
-            io.to(roomId).emit('room:buffer_barrier', {
-              isBuffering: true,
-              targetPosition: position,
-              initiatedBy: user?.username || 'Host',
-            });
-
-            // Fallback timer (2.5 seconds maximum to prevent hanging)
-            const fallbackTimer = setTimeout(() => {
-              this.startBarrierPlayback(roomId, position, playbackRate, user?.username || 'Участники', user?.userId || '');
-            }, 2500);
-
-            this.pendingBarriers.set(roomId, {
-              targetPosition: position,
-              action: 'PLAY',
-              playbackRate,
-              timer: fallbackTimer,
-            });
-          } else {
-            // Single user: start immediately
-            const scheduledPlayAt = now + 50;
-
+        } else if (action === 'PLAY') {
+          // 150ms synchronized lockstep startup so all clients fire play() together
+          const scheduledPlayAt = now + 150;
+          try {
             db.prepare(`
-              UPDATE rooms SET
-                state = 'PLAYING',
-                currentPosition = ?,
-                serverTimestamp = ?,
-                playbackRate = ?
-              WHERE id = ?
+              UPDATE rooms SET state = 'PLAYING', currentPosition = ?, serverTimestamp = ?, playbackRate = ? WHERE id = ?
             `).run(position, scheduledPlayAt, playbackRate, roomId);
+          } catch {}
 
-            io.to(roomId).emit('room:buffer_barrier', { isBuffering: false });
-            io.to(roomId).emit('room:sync_state', {
-              state: 'PLAYING',
-              currentPosition: position,
-              serverTimestamp: scheduledPlayAt,
-              playbackRate,
-              action: 'PLAY',
-              initiatedBy: user?.username || 'Host',
-              initiatedByUserId: user?.userId || '',
-            });
-          }
+          io.to(roomId).emit('room:sync_state', {
+            state: 'PLAYING',
+            currentPosition: position,
+            serverTimestamp: scheduledPlayAt,
+            playbackRate,
+            action: 'PLAY',
+            initiatedBy,
+            initiatedByUserId: user?.userId || '',
+          });
+        } else if (action === 'SEEK') {
+          const targetState: RoomState = shouldPlay ? 'PLAYING' : 'PAUSED';
+          const scheduledPlayAt = shouldPlay ? now + 150 : now;
+
+          try {
+            db.prepare(`
+              UPDATE rooms SET state = ?, currentPosition = ?, serverTimestamp = ?, playbackRate = ? WHERE id = ?
+            `).run(targetState, position, scheduledPlayAt, playbackRate, roomId);
+          } catch {}
+
+          io.to(roomId).emit('room:sync_state', {
+            state: targetState,
+            currentPosition: position,
+            serverTimestamp: scheduledPlayAt,
+            playbackRate,
+            action: 'SEEK',
+            initiatedBy,
+            initiatedByUserId: user?.userId || '',
+          });
         }
       });
 
-      // Host Continuous Time Anchor (every 2.5s while playing)
+      // 5. Periodic Time Anchor from Host (every 3 seconds while playing)
       socket.on('room:host_heartbeat', (data: { roomId: string; position: number }) => {
-        const { roomId, position } = data;
+        if (!data?.roomId) return;
         const now = Date.now();
 
-        // Update DB without noisy logs
         try {
-          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(position, now, roomId);
-        } catch (e) {}
+          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, now, data.roomId);
+        } catch {}
 
-        // Broadcast accurate host time anchor to other participants
-        socket.to(roomId).emit('room:time_anchor', {
-          currentPosition: position,
+        socket.to(data.roomId).emit('room:time_anchor', {
+          currentPosition: data.position,
           serverTimestamp: now,
         });
       });
 
-      // Host Force Sync All Participants
+      // 6. Force Sync All to Host Position
       socket.on('room:force_sync_all', (data: { roomId: string; position: number }) => {
-        const { roomId, position } = data;
+        if (!data?.roomId) return;
         const now = Date.now();
         const user = this.users.get(socket.id);
-
-        const room = db.prepare('SELECT state FROM rooms WHERE id = ?').get(roomId) as any;
-        const isPlaying = room?.state === 'PLAYING';
-
-        // 1.5s synchronized buffer barrier so iPad / HLS mobile clients have time to prepare stream without PC running ahead
-        const scheduledPlayAt = now + (isPlaying ? 1500 : 0);
+        const scheduledPlayAt = now + 200;
 
         try {
-          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(position, scheduledPlayAt, roomId);
-        } catch (e) {}
+          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, scheduledPlayAt, data.roomId);
+        } catch {}
 
-        logger.info('ROOM_FORCE_SYNC', `Host ${user?.username || 'Host'} forced sync in room ${roomId} to ${position.toFixed(1)}s`);
-
-        io.to(roomId).emit('room:force_sync_all', {
-          position,
+        io.to(data.roomId).emit('room:force_sync_all', {
+          position: data.position,
           serverTimestamp: scheduledPlayAt,
-          isPlaying,
           initiatedBy: user?.username || 'Хост',
-          initiatedByUserId: user?.userId || '',
         });
 
-        io.to(roomId).emit('room:system_message', {
+        io.to(data.roomId).emit('room:system_message', {
           text: `👑 Хост ${user?.username || ''} синхронизировал воспроизведение для всех`,
           type: 'sync',
           timestamp: now,
         });
       });
 
-      // Host Change YouTube Video Live
-      socket.on('room:change_youtube', async (data: { roomId: string; youtubeUrl: string; title?: string }) => {
-        const { roomId, youtubeUrl, title } = data;
-        const user = this.users.get(socket.id);
-        if (!user) return;
-
-        const room = db.prepare('SELECT hostUserId, youtubeId FROM rooms WHERE id = ?').get(roomId) as any;
-        if (!room) return;
-
-        if (room.hostUserId !== user.userId) {
-          socket.emit('room:error', { message: 'Только хост может переключать видео' });
-          return;
-        }
-
-        const oldYtId = room.youtubeId;
-
-        const ytId = extractYouTubeId(youtubeUrl);
-        if (!ytId) {
-          socket.emit('room:error', { message: 'Некорректная ссылка на YouTube' });
-          return;
-        }
-
-        if (oldYtId && oldYtId !== ytId) {
-          const otherRoom = db.prepare('SELECT id FROM rooms WHERE youtubeId = ? AND id != ?').get(oldYtId, roomId);
-          if (!otherRoom) {
-            YouTubeController.deleteCache(oldYtId);
-          }
-        }
-
-        const ytInfo = await fetchYouTubeInfo(ytId);
-        const finalTitle = title?.trim() || ytInfo.title;
-        const fullUrl = `https://www.youtube.com/watch?v=${ytId}`;
-        const now = Date.now();
-
-        try {
-          db.prepare(`
-            UPDATE rooms SET
-              sourceType = 'YOUTUBE',
-              youtubeId = ?,
-              youtubeUrl = ?,
-              youtubeTitle = ?,
-              youtubeThumbnail = ?,
-              youtubeEngine = 'iframe',
-              title = ?,
-              currentPosition = 0,
-              state = 'PAUSED',
-              serverTimestamp = ?
-            WHERE id = ?
-          `).run(ytId, fullUrl, ytInfo.title, ytInfo.thumbnail, `YouTube: ${finalTitle}`, now, roomId);
-
-          logger.info('ROOM_CHANGE_YT', `Room ${roomId} YouTube changed to ${ytId} (${finalTitle}) by ${user.username}`);
-
-          io.to(roomId).emit('room:youtube_changed', {
-            sourceType: 'YOUTUBE',
-            youtubeId: ytId,
-            youtubeUrl: fullUrl,
-            youtubeTitle: ytInfo.title,
-            youtubeThumbnail: ytInfo.thumbnail,
-            title: `YouTube: ${finalTitle}`,
-            youtubeEngine: 'iframe',
-            currentPosition: 0,
-            state: 'PAUSED',
-            serverTimestamp: now,
-          });
-
-          io.to(roomId).emit('room:system_message', {
-            text: `🎬 Хост ${user.username} переключил видео на «${finalTitle}»`,
-            type: 'video_change',
-            timestamp: now,
-          });
-        } catch (err) {
-          logger.error('ROOM_CHANGE_YT', `Error changing YouTube video: ${err}`);
-        }
-      });
-
-      // Member Buffer Status
-      socket.on('room:buffer_status', (data: {
-        roomId: string;
-        isReady: boolean;
-        bufferedPosition: number;
-        currentPosition: number;
-        pingMs?: number;
-        bufferPercent?: number;
-      }) => {
-        const { roomId, isReady, bufferedPosition, currentPosition, pingMs = 0, bufferPercent } = data;
-        const members = this.roomMembers.get(roomId);
+      // 7. Member Status & Position Reporting
+      socket.on('room:member_status', (data: { roomId: string; currentPosition: number; bufferedPosition?: number }) => {
+        if (!data?.roomId) return;
+        const members = this.roomMembers.get(data.roomId);
         if (members && members.has(socket.id)) {
           const m = members.get(socket.id)!;
-          m.isReady = isReady;
-          m.bufferedPosition = bufferedPosition;
-          m.currentPosition = currentPosition;
-          m.pingMs = pingMs;
-          if (bufferPercent !== undefined) m.bufferPercent = bufferPercent;
-
-          // Throttled broadcast of member states (max once per 1.5s)
-          this.emitRoomMembers(roomId);
-
-          // Check if active barrier is ready to trigger synchronized play
-          if (this.pendingBarriers.has(roomId)) {
-            const barrier = this.pendingBarriers.get(roomId)!;
-            const allMembersReady = Array.from(members.values()).every((member) => member.isReady);
-            if (allMembersReady) {
-              const user = this.users.get(socket.id);
-              this.startBarrierPlayback(roomId, barrier.targetPosition, barrier.playbackRate, user?.username || 'Участники', user?.userId || '');
-            }
-          }
+          m.currentPosition = data.currentPosition || 0;
+          if (data.bufferedPosition !== undefined) m.bufferedPosition = data.bufferedPosition;
         }
       });
 
-      // Host Force Barrier Play (Manual Override)
-      socket.on('room:force_barrier_play', (data: { roomId: string }) => {
-        const { roomId } = data;
-        const user = this.users.get(socket.id);
-        if (this.pendingBarriers.has(roomId)) {
-          const barrier = this.pendingBarriers.get(roomId)!;
-          this.startBarrierPlayback(roomId, barrier.targetPosition, barrier.playbackRate, user?.username || 'Host', user?.userId || '');
-        }
-      });
-
-      // Chat Messages
+      // 8. Chat Messages
       socket.on('room:chat_message', (data: { roomId: string; text: string; userId?: string; username?: string; avatarUrl?: string }) => {
         if (!data?.roomId || !data?.text?.trim()) return;
 
         const user = this.users.get(socket.id);
-        const roomMember = this.roomMembers.get(data.roomId)?.get(socket.id);
-
-        const senderUserId = user?.userId || roomMember?.userId || data.userId || 'guest';
-        const senderUsername = user?.username || roomMember?.username || data.username || 'Пользователь';
-        const senderAvatar = user?.avatarUrl || roomMember?.avatarUrl || data.avatarUrl;
-
-        // Ensure socket is joined to room
-        socket.join(data.roomId);
+        const senderUserId = user?.userId || data.userId || 'guest';
+        const senderUsername = user?.username || data.username || 'Пользователь';
+        const senderAvatar = user?.avatarUrl || data.avatarUrl;
 
         io.to(data.roomId).emit('room:chat_message', {
-          id: `${Date.now()}-${Math.random()}`,
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           userId: senderUserId,
           username: senderUsername,
           avatarUrl: senderAvatar,
@@ -515,33 +280,22 @@ class SocketService {
         });
       });
 
-      // Flying Emoji Reactions
+      // 9. Floating Emoji Reactions
       socket.on('room:reaction', (data: { roomId: string; emoji: string; username?: string }) => {
         if (!data?.roomId || !data?.emoji) return;
 
         const user = this.users.get(socket.id);
-        const roomMember = this.roomMembers.get(data.roomId)?.get(socket.id);
-        const senderUsername = user?.username || roomMember?.username || data.username || 'Участник';
-
-        socket.join(data.roomId);
+        const senderUsername = user?.username || data.username || 'Участник';
 
         io.to(data.roomId).emit('room:reaction', {
-          id: `${Date.now()}-${Math.random()}`,
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           emoji: data.emoji,
           username: senderUsername,
           timestamp: Date.now(),
         });
       });
 
-      // YouTube Engine Switch Synchronization (18+ Fallback)
-      socket.on('room:set_youtube_engine', (data: { roomId: string; engine: 'iframe' | 'server_stream' }) => {
-        try {
-          db.prepare('UPDATE rooms SET youtubeEngine = ? WHERE id = ?').run(data.engine, data.roomId);
-        } catch (e) {}
-        io.to(data.roomId).emit('room:youtube_engine', { engine: data.engine });
-      });
-
-      // 4. Friend Invitations
+      // 10. Friend Invitations
       socket.on('friend:invite_to_room', (data: {
         targetUserId: string;
         roomId: string;
@@ -551,7 +305,7 @@ class SocketService {
         posterPath?: string;
       }) => {
         const sender = this.users.get(socket.id);
-        if (!sender) return;
+        if (!sender || !data.targetUserId) return;
 
         const targetSockets = this.userSockets.get(data.targetUserId);
         if (targetSockets) {
@@ -570,53 +324,8 @@ class SocketService {
         }
       });
 
-      // On-Demand Sync Request (When a viewer clicks "Выровнять" or connects)
-      socket.on('room:request_host_sync', (data: { roomId: string }) => {
-        const { roomId } = data;
-        const roomMap = this.roomMembers.get(roomId);
-        if (!roomMap) return;
-
-        const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(roomId) as any;
-        if (!room) return;
-
-        const hostMember = Array.from(roomMap.values()).find(m => m.userId === room.hostUserId);
-        if (hostMember && hostMember.socketId !== socket.id) {
-          // Ask host's player directly for exact real-time playback position
-          io.to(hostMember.socketId).emit('room:query_host_time', { requesterSocketId: socket.id });
-        } else {
-          // Fallback to room DB state with elapsed calculation
-          const elapsed = room.state === 'PLAYING' ? Math.max(0, (Date.now() - room.serverTimestamp) / 1000 * (room.playbackRate || 1.0)) : 0;
-          socket.emit('room:time_anchor', {
-            currentPosition: room.currentPosition + elapsed,
-            serverTimestamp: Date.now(),
-            state: room.state,
-          });
-        }
-      });
-
-      // Host replies with exact current time
-      socket.on('room:host_time_reply', (data: { roomId: string; position: number; requesterSocketId?: string }) => {
-        const now = Date.now();
-        try {
-          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, now, data.roomId);
-        } catch (e) {}
-
-        if (data.requesterSocketId) {
-          io.to(data.requesterSocketId).emit('room:time_anchor', {
-            currentPosition: data.position,
-            serverTimestamp: now,
-          });
-        } else {
-          socket.to(data.roomId).emit('room:time_anchor', {
-            currentPosition: data.position,
-            serverTimestamp: now,
-          });
-        }
-      });
-
-      // Disconnect handling
+      // 11. Disconnect Cleanup
       socket.on('disconnect', () => {
-        // 1. Unconditionally clean up from ALL room members maps
         for (const [roomId, roomMap] of this.roomMembers.entries()) {
           if (roomMap.has(socket.id)) {
             this.handleLeaveRoom(socket, roomId);
@@ -633,7 +342,6 @@ class SocketService {
               this.broadcastPresence(user.userId, 'offline');
             }
           }
-
           this.users.delete(socket.id);
         }
       });
@@ -657,35 +365,24 @@ class SocketService {
         });
       }
 
-      logger.info('ROOM_LEAVE', `Socket ${socket.id} (user: ${member?.username}) left room ${roomId}. Remaining members in room: ${members.size}`);
+      logger.info('ROOM_LEAVE', `User ${member?.username || socket.id} left room ${roomId}. Remaining: ${members.size}`);
 
       if (members.size === 0) {
         this.roomMembers.delete(roomId);
-        // Clean up any stray FFmpeg continuous sessions for this room to prevent CPU/IO leaks
-        import('./ffmpeg.service').then(m => m.ffmpegService.killSessionsForRoom(roomId));
+        // Clean up FFmpeg session for empty room
+        ffmpegService.killSessionsForRoom(roomId);
       } else {
         this.emitRoomMembers(roomId);
       }
     }
-
-    const user = this.users.get(socket.id);
-    if (user) {
-      user.currentRoomId = undefined;
-    }
   }
 
-  private emitRoomMembers(roomId: string, force: boolean = false) {
+  private emitRoomMembers(roomId: string) {
     if (!this.io) return;
     const members = this.roomMembers.get(roomId);
-    if (!members) return;
-    
-    // Throttle broadcasts to max once per 1.5 seconds unless forced
-    const now = Date.now();
-    const lastBroadcast = this.lastMembersBroadcast.get(roomId) || 0;
-    if (!force && now - lastBroadcast < 1500) return;
-    this.lastMembersBroadcast.set(roomId, now);
-    
-    this.io.to(roomId).emit('room:members', Array.from(members.values()));
+    if (members) {
+      this.io.to(roomId).emit('room:members', Array.from(members.values()));
+    }
   }
 
   private broadcastPresence(userId: string, status: string, activity?: string) {

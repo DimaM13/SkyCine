@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { YouTubeController } from './youtube.controller';
+import { ffmpegService } from '../services/ffmpeg.service';
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -18,12 +19,10 @@ export function extractYouTubeId(urlOrId: string): string | null {
   if (!urlOrId || typeof urlOrId !== 'string') return null;
   const trimmed = urlOrId.trim();
 
-  // If it's already an 11-char ID like dQw4w9WgXcQ
   if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
     return trimmed;
   }
 
-  // Match youtube.com/watch?v=ID, youtu.be/ID, youtube.com/embed/ID, youtube.com/shorts/ID, etc.
   const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i;
   const match = trimmed.match(regex);
   return match ? match[1] : null;
@@ -41,7 +40,7 @@ export async function fetchYouTubeInfo(youtubeId: string): Promise<{ title: stri
         thumbnail: data.thumbnail_url || fallbackThumbnail,
       };
     }
-  } catch (err) {}
+  } catch {}
 
   return {
     title: 'YouTube Видео',
@@ -77,7 +76,7 @@ export class RoomsController {
 
       res.json({ rooms });
     } catch (err) {
-      logger.error('ROOM_ERR', 'API Error:', err);
+      logger.error('ROOM_ERR', 'getRooms error:', err);
       res.status(500).json({ error: 'Ошибка получения списка комнат' });
     }
   }
@@ -97,7 +96,7 @@ export class RoomsController {
 
         const ytId = extractYouTubeId(youtubeUrl.trim());
         if (!ytId) {
-          res.status(400).json({ error: 'Не удалось распознать ссылку на YouTube. Введите корректный URL (например, https://youtube.com/watch?v=... или https://youtu.be/...)' });
+          res.status(400).json({ error: 'Не удалось распознать ссылку на YouTube' });
           return;
         }
 
@@ -144,9 +143,9 @@ export class RoomsController {
         return;
       }
 
-      // Local Media Room
+      // Local media room
       if (!mediaItemId) {
-        res.status(400).json({ error: 'Необходимо выбрать фильм, серию или указать ссылку на YouTube' });
+        res.status(400).json({ error: 'Необходимо выбрать фильм или серию' });
         return;
       }
 
@@ -214,19 +213,18 @@ export class RoomsController {
         room.mediaTitle = room.youtubeTitle || room.title;
         room.posterPath = room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`;
         room.backdropPath = room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`;
-        room.youtubeEngine = room.youtubeEngine || 'iframe';
       }
 
       res.json({ room: { ...room, tracks } });
     } catch (err) {
-      logger.error('ROOM_ERR', 'API Error:', err);
+      logger.error('ROOM_ERR', 'getRoom error:', err);
       res.status(500).json({ error: 'Ошибка получения комнаты' });
     }
   }
 
   public static async deleteRoom(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { roomId } = req.params;
+      const roomId = req.params.roomId as string;
       const currentUserId = req.user!.id;
       const role = req.user!.role;
 
@@ -242,20 +240,18 @@ export class RoomsController {
       }
 
       if (room.youtubeId) {
-        // Check if any other room is currently using this youtubeId
         const otherRoom = db.prepare('SELECT id FROM rooms WHERE youtubeId = ? AND id != ?').get(room.youtubeId, roomId);
         if (!otherRoom) {
           YouTubeController.deleteCache(room.youtubeId);
         }
       } else {
-        // Local media room: cleanly kill active FFmpeg sessions for this room
-        import('../services/ffmpeg.service').then(m => m.ffmpegService.killSessionsForRoom(roomId as string));
+        ffmpegService.killSessionsForRoom(roomId);
       }
 
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
       res.json({ message: 'Комната закрыта' });
     } catch (err) {
-      logger.error('ROOM_ERR', 'API Error:', err);
+      logger.error('ROOM_ERR', 'deleteRoom error:', err);
       res.status(500).json({ error: 'Ошибка закрытия комнаты' });
     }
   }

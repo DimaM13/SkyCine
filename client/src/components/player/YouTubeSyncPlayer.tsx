@@ -1,40 +1,32 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX,
   Maximize, Minimize, ArrowLeft, Users, Share2,
-  RefreshCw, Video, AlertCircle, X, Clock, Zap
+  Video, AlertCircle, X, Zap
 } from 'lucide-react';
 import { useSocket } from '../../context/SocketContext';
 import { Room, RoomMember, RoomReaction, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
-import { BufferBarrierBanner } from '../rooms/BufferBarrierBanner';
 import { YouTubeIFrameEngine } from './youtube/YouTubeIFrameEngine';
 import { YouTubeStreamEngine } from './youtube/YouTubeStreamEngine';
 
 interface YouTubeSyncPlayerProps {
   room: Room;
   roomState: RoomState;
-  syncDiffMs: number;
-  syncQuality: 'perfect' | 'good' | 'adjusting' | 'seeking';
   isHost: boolean;
-  allMembersReady?: boolean;
   onForceSyncAll: () => void;
   onSyncToHost: () => void;
   members: RoomMember[];
   currentUserId?: string;
   hostUserId: string;
   reactions: RoomReaction[];
-  isBufferingBarrier?: boolean;
-  onForceBarrierPlay?: () => void;
   onPlayRequest: () => void;
   onPauseRequest: () => void;
   onSeekRequest: (pos: number) => void;
-  onBufferStatusChange: (isReady: boolean, bufferedPos?: number, currentPos?: number, bufferPercent?: number) => void;
   onToggleSidebar: () => void;
   isSidebarOpen: boolean;
   onBack: () => void;
   onInvite: () => void;
-  onSendReaction?: (emoji: string) => void;
   onAttachSeekHandler?: (fn: (pos: number, shouldPlay?: boolean) => void) => void;
   onAttachPlayHandler?: (fn: () => void) => void;
   onAttachPauseHandler?: (fn: () => void) => void;
@@ -45,22 +37,12 @@ interface YouTubeSyncPlayerProps {
 export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   room,
   roomState,
-  syncDiffMs,
-  syncQuality,
   isHost,
-  allMembersReady = true,
   onForceSyncAll,
-  onSyncToHost,
-  members,
-  currentUserId,
-  hostUserId,
   reactions,
-  isBufferingBarrier = false,
-  onForceBarrierPlay,
   onPlayRequest,
   onPauseRequest,
   onSeekRequest,
-  onBufferStatusChange,
   onToggleSidebar,
   isSidebarOpen,
   onBack,
@@ -74,13 +56,9 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const { socket } = useSocket();
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Engine state initialized directly from room (with fallback to iframe)
-  const [engine, setEngine] = useState<'iframe' | 'server_stream'>(
-    room.youtubeEngine || 'iframe'
-  );
-
+  const [engine, setEngine] = useState<'iframe' | 'server_stream'>('iframe');
   const [currentYtId, setCurrentYtId] = useState<string>(room.youtubeId || '');
-  const [videoTitle, setVideoTitle] = useState<string>(room.youtubeTitle || room.title);
+  const [videoTitle] = useState<string>(room.youtubeTitle || room.title);
 
   const [isPlaying, setIsPlaying] = useState(roomState === 'PLAYING');
   const [currentTime, setCurrentTime] = useState(room.currentPosition || 0);
@@ -89,7 +67,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [fallbackToast, setFallbackToast] = useState(false);
 
   // Change Video Modal
   const [showChangeModal, setShowChangeModal] = useState(false);
@@ -99,51 +76,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Switch engine and broadcast to room
-  const switchToServerStream = useCallback(() => {
-    if (!currentYtId) return;
-    setEngine('server_stream');
-    setFallbackToast(true);
-    setTimeout(() => setFallbackToast(false), 5000);
-
-    if (socket && room?.id) {
-      socket.emit('room:set_youtube_engine', { roomId: room.id, engine: 'server_stream' });
-    }
-  }, [currentYtId, socket, room?.id]);
-
-  // Synchronize engine state across all room members
-  useEffect(() => {
-    if (!socket) return;
-    const handleEngine = (data: { engine: 'iframe' | 'server_stream' }) => {
-      if (data?.engine) {
-        setEngine(data.engine);
-      }
-    };
-    socket.on('room:youtube_engine', handleEngine);
-    return () => {
-      socket.off('room:youtube_engine', handleEngine);
-    };
-  }, [socket]);
-
-  // Synchronize room video change from host
-  useEffect(() => {
-    if (!socket) return;
-    const handleYtChanged = (data: any) => {
-      if (data.youtubeId) {
-        setCurrentYtId(data.youtubeId);
-        setVideoTitle(data.youtubeTitle || data.title);
-        setCurrentTime(0);
-        setIsPlaying(false);
-        setEngine(data.youtubeEngine || 'iframe');
-      }
-    };
-    socket.on('room:youtube_changed', handleYtChanged);
-    return () => {
-      socket.off('room:youtube_changed', handleYtChanged);
-    };
-  }, [socket]);
-
-  // Auto-hide Controls
   const resetControlsTimeout = () => {
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -222,11 +154,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
     if (h > 0) {
       return `${h}:${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
     }
-    return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
-  const isBlockedByBuffer = !isPlaying && !allMembersReady && members.length > 1;
 
   return (
     <div
@@ -235,7 +166,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
       onClick={resetControlsTimeout}
       className="relative w-full h-full bg-black select-none overflow-hidden group flex items-center justify-center"
     >
-      {/* 1. YouTube IFrame Sub-Engine (Dedicated Clean Component) */}
       {engine === 'iframe' && (
         <YouTubeIFrameEngine
           videoId={currentYtId}
@@ -243,14 +173,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           initialPosition={room.currentPosition || 0}
           volume={volume}
           isMuted={isMuted}
-          onPlayerReadyChange={() => {}}
           onTimeUpdate={(cur, dur) => {
             setCurrentTime(cur);
             if (dur > 0) setDuration(dur);
           }}
           onPlayingChange={(playing) => setIsPlaying(playing)}
-          onBufferStatusChange={onBufferStatusChange}
-          onAgeRestrictedFallback={switchToServerStream}
+          onAgeRestrictedFallback={() => setEngine('server_stream')}
           onAttachSeekHandler={onAttachSeekHandler}
           onAttachPlayHandler={onAttachPlayHandler}
           onAttachPauseHandler={onAttachPauseHandler}
@@ -259,7 +187,6 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         />
       )}
 
-      {/* 2. YouTube 1080p Server Stream Sub-Engine (Dedicated Clean Component) */}
       {engine === 'server_stream' && (
         <YouTubeStreamEngine
           videoId={currentYtId}
@@ -267,13 +194,11 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           initialPosition={room.currentPosition || 0}
           volume={volume}
           isMuted={isMuted}
-          onPlayerReadyChange={() => {}}
           onTimeUpdate={(cur, dur) => {
             setCurrentTime(cur);
             if (dur > 0) setDuration(dur);
           }}
           onPlayingChange={(playing) => setIsPlaying(playing)}
-          onBufferStatusChange={onBufferStatusChange}
           onAttachSeekHandler={onAttachSeekHandler}
           onAttachPlayHandler={onAttachPlayHandler}
           onAttachPauseHandler={onAttachPauseHandler}
@@ -288,63 +213,36 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         className="absolute inset-0 z-10 cursor-pointer"
       />
 
-      {/* Buffer Barrier — only for HLS, YouTube iframe is simple: each presses Play locally */}
-      <BufferBarrierBanner
-        isVisible={!isPlaying && isBufferingBarrier && members.length > 1}
-        members={members}
-        isHost={isHost}
-        onForcePlay={() => {
-          if (isHost) {
-            onForceBarrierPlay?.();
-            onPlayRequest();
-          }
-        }}
-      />
-
-      {/* Synchronized Flying Reactions Overlay */}
+      {/* Flying Reactions Overlay */}
       {reactions && reactions.length > 0 && (
         <ReactionOverlay reactions={reactions} />
       )}
 
-      {/* Fallback Toast Notification */}
-      {fallbackToast && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-red-600/90 text-white border border-red-400/40 rounded-2xl px-4 py-2 text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-fade-in pointer-events-none">
-          <Zap className="w-4 h-4 text-yellow-300 fill-current animate-bounce" />
-          <span>Возрастное ограничение 18+ — включён прямой серверный 1080p поток SkyCine ⚡</span>
-        </div>
-      )}
-
-      {/* TOP BAR OVERLAY */}
+      {/* Top Controls Overlay */}
       <div
         className={`absolute top-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-b from-black/90 via-black/50 to-transparent z-30 transition-opacity duration-300 flex items-center justify-between ${
           showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Left: Back & Title */}
         <div className="flex items-center gap-3 md:gap-4 min-w-0">
           <button
             onClick={onBack}
-            className="p-2 md:p-2.5 rounded-2xl bg-white/10 hover:bg-white/20 text-white transition-all backdrop-blur-md cursor-pointer shrink-0"
-            title="Выйти из комнаты"
+            className="p-2 md:p-2.5 rounded-2xl bg-white/10 hover:bg-white/20 text-white transition-all cursor-pointer shrink-0"
+            title="Выйти"
           >
             <ArrowLeft className="w-4 h-4 md:w-5 md:h-5" />
           </button>
 
           <div className="flex flex-col min-w-0">
             <div className="flex items-center gap-2">
-              <span className="bg-red-600 text-white font-extrabold text-[10px] uppercase px-2 py-0.5 rounded-md flex items-center gap-1 shadow-md shrink-0">
-                <Video className="w-3 h-3 fill-current" />
-                YouTube
+              <span className="bg-red-600 text-white font-extrabold text-[10px] uppercase px-2 py-0.5 rounded-md flex items-center gap-1">
+                <Video className="w-3 h-3 fill-current" /> YouTube
               </span>
               {engine === 'server_stream' && (
-                <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1 shrink-0">
-                  <Zap className="w-2.5 h-2.5 fill-current" />
-                  1080p Bypass
+                <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1">
+                  <Zap className="w-2.5 h-2.5 fill-current" /> 1080p Bypass
                 </span>
               )}
-              <span className="bg-cinema-gold/15 text-cinema-gold font-mono text-[10px] font-bold px-2 py-0.5 rounded-md border border-cinema-gold/30 shrink-0">
-                {room.code}
-              </span>
             </div>
             <h2 className="text-xs md:text-sm font-bold text-white truncate max-w-xs sm:max-w-md md:max-w-lg mt-0.5">
               {videoTitle}
@@ -352,19 +250,18 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
           </div>
         </div>
 
-        {/* Right: Actions (Change video, Invite, Sync, Sidebar) */}
         <div className="flex items-center gap-2 shrink-0">
           {engine === 'iframe' && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                switchToServerStream();
+                setEngine('server_stream');
               }}
-              className="px-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold transition-all hidden sm:flex items-center gap-1.5 cursor-pointer"
-              title="Переключить на серверный 1080p поток"
+              className="px-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold hidden sm:flex items-center gap-1.5 cursor-pointer"
+              title="Переключить на 1080p стрим"
             >
-              <Zap className="w-3.5 h-3.5 text-amber-400" />
-              <span>1080p Стрим</span>
+              <Zap className="w-3.5 h-3.5" />
+              <span>1080p Bypass</span>
             </button>
           )}
 
@@ -374,24 +271,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
                 e.stopPropagation();
                 setShowChangeModal(true);
               }}
-              className="px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
-              title="Сменить YouTube видео для всех участников"
+              className="px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
             >
               <Video className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Сменить видео</span>
-            </button>
-          )}
-
-          {isHost && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onForceSyncAll();
-              }}
-              className="p-2 rounded-xl bg-white/10 hover:bg-cinema-gold hover:text-black text-slate-200 transition-all cursor-pointer"
-              title="Синхронизировать всех участников по мне"
-            >
-              <RefreshCw className="w-4 h-4" />
             </button>
           )}
 
@@ -400,7 +283,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
               e.stopPropagation();
               onInvite();
             }}
-            className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 transition-all cursor-pointer"
+            className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 cursor-pointer"
             title="Пригласить друзей"
           >
             <Share2 className="w-4 h-4" />
@@ -411,17 +294,17 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
               e.stopPropagation();
               onToggleSidebar();
             }}
-            className={`p-2 rounded-xl transition-all cursor-pointer ${
+            className={`p-2 rounded-xl cursor-pointer ${
               isSidebarOpen ? 'bg-cinema-gold text-black' : 'bg-white/10 text-slate-200 hover:bg-white/20'
             }`}
-            title="Чат и список участников"
+            title="Чат"
           >
             <Users className="w-4 h-4" />
           </button>
         </div>
       </div>
 
-      {/* BOTTOM CONTROLS BAR */}
+      {/* Bottom Controls Bar */}
       <div
         className={`absolute bottom-0 left-0 right-0 p-4 md:p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30 transition-opacity duration-300 flex flex-col gap-3 ${
           showControls || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
@@ -429,13 +312,13 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Timeline Scrubber */}
-        <div className="flex items-center gap-3 group/timeline">
+        <div className="flex items-center gap-3">
           <span className="text-[11px] font-mono text-slate-300 w-12 text-right">
             {formatTime(currentTime)}
           </span>
 
           <div
-            className="flex-1 h-2 hover:h-3 bg-white/20 rounded-full cursor-pointer relative transition-all"
+            className="flex-1 h-2 bg-white/20 rounded-full cursor-pointer relative"
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               const pos = ((e.clientX - rect.left) / rect.width) * (duration || 1);
@@ -443,11 +326,9 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             }}
           >
             <div
-              className="h-full bg-red-600 rounded-full relative shadow-[0_0_12px_rgba(220,38,38,0.8)]"
+              className="h-full bg-red-600 rounded-full relative"
               style={{ width: `${progressPercent}%` }}
-            >
-              <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md scale-0 group-hover/timeline:scale-100 transition-transform" />
-            </div>
+            />
           </div>
 
           <span className="text-[11px] font-mono text-slate-400 w-12">
@@ -457,49 +338,32 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
         {/* Controls Row */}
         <div className="flex items-center justify-between">
-          {/* Left: Play/Pause, Rewind, Forward, Volume */}
           <div className="flex items-center gap-3">
-            {/* Play/Pause Button with readiness state */}
-            {isBlockedByBuffer ? (
-              <button
-                disabled
-                className="p-2.5 md:p-3 rounded-2xl bg-amber-500/20 text-amber-300 border border-amber-500/30 opacity-80 cursor-not-allowed flex items-center justify-center"
-                title="Ожидание загрузки у всех участников..."
-              >
-                <Clock className="w-5 h-5 animate-pulse" />
-              </button>
-            ) : (
-              <button
-                onClick={handlePlayPauseToggle}
-                className="p-2.5 md:p-3 rounded-2xl bg-white text-black hover:bg-cinema-gold hover:text-black transition-all active:scale-95 shadow-glow-gold cursor-pointer"
-                title={isPlaying ? 'Пауза' : 'Снять с паузы'}
-              >
-                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-              </button>
-            )}
+            <button
+              onClick={handlePlayPauseToggle}
+              className="p-2.5 md:p-3 rounded-2xl bg-white text-black hover:bg-cinema-gold transition-all cursor-pointer"
+            >
+              {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
+            </button>
 
             <button
               onClick={() => handleSeek(currentTime - 10)}
-              className="p-2 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-              title="Назад на 10 сек"
+              className="p-2 rounded-xl text-slate-300 hover:text-white cursor-pointer"
+              title="Назад 10с"
             >
               <RotateCcw className="w-4 h-4" />
             </button>
 
             <button
               onClick={() => handleSeek(currentTime + 10)}
-              className="p-2 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-              title="Вперед на 10 сек"
+              className="p-2 rounded-xl text-slate-300 hover:text-white cursor-pointer"
+              title="Вперед 10с"
             >
               <RotateCw className="w-4 h-4" />
             </button>
 
-            {/* Volume */}
-            <div className="flex items-center gap-2 group/volume ml-2">
-              <button
-                onClick={toggleMute}
-                className="p-2 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-              >
+            <div className="flex items-center gap-2 ml-2">
+              <button onClick={toggleMute} className="p-2 text-slate-300 hover:text-white cursor-pointer">
                 {isMuted || volume === 0 ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
               </button>
               <input
@@ -514,25 +378,17 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
             </div>
           </div>
 
-          {/* Right: Sync Status badge & Fullscreen */}
-          <div className="flex items-center gap-3">
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-black/60 border border-white/10 text-[11px] font-mono text-slate-300">
-              <span className={`w-2 h-2 rounded-full ${!allMembersReady && members.length > 1 ? 'bg-amber-400 animate-spin' : syncQuality === 'perfect' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span>{!allMembersReady && members.length > 1 ? 'Буферизация' : syncQuality === 'perfect' ? 'Синхронизировано' : 'Подгонка'}</span>
-            </div>
-
-            <button
-              onClick={toggleFullscreen}
-              className="p-2.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-              title="Полноэкранный режим"
-            >
-              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-            </button>
-          </div>
+          <button
+            onClick={toggleFullscreen}
+            className="p-2.5 rounded-xl text-slate-300 hover:text-white cursor-pointer"
+            title="Полноэкранный режим"
+          >
+            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+          </button>
         </div>
       </div>
 
-      {/* CHANGE YOUTUBE VIDEO MODAL (Host only) */}
+      {/* Change Video Modal */}
       {showChangeModal && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -546,17 +402,10 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
                 </div>
                 <h3 className="text-base font-bold text-white">Сменить YouTube видео</h3>
               </div>
-              <button
-                onClick={() => setShowChangeModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
+              <button onClick={() => setShowChangeModal(false)} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
             </div>
-
-            <p className="text-xs text-slate-400 mb-4">
-              Вставьте новую ссылку на видео YouTube. Воспроизведение мгновенно переключится у всех участников комнаты.
-            </p>
 
             {changeError && (
               <div className="p-3 mb-3 rounded-xl bg-red-500/20 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
@@ -567,16 +416,14 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
 
             <form onSubmit={handleChangeVideoSubmit} className="flex flex-col gap-4">
               <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">
-                  Ссылка на видео
-                </label>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">Ссылка на видео</label>
                 <input
                   type="text"
                   required
-                  placeholder="https://www.youtube.com/watch?v=... или youtu.be/..."
+                  placeholder="https://www.youtube.com/watch?v=..."
                   value={newVideoUrl}
                   onChange={(e) => setNewVideoUrl(e.target.value)}
-                  className="w-full bg-cinema-950 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-red-500"
+                  className="w-full bg-cinema-950 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-red-500"
                 />
               </div>
 
@@ -584,16 +431,16 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowChangeModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white cursor-pointer"
+                  className="px-4 py-2 text-xs text-slate-400 hover:text-white cursor-pointer"
                 >
                   Отмена
                 </button>
                 <button
                   type="submit"
                   disabled={isChangingVideo || !newVideoUrl.trim()}
-                  className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-lg transition-all disabled:opacity-50 cursor-pointer"
+                  className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs cursor-pointer"
                 >
-                  {isChangingVideo ? 'Переключение...' : 'Включить для всех'}
+                  {isChangingVideo ? 'Переключение...' : 'Включить'}
                 </button>
               </div>
             </form>

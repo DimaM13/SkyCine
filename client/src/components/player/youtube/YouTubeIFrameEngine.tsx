@@ -13,10 +13,8 @@ interface YouTubeIFrameEngineProps {
   initialPosition: number;
   volume: number;
   isMuted: boolean;
-  onPlayerReadyChange: (ready: boolean) => void;
   onTimeUpdate: (currentTime: number, duration: number) => void;
   onPlayingChange: (isPlaying: boolean) => void;
-  onBufferStatusChange: (isReady: boolean, bufferedPos?: number, currentPos?: number, bufferPercent?: number) => void;
   onAgeRestrictedFallback: () => void;
   onAttachSeekHandler?: (fn: (pos: number, shouldPlay?: boolean) => void) => void;
   onAttachPlayHandler?: (fn: () => void) => void;
@@ -31,10 +29,8 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   initialPosition,
   volume,
   isMuted,
-  onPlayerReadyChange,
   onTimeUpdate,
   onPlayingChange,
-  onBufferStatusChange,
   onAgeRestrictedFallback,
   onAttachSeekHandler,
   onAttachPlayHandler,
@@ -45,25 +41,14 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
   const playerRef = useRef<any>(null);
   const containerTargetRef = useRef<HTMLDivElement>(null);
   const isReadyRef = useRef(false);
-  const isSeekingRef = useRef(false);
-  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const durationRef = useRef(0);
   const currentTimeRef = useRef(initialPosition || 0);
-
-  const roomStatePropRef = useRef(roomState);
-  roomStatePropRef.current = roomState;
+  const durationRef = useRef(0);
 
   const onTimeUpdateRef = useRef(onTimeUpdate);
   onTimeUpdateRef.current = onTimeUpdate;
 
   const onPlayingChangeRef = useRef(onPlayingChange);
   onPlayingChangeRef.current = onPlayingChange;
-
-  const onBufferStatusChangeRef = useRef(onBufferStatusChange);
-  onBufferStatusChangeRef.current = onBufferStatusChange;
-
-  const onPlayerReadyChangeRef = useRef(onPlayerReadyChange);
-  onPlayerReadyChangeRef.current = onPlayerReadyChange;
 
   const onAgeRestrictedFallbackRef = useRef(onAgeRestrictedFallback);
   onAgeRestrictedFallbackRef.current = onAgeRestrictedFallback;
@@ -83,16 +68,9 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     } catch (e) {}
   }, []);
 
-  const markSeeking = useCallback(() => {
-    isSeekingRef.current = true;
-    if (seekTimeoutRef.current) clearTimeout(seekTimeoutRef.current);
-    seekTimeoutRef.current = setTimeout(() => {
-      isSeekingRef.current = false;
-    }, 700);
-  }, []);
-
+  // Sync volume and mute
   useEffect(() => {
-    if (!playerRef.current) return;
+    if (!playerRef.current || !isReadyRef.current) return;
     try {
       if (isMuted || volume === 0) {
         playerRef.current.mute();
@@ -103,12 +81,11 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     } catch (e) {}
   }, [volume, isMuted]);
 
+  // Attach handlers
   useEffect(() => {
     onAttachSeekHandler?.((pos: number, shouldPlay?: boolean) => {
       currentTimeRef.current = pos;
-      markSeeking();
-
-      if (playerRef.current) {
+      if (playerRef.current && isReadyRef.current) {
         try {
           playerRef.current.seekTo(pos, true);
           if (shouldPlay) {
@@ -122,7 +99,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachPlayHandler?.(() => {
-      if (playerRef.current) {
+      if (playerRef.current && isReadyRef.current) {
         try {
           playerRef.current.playVideo();
           disableCaptions(playerRef.current);
@@ -131,7 +108,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachPauseHandler?.(() => {
-      if (playerRef.current) {
+      if (playerRef.current && isReadyRef.current) {
         try {
           playerRef.current.pauseVideo();
         } catch (e) {}
@@ -139,7 +116,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachGetCurrentTime?.(() => {
-      if (playerRef.current) {
+      if (playerRef.current && isReadyRef.current) {
         try {
           return playerRef.current.getCurrentTime() || currentTimeRef.current;
         } catch (e) {}
@@ -148,7 +125,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     });
 
     onAttachGetIsPaused?.(() => {
-      if (playerRef.current) {
+      if (playerRef.current && isReadyRef.current) {
         try {
           const state = playerRef.current.getPlayerState();
           return state !== 1;
@@ -157,7 +134,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       return true;
     });
   }, [
-    markSeeking,
     disableCaptions,
     onAttachSeekHandler,
     onAttachPlayHandler,
@@ -166,17 +142,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     onAttachGetIsPaused,
   ]);
 
-  const prevRoomStateRef = useRef<string>(roomState);
-  useEffect(() => {
-    if (prevRoomStateRef.current !== roomState) {
-      prevRoomStateRef.current = roomState;
-      // In Watch Together, don't auto-play/pause on roomState changes from the server.
-      // The sync mechanism (room:sync_state) handles precise synchronized playback via
-      // attached play/pause handlers. Auto-playing here would bypass the buffer barrier
-      // and cause the host to play ahead of other members.
-    }
-  }, [roomState]);
-
+  // Load Iframe API script if needed
   useEffect(() => {
     if (!window.YT) {
       const tag = document.createElement('script');
@@ -186,6 +152,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     }
   }, []);
 
+  // Create YouTube Player
   useEffect(() => {
     if (!videoId) return;
 
@@ -194,9 +161,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     const createPlayer = () => {
       if (isDisposed) return;
       if (playerRef.current) {
-        try {
-          playerRef.current.destroy();
-        } catch (e) {}
+        try { playerRef.current.destroy(); } catch (e) {}
       }
 
       if (!containerTargetRef.current) return;
@@ -204,7 +169,7 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
       containerTargetRef.current.innerHTML = `<div id="${targetId}" style="width:100%;height:100%"></div>`;
 
       playerRef.current = new window.YT.Player(targetId, {
-        videoId: videoId,
+        videoId,
         width: '100%',
         height: '100%',
         playerVars: {
@@ -223,7 +188,6 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
           onReady: (event: any) => {
             if (isDisposed) return;
             isReadyRef.current = true;
-            onPlayerReadyChangeRef.current(true);
 
             const d = event.target.getDuration();
             if (d && d > 0) {
@@ -237,21 +201,15 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
               event.target.seekTo(initialPosition, true);
             }
 
-            if (roomStatePropRef.current === 'PLAYING') {
+            if (roomState === 'PLAYING') {
               try { event.target.playVideo(); } catch (e) {}
             } else {
               try { event.target.pauseVideo(); } catch (e) {}
             }
-
-            onBufferStatusChangeRef.current(true, initialPosition, initialPosition, 100);
           },
           onStateChange: (event: any) => {
             if (isDisposed) return;
             disableCaptions(event.target);
-
-            if (event.data === 1 || event.data === 2 || event.data === 0 || event.data === 5 || event.data === -1) {
-              isSeekingRef.current = false;
-            }
 
             if (event.data === 1) {
               onPlayingChangeRef.current(true);
@@ -265,8 +223,8 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
             }
           },
           onError: (event: any) => {
-            if (event.data === 101 || event.data === 150 || event.data === 100 || event.data === 153 || event.data === 2 || event.data === 5) {
-              console.warn(`[YouTube IFrame] Embed error code ${event.data}, falling back to server stream`);
+            if ([101, 150, 100, 153, 2, 5].includes(event.data)) {
+              console.warn(`[YouTube] Error ${event.data}, offering 1080p fallback`);
               onAgeRestrictedFallbackRef.current();
             }
           },
@@ -285,28 +243,22 @@ export const YouTubeIFrameEngine: React.FC<YouTubeIFrameEngineProps> = ({
     return () => {
       isDisposed = true;
       if (playerRef.current) {
-        try {
-          playerRef.current.destroy();
-        } catch (e) {}
+        try { playerRef.current.destroy(); } catch (e) {}
         playerRef.current = null;
       }
       isReadyRef.current = false;
-      onPlayerReadyChangeRef.current(false);
     };
-  }, [videoId, disableCaptions, initialPosition]);
+  }, [videoId, disableCaptions, initialPosition, roomState]);
 
+  // Periodic poll time
   useEffect(() => {
     const interval = setInterval(() => {
       if (!playerRef.current || !isReadyRef.current) return;
-
       try {
         const cur = playerRef.current.getCurrentTime() || 0;
         const dur = playerRef.current.getDuration() || durationRef.current || 0;
-
         currentTimeRef.current = cur;
-        if (dur > 0) {
-          durationRef.current = dur;
-        }
+        if (dur > 0) durationRef.current = dur;
         onTimeUpdateRef.current(cur, dur);
       } catch (e) {}
     }, 500);

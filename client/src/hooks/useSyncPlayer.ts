@@ -6,7 +6,6 @@ import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState } from '../t
 interface UseSyncPlayerProps {
   room: Room | null;
   videoRef?: React.RefObject<HTMLVideoElement | null>;
-  onTimeUpdate?: (currentTime: number) => void;
   onSeekTo?: (pos: number, shouldPlay?: boolean) => void;
   onPlay?: () => void;
   onPause?: () => void;
@@ -17,30 +16,22 @@ interface UseSyncPlayerProps {
 export function useSyncPlayer({
   room,
   videoRef,
-  onTimeUpdate,
   onSeekTo,
   onPlay,
   onPause,
   getCurrentTime,
   getIsPaused,
 }: UseSyncPlayerProps) {
-  const { socket, isConnected, getSyncedServerTime } = useSocket();
+  const { socket, getSyncedServerTime } = useSocket();
   const { user } = useAuth();
 
   const [roomState, setRoomState] = useState<RoomState>(room?.state || 'PAUSED');
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [messages, setMessages] = useState<RoomChatMessage[]>([]);
   const [reactions, setReactions] = useState<RoomReaction[]>([]);
-  const [syncDiffMs, setSyncDiffMs] = useState<number>(0);
-  const [syncQuality, setSyncQuality] = useState<'perfect' | 'good' | 'adjusting' | 'seeking'>('perfect');
+  const [syncDiffSec, setSyncDiffSec] = useState<number>(0);
   const [isHost, setIsHost] = useState(false);
-  const [isBufferingBarrier, setIsBufferingBarrier] = useState<boolean>(false);
-  const [barrierTargetPosition, setBarrierTargetPosition] = useState<number>(0);
 
-  // References for live tracking without re-triggering effects
-  const currentPosRef = useRef<number>(room?.currentPosition || 0);
-  const serverTimestampRef = useRef<number>(room?.serverTimestamp || Date.now());
-  const playbackRateRef = useRef<number>(room?.playbackRate || 1.0);
   const roomStateRef = useRef<RoomState>(room?.state || 'PAUSED');
   const isInternalAction = useRef<boolean>(false);
   const scheduledPlayTimer = useRef<NodeJS.Timeout | null>(null);
@@ -52,43 +43,29 @@ export function useSyncPlayer({
   }, [room, user]);
 
   const userRef = useRef(user);
-  useEffect(() => {
-    userRef.current = user;
-  }, [user]);
+  userRef.current = user;
 
   const onSeekToRef = useRef(onSeekTo);
-  useEffect(() => {
-    onSeekToRef.current = onSeekTo;
-  }, [onSeekTo]);
+  onSeekToRef.current = onSeekTo;
 
   const onPlayRef = useRef(onPlay);
-  useEffect(() => {
-    onPlayRef.current = onPlay;
-  }, [onPlay]);
+  onPlayRef.current = onPlay;
 
   const onPauseRef = useRef(onPause);
-  useEffect(() => {
-    onPauseRef.current = onPause;
-  }, [onPause]);
+  onPauseRef.current = onPause;
 
   const getCurrentTimeRef = useRef(getCurrentTime);
-  useEffect(() => {
-    getCurrentTimeRef.current = getCurrentTime;
-  }, [getCurrentTime]);
+  getCurrentTimeRef.current = getCurrentTime;
 
   const getIsPausedRef = useRef(getIsPaused);
-  useEffect(() => {
-    getIsPausedRef.current = getIsPaused;
-  }, [getIsPaused]);
+  getIsPausedRef.current = getIsPaused;
 
-  const syncToHostRef = useRef<(() => void) | null>(null);
-
-  const getRealPos = useCallback(() => {
+  const getRealPos = useCallback((): number => {
     if (getCurrentTimeRef.current) return getCurrentTimeRef.current();
     return videoRef?.current?.currentTime || 0;
   }, [videoRef]);
 
-  const getRealPaused = useCallback(() => {
+  const getRealPaused = useCallback((): boolean => {
     if (getIsPausedRef.current) return getIsPausedRef.current();
     if (videoRef?.current) return videoRef.current.paused;
     return roomStateRef.current !== 'PLAYING';
@@ -98,7 +75,6 @@ export function useSyncPlayer({
     if (onPlayRef.current) {
       onPlayRef.current();
     } else if (videoRef?.current) {
-      videoRef.current.playbackRate = playbackRateRef.current;
       videoRef.current.play().catch(() => {});
     }
   }, [videoRef]);
@@ -124,7 +100,7 @@ export function useSyncPlayer({
 
   const hasInitializedRef = useRef(false);
 
-  // Handle Socket Events for Room
+  // ── Socket Events ──
   useEffect(() => {
     if (!socket || !room?.id) return;
 
@@ -143,27 +119,19 @@ export function useSyncPlayer({
     }
     socket.on('connect', joinRoom);
 
-    socket.on('room:initial_state', (data: { room: Room; members: RoomMember[]; serverTimestamp: number }) => {
+    // Initial state on joining
+    socket.on('room:initial_state', (data: { room: Room; members: RoomMember[]; serverTimestamp: number; livePosition: number }) => {
       setMembers(data.members || []);
       if (data.room) {
-        const now = getSyncedServerTime();
-        const elapsed = Math.max(0, (now - data.room.serverTimestamp) / 1000);
-        const livePos = data.room.state === 'PLAYING'
-          ? Math.max(0, data.room.currentPosition + elapsed * (data.room.playbackRate || 1.0))
-          : data.room.currentPosition;
-
         roomStateRef.current = data.room.state;
-        serverTimestampRef.current = now;
-        playbackRateRef.current = data.room.playbackRate || 1.0;
         setRoomState(data.room.state);
 
         if (!hasInitializedRef.current) {
           hasInitializedRef.current = true;
-          currentPosRef.current = livePos;
-
-          // Align player on initial join
-          isInternalAction.current = true;
+          const livePos = data.livePosition || data.room.currentPosition || 0;
           const shouldPlay = data.room.state === 'PLAYING';
+
+          isInternalAction.current = true;
           executeSeek(livePos, shouldPlay);
           if (shouldPlay) {
             executePlay();
@@ -171,52 +139,15 @@ export function useSyncPlayer({
             executePause();
           }
           setTimeout(() => { isInternalAction.current = false; }, 200);
-
-          // Ask host directly for accurate live playback time
-          if (userRef.current?.id !== data.room.hostUserId) {
-            socket.emit('room:request_host_sync', { roomId: data.room.id });
-          }
         }
-      }
-    });
-
-    socket.on('room:query_host_time', (queryData: { requesterSocketId: string }) => {
-      const cur = getRealPos();
-      socket.emit('room:host_time_reply', {
-        roomId: room.id,
-        position: cur,
-        requesterSocketId: queryData.requesterSocketId,
-      });
-    });
-
-    socket.on('room:host_time_reply', (data: { position: number }) => {
-      if (data?.position > 0) {
-        currentPosRef.current = data.position;
-        serverTimestampRef.current = getSyncedServerTime();
-        const shouldPlay = roomStateRef.current === 'PLAYING';
-        isInternalAction.current = true;
-        executeSeek(data.position, shouldPlay);
-        if (shouldPlay && getRealPaused()) {
-          executePlay();
-        }
-        setTimeout(() => { isInternalAction.current = false; }, 150);
-        smoothedDiffRef.current = 0;
-        setSyncDiffMs(0);
-        setSyncQuality('perfect');
       }
     });
 
     socket.on('room:members', (updatedMembers: RoomMember[]) => {
-      setMembers(updatedMembers);
+      setMembers(updatedMembers || []);
     });
 
-    socket.on('room:buffer_barrier', (data: { isBuffering: boolean; targetPosition?: number }) => {
-      setIsBufferingBarrier(!!data.isBuffering);
-      if (data.targetPosition !== undefined) {
-        setBarrierTargetPosition(data.targetPosition);
-      }
-    });
-
+    // Synchronized state change (Play / Pause / Seek)
     socket.on('room:sync_state', (data: {
       state: RoomState;
       currentPosition: number;
@@ -224,12 +155,8 @@ export function useSyncPlayer({
       playbackRate: number;
       action: string;
       initiatedBy: string;
-      initiatedByUserId?: string;
     }) => {
       roomStateRef.current = data.state;
-      currentPosRef.current = data.currentPosition;
-      serverTimestampRef.current = data.serverTimestamp;
-      playbackRateRef.current = data.playbackRate;
       setRoomState(data.state);
 
       if (scheduledPlayTimer.current) {
@@ -239,86 +166,77 @@ export function useSyncPlayer({
 
       isInternalAction.current = true;
 
-      if (data.action === 'SEEK') {
-        executeSeek(data.currentPosition, false);
-        executePause();
-      } else if (data.action === 'PAUSE') {
+      if (data.action === 'PAUSE') {
         executePause();
         const cur = getRealPos();
-        if (Math.abs(cur - data.currentPosition) > 1.0) {
+        if (Math.abs(cur - data.currentPosition) > 0.8) {
           executeSeek(data.currentPosition, false);
         }
       } else if (data.action === 'PLAY') {
-        const cur = getRealPos();
         const now = getSyncedServerTime();
         const delay = Math.max(0, data.serverTimestamp - now);
+        const cur = getRealPos();
 
-        // Only seek if significantly out of position (avoid resetting mobile iframe buffer)
-        if (Math.abs(cur - data.currentPosition) > 2.5) {
+        if (Math.abs(cur - data.currentPosition) > 1.5) {
           executeSeek(data.currentPosition, false);
         }
-        // HLS — как было: 3с после PLAY всегда (YouTube — отдельно в useEffect, пока плашка — не триггерит)
-        if (room?.sourceType !== 'YOUTUBE') {
-          setTimeout(() => {
-            if (userRef.current?.id === room.hostUserId && socket.connected) {
-              const hostCur = getRealPos();
-              socket.emit('room:force_sync_all', { roomId: room.id, position: hostCur });
-            }
-          }, 3000);
-        }
 
         if (delay > 0) {
           scheduledPlayTimer.current = setTimeout(() => {
             isInternalAction.current = true;
             executePlay();
-            setTimeout(() => { isInternalAction.current = false; }, 150);
+            setTimeout(() => { isInternalAction.current = false; }, 100);
           }, delay);
         } else {
           executePlay();
         }
+      } else if (data.action === 'SEEK') {
+        const shouldPlay = data.state === 'PLAYING';
+        executeSeek(data.currentPosition, shouldPlay);
+        if (!shouldPlay) {
+          executePause();
+        }
       }
+
       setTimeout(() => { isInternalAction.current = false; }, 200);
     });
 
+    // Host Heartbeat Time Anchor
     socket.on('room:time_anchor', (data: { currentPosition: number; serverTimestamp: number }) => {
-      currentPosRef.current = data.currentPosition;
-      serverTimestampRef.current = data.serverTimestamp;
+      if (isHost) return;
+
+      const now = getSyncedServerTime();
+      const elapsed = Math.max(0, (now - data.serverTimestamp) / 1000);
+      const hostExpectedPos = data.currentPosition + (roomStateRef.current === 'PLAYING' ? elapsed : 0);
+      const myPos = getRealPos();
+      const diff = myPos - hostExpectedPos;
+
+      setSyncDiffSec(Math.round(diff * 10) / 10);
+
+      // Auto-correct only if drift is significant (> 2.0 seconds) to avoid micro-stutter
+      if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 2.0 && !isInternalAction.current) {
+        console.log(`[WatchTogether] 🔄 Auto-aligning drift of ${diff.toFixed(1)}s to host pos: ${hostExpectedPos.toFixed(1)}s`);
+        isInternalAction.current = true;
+        executeSeek(hostExpectedPos, true);
+        setTimeout(() => { isInternalAction.current = false; }, 200);
+      }
     });
 
-    socket.on('room:force_sync_all', (data: { position: number; serverTimestamp: number; isPlaying?: boolean; initiatedBy: string; initiatedByUserId?: string }) => {
-      currentPosRef.current = data.position;
-      serverTimestampRef.current = data.serverTimestamp;
-      
+    // Force Sync All from Host
+    socket.on('room:force_sync_all', (data: { position: number; serverTimestamp: number; initiatedBy: string }) => {
       isInternalAction.current = true;
-      executeSeek(data.position, false);
-      executePause();
-
-      if (scheduledPlayTimer.current) {
-        clearTimeout(scheduledPlayTimer.current);
-        scheduledPlayTimer.current = null;
+      const shouldPlay = roomStateRef.current === 'PLAYING';
+      executeSeek(data.position, shouldPlay);
+      if (shouldPlay) {
+        executePlay();
+      } else {
+        executePause();
       }
-
-      if (data.isPlaying) {
-        const now = getSyncedServerTime();
-        const delay = Math.max(0, data.serverTimestamp - now);
-
-        if (delay > 0) {
-          scheduledPlayTimer.current = setTimeout(() => {
-            isInternalAction.current = true;
-            executePlay();
-            setTimeout(() => { isInternalAction.current = false; }, 150);
-          }, delay);
-        } else {
-          executePlay();
-        }
-      }
-
       setTimeout(() => { isInternalAction.current = false; }, 200);
-      smoothedDiffRef.current = 0;
-      setSyncDiffMs(0);
-      setSyncQuality('perfect');
+      setSyncDiffSec(0);
     });
 
+    // Chat and Reactions
     socket.on('room:chat_message', (msg: RoomChatMessage) => {
       setMessages((prev) => [...prev, msg]);
     });
@@ -330,7 +248,7 @@ export function useSyncPlayer({
       }, 3000);
     });
 
-    socket.on('room:system_message', (sysMsg: { text: string; type: string }) => {
+    socket.on('room:system_message', (sysMsg: { text: string; type: string; timestamp: number }) => {
       setMessages((prev) => [
         ...prev,
         {
@@ -338,23 +256,9 @@ export function useSyncPlayer({
           userId: 'system',
           username: 'Система',
           text: sysMsg.text,
-          timestamp: Date.now(),
+          timestamp: sysMsg.timestamp || Date.now(),
         },
       ]);
-    });
-
-    socket.on('room:youtube_changed', () => {
-      roomStateRef.current = 'PAUSED';
-      currentPosRef.current = 0;
-      serverTimestampRef.current = Date.now();
-      setRoomState('PAUSED');
-      setBarrierTargetPosition(0);
-      setIsBufferingBarrier(false);
-      executePause();
-      executeSeek(0, false);
-      smoothedDiffRef.current = 0;
-      setSyncDiffMs(0);
-      setSyncQuality('perfect');
     });
 
     return () => {
@@ -362,22 +266,19 @@ export function useSyncPlayer({
       socket.emit('room:leave', { roomId: room.id });
       socket.off('connect', joinRoom);
       socket.off('room:initial_state');
-      socket.off('room:host_time_reply');
       socket.off('room:members');
-      socket.off('room:buffer_barrier');
       socket.off('room:sync_state');
       socket.off('room:time_anchor');
       socket.off('room:force_sync_all');
       socket.off('room:chat_message');
       socket.off('room:reaction');
       socket.off('room:system_message');
-      socket.off('room:youtube_changed');
     };
-  }, [socket, room?.id, user?.id, executePlay, executePause, executeSeek, getRealPaused, getRealPos, getSyncedServerTime]);
+  }, [socket, room?.id, isHost, executePlay, executePause, executeSeek, getRealPos, getSyncedServerTime]);
 
-  // Host Continuous Heartbeat Anchor (broadcast real position every 2.5 seconds while playing)
+  // Host Periodic Heartbeat (every 3 seconds while playing)
   useEffect(() => {
-    if (!isHost || !socket || !room?.id || roomState !== 'PLAYING' || isBufferingBarrier) return;
+    if (!isHost || !socket || !room?.id || roomState !== 'PLAYING') return;
 
     const interval = setInterval(() => {
       if (!getRealPaused()) {
@@ -387,144 +288,24 @@ export function useSyncPlayer({
           position: cur,
         });
       }
-    }, 2500);
-
-    return () => clearInterval(interval);
-  }, [isHost, socket, room?.id, roomState, isBufferingBarrier, getRealPaused, getRealPos]);
-
-  const smoothedDiffRef = useRef<number>(0);
-
-  // Auto-align 3s after successful unpause — ONLY for YouTube (iframe/server_stream), HLS untouched
-  useEffect(() => {
-    if (room?.sourceType !== 'YOUTUBE') return;
-    if (roomState !== 'PLAYING' || isBufferingBarrier || !isHost || members.length <= 1 || !room?.id) return;
-    const timer = setTimeout(() => {
-      if (userRef.current?.id === room.hostUserId && socket?.connected) {
-        const hostCur = getRealPos();
-        socket.emit('room:force_sync_all', { roomId: room.id, position: hostCur });
-      }
     }, 3000);
-    return () => clearTimeout(timer);
-  }, [roomState, isBufferingBarrier, isHost, members.length, socket, room?.id, room?.hostUserId, room?.sourceType, getRealPos]);
-
-  // Pure Tracking / Drift calculation (Clean informational indicator, NO disruptive auto-seek loops)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (roomStateRef.current !== 'PLAYING' || isBufferingBarrier) {
-        setSyncQuality('perfect');
-        setSyncDiffMs(0);
-        return;
-      }
-
-      const now = getSyncedServerTime();
-      const targetTime = currentPosRef.current + Math.max(0, (now - serverTimestampRef.current) / 1000) * playbackRateRef.current;
-      const actualTime = getRealPos();
-      const rawDiffMs = Math.round((actualTime - targetTime) * 1000);
-
-      // Exponential moving average filter to prevent jitter
-      smoothedDiffRef.current = Math.round(smoothedDiffRef.current * 0.7 + rawDiffMs * 0.3);
-      setSyncDiffMs(smoothedDiffRef.current);
-
-      const absDiffMs = Math.abs(smoothedDiffRef.current);
-
-      if (absDiffMs < 500) {
-        setSyncQuality('perfect');
-      } else if (absDiffMs < 1200) {
-        setSyncQuality('good');
-      } else {
-        setSyncQuality('adjusting');
-      }
-    }, 1000);
 
     return () => clearInterval(interval);
-  }, [getSyncedServerTime, getRealPos, isBufferingBarrier]);
+  }, [isHost, socket, room?.id, roomState, getRealPaused, getRealPos]);
 
-  // Synchronize To Host Query Button (Manual User Action)
-  const syncToHost = useCallback(() => {
-    if (!socket || !room?.id) return;
-
-    // Send query to host for real-time live position
-    socket.emit('room:request_host_sync', { roomId: room.id });
-
-    // Check host reported position from active members list
-    const hostMember = members.find((m) => m.userId === room.hostUserId);
-    let targetPos = hostMember && hostMember.currentPosition > 0 ? hostMember.currentPosition : 0;
-
-    if (targetPos <= 0 && currentPosRef.current > 0) {
-      const now = getSyncedServerTime();
-      const elapsed = Math.max(0, (now - serverTimestampRef.current) / 1000);
-      targetPos = roomStateRef.current === 'PLAYING'
-        ? Math.max(0, currentPosRef.current + elapsed * playbackRateRef.current)
-        : currentPosRef.current;
-    }
-
-    if (targetPos > 0) {
-      isInternalAction.current = true;
-      executeSeek(targetPos, roomStateRef.current === 'PLAYING');
-      if (roomStateRef.current === 'PLAYING' && getRealPaused()) {
-        executePlay();
-      }
-      setTimeout(() => { isInternalAction.current = false; }, 200);
-    }
-
-    smoothedDiffRef.current = 0;
-    setSyncDiffMs(0);
-    setSyncQuality('perfect');
-  }, [socket, room?.id, room?.hostUserId, members, getSyncedServerTime, executeSeek, getRealPaused, executePlay]);
-
-  useEffect(() => {
-    syncToHostRef.current = syncToHost;
-  }, [syncToHost]);
-
-  // Send local buffer status to room
-  const reportBufferStatus = useCallback((isReady: boolean, bufferedSec?: number, currentSec?: number, bufferPercent?: number) => {
-    if (!socket || !room?.id) return;
-    const cur = currentSec !== undefined ? currentSec : getRealPos();
-    const buf = bufferedSec !== undefined
-      ? bufferedSec
-      : (videoRef?.current?.buffered?.length ? videoRef.current.buffered.end(videoRef.current.buffered.length - 1) : cur + 5);
-
-    socket.emit('room:buffer_status', {
-      roomId: room.id,
-      isReady,
-      bufferedPosition: buf,
-      currentPosition: cur,
-      bufferPercent: bufferPercent !== undefined ? Math.round(bufferPercent) : (isReady ? 100 : 0),
-    });
-  }, [socket, room?.id, videoRef, getRealPos]);
-
-  // Force barrier play (Manual Host Override)
-  const forceBarrierPlay = useCallback(() => {
-    if (!socket || !room?.id) return;
-    socket.emit('room:force_barrier_play', { roomId: room.id });
-    setIsBufferingBarrier(false);
-  }, [socket, room?.id]);
-
-  // Check if all participants are ready
-  const allMembersReady = members.length <= 1 || members.every((m) => m.isReady);
-
-  const lastPlayEmitRef = useRef<number>(0);
-  // Client Action Triggers
+  // ── Action Triggers ──
   const sendPlay = useCallback(() => {
-    if (!socket || !room?.id) return;
-    if (isInternalAction.current) return;
-    const now = Date.now();
-    if (now - lastPlayEmitRef.current < 800) return; // debounce YouTube spam (6× in 3s)
-    lastPlayEmitRef.current = now;
-    // Do NOT play locally — wait for server's scheduled sync_state (host-align, like force_sync) so initiator and peers start together
+    if (!socket || !room?.id || isInternalAction.current) return;
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PLAY',
       position: cur,
-      playbackRate: playbackRateRef.current,
-      timestamp: getSyncedServerTime(),
     });
-  }, [socket, room?.id, getRealPos, getSyncedServerTime]);
+  }, [socket, room?.id, getRealPos]);
 
   const sendPause = useCallback(() => {
-    if (!socket || !room?.id) return;
-    if (isInternalAction.current) return;
+    if (!socket || !room?.id || isInternalAction.current) return;
     executePause();
     const cur = getRealPos();
     socket.emit('room:action', {
@@ -534,18 +315,38 @@ export function useSyncPlayer({
     });
   }, [socket, room?.id, executePause, getRealPos]);
 
-  const sendSeek = useCallback((pos: number) => {
-    if (!socket || !room?.id) return;
-    if (isInternalAction.current) return;
-    executeSeek(pos, false);
-    executePause();
+  const sendSeek = useCallback((pos: number, shouldPlay?: boolean) => {
+    if (!socket || !room?.id || isInternalAction.current) return;
+    const willPlay = shouldPlay !== undefined ? shouldPlay : !getRealPaused();
+    executeSeek(pos, willPlay);
     socket.emit('room:action', {
       roomId: room.id,
       action: 'SEEK',
       position: pos,
-      isPlaying: false,
+      shouldPlay: willPlay,
     });
-  }, [socket, room?.id, executeSeek, executePause]);
+  }, [socket, room?.id, executeSeek, getRealPaused]);
+
+  const forceSyncAll = useCallback(() => {
+    if (!socket || !room?.id) return;
+    const cur = getRealPos();
+    socket.emit('room:force_sync_all', {
+      roomId: room.id,
+      position: cur,
+    });
+    setSyncDiffSec(0);
+  }, [socket, room?.id, getRealPos]);
+
+  const syncToHost = useCallback(() => {
+    if (!socket || !room?.id) return;
+    const hostMember = members.find((m) => m.userId === room.hostUserId);
+    if (hostMember && hostMember.currentPosition > 0) {
+      isInternalAction.current = true;
+      executeSeek(hostMember.currentPosition, roomStateRef.current === 'PLAYING');
+      setTimeout(() => { isInternalAction.current = false; }, 200);
+      setSyncDiffSec(0);
+    }
+  }, [socket, room?.id, room?.hostUserId, members, executeSeek]);
 
   const sendMessage = useCallback((text: string) => {
     if (!socket || !room?.id || !text.trim()) return;
@@ -560,7 +361,7 @@ export function useSyncPlayer({
   }, [socket, room?.id]);
 
   const sendReaction = useCallback((emoji: string) => {
-    if (!socket || !room?.id) return;
+    if (!socket || !room?.id || !emoji) return;
     const currentUser = userRef.current;
     socket.emit('room:reaction', {
       roomId: room.id,
@@ -569,20 +370,6 @@ export function useSyncPlayer({
     });
   }, [socket, room?.id]);
 
-  // Host Force Sync All Participants to Host Position
-  const forceSyncAll = useCallback(() => {
-    if (!socket || !room?.id) return;
-    const cur = getRealPos();
-    socket.emit('room:force_sync_all', {
-      roomId: room.id,
-      position: cur,
-    });
-    smoothedDiffRef.current = 0;
-    setSyncDiffMs(0);
-    setSyncQuality('perfect');
-  }, [socket, room?.id, getRealPos]);
-
-  // Send Friend Invite
   const sendFriendInvite = useCallback((targetUserId: string) => {
     if (!socket || !room) return;
     socket.emit('friend:invite_to_room', {
@@ -600,21 +387,15 @@ export function useSyncPlayer({
     members,
     messages,
     reactions,
-    syncDiffMs,
-    syncQuality,
+    syncDiffSec,
     isHost,
-    allMembersReady,
-    isBufferingBarrier,
-    barrierTargetPosition,
-    forceBarrierPlay,
-    syncToHost,
-    forceSyncAll,
     sendPlay,
     sendPause,
     sendSeek,
+    forceSyncAll,
+    syncToHost,
     sendMessage,
     sendReaction,
     sendFriendInvite,
-    reportBufferStatus,
   };
 }

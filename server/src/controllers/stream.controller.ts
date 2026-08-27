@@ -23,15 +23,9 @@ export class StreamController {
       }
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
-      if (!media) {
+      if (!media || !fs.existsSync(media.filePath)) {
         res.status(404).json({ error: 'Медиафайл не найден' });
         return;
-      }
-      // External HDD warmup — don't block master.m3u8 for 12s with sync existsSync, warmup async and return playlist immediately
-      if (!fs.existsSync(media.filePath)) {
-        // Fire-and-forget warmup, client will retry with backoff
-        ffmpegService.warmupFile(media.filePath).catch(() => {});
-        // Still return playlist so client can start loading; segments will wait for warmup
       }
 
       const quality = (req.query.quality as string) || 'original';
@@ -58,10 +52,8 @@ export class StreamController {
       const canCopyVideo = quality === 'original' && (media.videoCodec === 'h264' || !media.videoCodec);
 
       if (canCopyVideo) {
-        // Direct stream copy: 100% original pixel-for-pixel quality, 0% CPU/GPU video load
         args.push('-c:v', 'copy');
       } else {
-        // Ultra low-latency visually-lossless video encoding with exact frame sync and mobile hardware compatibility
         args.push('-c:v', encoder);
         if (encoder === 'h264_nvenc') {
           args.push('-preset', 'p1', '-tune', 'ull', '-cq', '19', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-g', '48');
@@ -78,7 +70,6 @@ export class StreamController {
         }
       }
 
-      // Audio conversion with microsecond sample synchronization
       args.push(
         '-c:a', 'aac',
         '-b:a', '192k',
@@ -86,11 +77,7 @@ export class StreamController {
         '-af', 'aresample=async=1:first_pts=0',
         '-avoid_negative_ts', 'make_zero',
         '-max_muxing_queue_size', '1024',
-        '-flush_packets', '1'
-      );
-
-      // Fragmented MP4 for instantaneous native HTML5 streaming on all browsers and mobile devices
-      args.push(
+        '-flush_packets', '1',
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
         '-f', 'mp4',
         'pipe:1'
@@ -107,9 +94,7 @@ export class StreamController {
       proc.stdout.pipe(res);
 
       req.on('close', () => {
-        try {
-          proc.kill();
-        } catch (e) {}
+        try { proc.kill(); } catch (e) {}
       });
 
       proc.on('error', (err) => {
@@ -120,6 +105,7 @@ export class StreamController {
       res.status(500).json({ error: 'Ошибка при отдаче ремукс-потока' });
     }
   }
+
   public static async getStreamInfo(req: AuthRequest, res: Response): Promise<void> {
     try {
       const id = req.params.id as string;
@@ -132,7 +118,6 @@ export class StreamController {
       }
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
-
       if (!media) {
         res.status(404).json({ error: 'Медиа не найдено' });
         return;
@@ -146,7 +131,7 @@ export class StreamController {
       const isAac = media.audioCodec === 'aac' || media.audioCodec === 'mp3';
 
       const canDirectPlay = isMp4 && isH264 && isAac;
-      const canDirectStream = isH264; // Video copied, audio transcoded
+      const canDirectStream = isH264;
 
       res.json({
         mediaId: media.id,
@@ -179,7 +164,6 @@ export class StreamController {
       }
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
-
       if (!media || !fs.existsSync(media.filePath)) {
         res.status(404).json({ error: 'Видеофайл не найден на диске' });
         return;
@@ -188,11 +172,9 @@ export class StreamController {
       const stat = fs.statSync(media.filePath);
       const fileSize = stat.size;
       const range = req.headers.range;
-
       const mimeType = mime.lookup(media.filePath) || 'video/mp4';
 
       if (range) {
-        // Parse HTTP 206 Partial Content Range header
         const parts = range.replace(/bytes=/, '').split('-');
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
@@ -250,6 +232,10 @@ export class StreamController {
       const deviceSuffix = isApple ? 'apple' : 'pc';
       const roomSuffix = roomId ? `_r${roomId}` : '';
       const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
+
+      // Start / Prewarm continuous session
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
+
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
     } catch (err) {
       console.error('startHlsSession error:', err);
@@ -268,7 +254,6 @@ export class StreamController {
       if (roomId) {
         const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(roomId);
         if (room) {
-          // Room is still active with participants, do not abruptly kill transcode session!
           res.json({ success: true, message: 'Room session kept alive for active participants' });
           return;
         }
@@ -322,10 +307,8 @@ export class StreamController {
       const roomSuffix = roomId ? `_r${roomId}` : '';
       const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}`;
 
-      if (startTime > 0 && !ffmpegService.hasSession(sessionId)) {
-        const prewarmStart = startTime;
-        ffmpegService.startContinuousHlsSession(media, quality, audioIndex, prewarmStart, isApple, sessionId).catch(() => {});
-      }
+      // Start/prewarm session
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
 
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
       const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT);
@@ -347,10 +330,9 @@ export class StreamController {
       const authHeader = req.headers.authorization;
       const token = (req.query.token as string) || (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '') : '');
 
-      // Parse mediaId from sessionId
       const mediaId = sessionId.split('_')[0];
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaId) as MediaItem | undefined;
-      
+
       if (!media) {
         res.status(404).send('Media not found');
         return;
@@ -376,39 +358,29 @@ export class StreamController {
       const mediaId = sessionOrMediaId.split('_')[0];
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaId) as MediaItem | undefined;
       if (!media) {
-         res.status(404).send('Media not found');
-         return;
+        res.status(404).send('Media not found');
+        return;
       }
 
       const segmentPath = await ffmpegService.ensureSegmentReady(sessionOrMediaId, segmentName, media);
-      
+
       if (!segmentPath || !fs.existsSync(segmentPath)) {
-        // Throttle spam: log once per 60s per session (prevents 95× seg_1409 spam after idle timeout)
-        const now = Date.now();
-        const key = `${sessionOrMediaId}`;
-        const last = (global as any)._hlsWarnThrottle?.get(key) || 0;
-        if (now - last > 60000) {
-          if (!(global as any)._hlsWarnThrottle) (global as any)._hlsWarnThrottle = new Map();
-          (global as any)._hlsWarnThrottle.set(key, now);
-          console.warn(`[Continuous HLS] ⚠️ Segment not found after wait: ${segmentName} for ${sessionOrMediaId} (throttled)`);
-        }
         res.status(404).send('Segment not found');
         return;
       }
 
       const stat = fs.statSync(segmentPath);
-      
       let contentType = 'video/mp2t';
       if (segmentPath.endsWith('.m4s') || segmentPath.endsWith('.mp4')) {
         contentType = 'video/mp4';
       }
-      
+
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', stat.size);
       res.setHeader('Cache-Control', 'public, max-age=3600');
       fs.createReadStream(segmentPath).pipe(res);
     } catch (err) {
-      logger.error("HLS_CRITICAL", "HLS failed!", err);
+      logger.error("HLS_CRITICAL", "HLS segment error", err);
       res.status(500).send('Segment delivery error');
     }
   }
