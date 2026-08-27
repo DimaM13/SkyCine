@@ -382,8 +382,13 @@ class SocketService {
 
       if (members.size === 0) {
         this.roomMembers.delete(roomId);
-        // Clean up FFmpeg session for empty room
-        ffmpegService.killSessionsForRoom(roomId);
+        // Clean up FFmpeg session for empty room with 4s grace period (handles React remount / page reload)
+        setTimeout(() => {
+          const currentMembers = this.roomMembers.get(roomId);
+          if (!currentMembers || currentMembers.size === 0) {
+            ffmpegService.killSessionsForRoom(roomId);
+          }
+        }, 4000);
       } else {
         this.emitRoomMembers(roomId);
       }

@@ -386,6 +386,27 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     loadStreamSource(url, isDirectPlay, shouldStartPlay, startPos);
   }, [media.id]);
 
+  // Sync playback when roomState changes in Watch Together
+  useEffect(() => {
+    if (!isWatchTogether) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (roomState === 'PLAYING') {
+      if (video.paused) {
+        video.play().then(() => {
+          setIsPlaying(true);
+          setIsBuffering(false);
+        }).catch(() => {});
+      }
+    } else if (roomState === 'PAUSED') {
+      if (!video.paused) {
+        video.pause();
+        setIsPlaying(false);
+      }
+    }
+  }, [roomState, isWatchTogether, videoRef]);
+
   // Quality or audio track switch
   const prevQualityRef = useRef(selectedQuality);
   const prevAudioTrackRef = useRef(selectedAudioTrack);
@@ -498,7 +519,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
   };
 
+  const lastSeekTimeRef = useRef<number>(0);
+
   const triggerSeek = (targetTime: number) => {
+    const now = Date.now();
+    if (now - lastSeekTimeRef.current < 250) return;
+    lastSeekTimeRef.current = now;
+
     const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
     setCurrentTime(safePos);
     setScrubTime(safePos);
@@ -746,12 +773,16 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             max={effectiveDuration || 100}
             step={0.1}
             value={displayTime}
+            onPointerDown={() => setIsScrubbing(true)}
             onInput={(e) => {
               setIsScrubbing(true);
               setScrubTime(parseFloat((e.target as HTMLInputElement).value));
             }}
             onChange={(e) => {
-              triggerSeek(parseFloat(e.target.value));
+              setScrubTime(parseFloat(e.target.value));
+            }}
+            onPointerUp={(e) => {
+              triggerSeek(parseFloat((e.target as HTMLInputElement).value));
             }}
             className="w-full h-1.5 bg-transparent appearance-none cursor-pointer relative z-10 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cinema-gold"
           />

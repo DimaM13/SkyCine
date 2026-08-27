@@ -100,14 +100,22 @@ export function useSyncPlayer({
 
   const hasInitializedRef = useRef(false);
 
+  const isHostRef = useRef(isHost);
+  isHostRef.current = isHost;
+
+  const getSyncedServerTimeRef = useRef(getSyncedServerTime);
+  getSyncedServerTimeRef.current = getSyncedServerTime;
+
   // ── Socket Events ──
   useEffect(() => {
     if (!socket || !room?.id) return;
 
+    const targetRoomId = room.id;
+
     const joinRoom = () => {
       const currentUser = userRef.current;
       socket.emit('room:join', {
-        roomId: room.id,
+        roomId: targetRoomId,
         userId: currentUser?.id || 'guest',
         username: currentUser?.username || 'Гость',
         avatarUrl: currentUser?.avatarUrl,
@@ -173,12 +181,12 @@ export function useSyncPlayer({
           executeSeek(data.currentPosition, false);
         }
       } else if (data.action === 'PLAY') {
-        const now = getSyncedServerTime();
+        const now = getSyncedServerTimeRef.current();
         const delay = Math.max(0, data.serverTimestamp - now);
         const cur = getRealPos();
 
         if (Math.abs(cur - data.currentPosition) > 1.5) {
-          executeSeek(data.currentPosition, false);
+          executeSeek(data.currentPosition, true);
         }
 
         if (delay > 0) {
@@ -198,14 +206,14 @@ export function useSyncPlayer({
         }
       }
 
-      setTimeout(() => { isInternalAction.current = false; }, 200);
+      setTimeout(() => { isInternalAction.current = false; }, 1500);
     });
 
     // Host Heartbeat Time Anchor
     socket.on('room:time_anchor', (data: { currentPosition: number; serverTimestamp: number }) => {
-      if (isHost) return;
+      if (isHostRef.current || isInternalAction.current) return;
 
-      const now = getSyncedServerTime();
+      const now = getSyncedServerTimeRef.current();
       const elapsed = Math.max(0, (now - data.serverTimestamp) / 1000);
       const hostExpectedPos = data.currentPosition + (roomStateRef.current === 'PLAYING' ? elapsed : 0);
       const myPos = getRealPos();
@@ -213,12 +221,12 @@ export function useSyncPlayer({
 
       setSyncDiffSec(Math.round(diff * 10) / 10);
 
-      // Auto-correct only if drift is significant (> 2.0 seconds) to avoid micro-stutter
-      if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 2.0 && !isInternalAction.current) {
+      // Auto-correct only if drift is between 3.0s and 20.0s (avoid micro-stutter and don't fight major seeks)
+      if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 3.0 && Math.abs(diff) < 20.0 && !isInternalAction.current) {
         console.log(`[WatchTogether] 🔄 Auto-aligning drift of ${diff.toFixed(1)}s to host pos: ${hostExpectedPos.toFixed(1)}s`);
         isInternalAction.current = true;
         executeSeek(hostExpectedPos, true);
-        setTimeout(() => { isInternalAction.current = false; }, 200);
+        setTimeout(() => { isInternalAction.current = false; }, 1500);
       }
     });
 
@@ -263,7 +271,7 @@ export function useSyncPlayer({
 
     return () => {
       if (scheduledPlayTimer.current) clearTimeout(scheduledPlayTimer.current);
-      socket.emit('room:leave', { roomId: room.id });
+      socket.emit('room:leave', { roomId: targetRoomId });
       socket.off('connect', joinRoom);
       socket.off('room:initial_state');
       socket.off('room:members');
@@ -274,7 +282,7 @@ export function useSyncPlayer({
       socket.off('room:reaction');
       socket.off('room:system_message');
     };
-  }, [socket, room?.id, isHost, executePlay, executePause, executeSeek, getRealPos, getSyncedServerTime]);
+  }, [socket, room?.id]);
 
   // Host Periodic Heartbeat (every 3 seconds while playing)
   useEffect(() => {
@@ -315,16 +323,28 @@ export function useSyncPlayer({
     });
   }, [socket, room?.id, executePause, getRealPos]);
 
+  const seekDebounceTimer = useRef<NodeJS.Timeout | null>(null);
+
   const sendSeek = useCallback((pos: number, shouldPlay?: boolean) => {
-    if (!socket || !room?.id || isInternalAction.current) return;
+    if (!socket || !room?.id) return;
     const willPlay = shouldPlay !== undefined ? shouldPlay : !getRealPaused();
+    isInternalAction.current = true;
     executeSeek(pos, willPlay);
-    socket.emit('room:action', {
-      roomId: room.id,
-      action: 'SEEK',
-      position: pos,
-      shouldPlay: willPlay,
-    });
+
+    if (seekDebounceTimer.current) {
+      clearTimeout(seekDebounceTimer.current);
+    }
+
+    seekDebounceTimer.current = setTimeout(() => {
+      socket.emit('room:action', {
+        roomId: room.id,
+        action: 'SEEK',
+        position: pos,
+        shouldPlay: willPlay,
+      });
+      seekDebounceTimer.current = null;
+      setTimeout(() => { isInternalAction.current = false; }, 1500);
+    }, 150);
   }, [socket, room?.id, executeSeek, getRealPaused]);
 
   const forceSyncAll = useCallback(() => {
