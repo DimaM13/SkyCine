@@ -208,9 +208,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             maxBufferLength: 30,
             maxMaxBufferLength: 60,
             autoStartLoad: false,
-            maxBufferHole: 0.5,
-            nudgeOffset: 0.1,
-            nudgeMaxRetry: 3,
+            maxBufferHole: 0.1,
+            nudgeOffset: 0,
+            nudgeMaxRetry: 0,
+            fragLoadingTimeOut: 25000,
+            fragLoadingMaxRetry: 5,
+            fragLoadingRetryDelay: 500,
           });
 
           hls.attachMedia(video);
@@ -348,6 +351,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     setCurrentTime(safePos);
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
+    if (hlsRef.current) {
+      hlsRef.current.startLoad(safePos);
+    }
     try { video.currentTime = safePos; } catch (e) {}
     if (shouldPlay) {
       video.play().catch(() => {});

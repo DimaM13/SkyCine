@@ -433,12 +433,7 @@ class FFmpegService {
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const isRoomSession = sessionId.includes('_r');
-    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
-
-    if (cleanStartTime > 0) {
-      args.push('-output_ts_offset', cleanStartTime.toString());
-    }
+    const useFmp4 = !isApple || isHevc || isVp9;
 
     if (useFmp4) {
       args.push(
@@ -528,9 +523,7 @@ class FFmpegService {
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
     const isApple = sessionId.includes('_apple');
-    const isRoomSession = sessionId.includes('_r');
-    const canCopyVideo = sessionId.includes('_qoriginal_') && (isApple ? ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(media.videoCodec?.toLowerCase() || '') : true);
-    const useFmp4 = (isRoomSession && !isHevc) ? false : (!isApple || ((isHevc || isVp9) && canCopyVideo));
+    const useFmp4 = !isApple || isHevc || isVp9;
     const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
@@ -644,10 +637,11 @@ class FFmpegService {
 
         console.log(`[JIT HLS] Seeking session ${sessionId} to ${targetStartTime}s for segment ${segmentIndex}`);
         await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
-        const newSession = this.continuousSessions.get(sessionId);
-        if (newSession) {
-          return this.waitForSegment(newSession.sessionDir, segmentName, sessionId);
-        }
+      }
+
+      const activeSession = this.continuousSessions.get(sessionId);
+      if (activeSession) {
+        return this.waitForSegment(activeSession.sessionDir, segmentName, sessionId);
       }
 
       return null;
