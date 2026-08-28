@@ -269,7 +269,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         video.src = url;
         video.load();
         if (startPos > 0) {
-          try { video.currentTime = startPos; } catch (e) {}
+          const applySeek = () => {
+            try {
+              if (Math.abs(video.currentTime - startPos) > 1) {
+                video.currentTime = startPos;
+              }
+            } catch (e) {}
+          };
+          video.addEventListener('loadedmetadata', applySeek, { once: true });
         }
         if (shouldPlay) {
           video.play().then(() => {

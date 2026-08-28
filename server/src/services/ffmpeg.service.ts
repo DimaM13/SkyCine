@@ -356,8 +356,10 @@ class FFmpegService {
       '-fflags', '+genpts+discardcorrupt+nobuffer',
     ];
 
-    // Fast seek for instant segment startup
-    args.push('-noaccurate_seek', '-ss', cleanStartTime.toString());
+    // Fast seek with preserved timestamps for instant startup and perfect A/V sync
+    if (cleanStartTime > 0) {
+      args.push('-noaccurate_seek', '-ss', cleanStartTime.toString(), '-copyts');
+    }
     args.push('-i', media.filePath);
 
     args.push('-map', '0:v:0');
@@ -435,7 +437,7 @@ class FFmpegService {
     args.push(
       '-muxdelay', '0',
       '-muxpreload', '0',
-      '-avoid_negative_ts', 'make_zero',
+      ...(cleanStartTime > 0 ? ['-avoid_negative_ts', 'disabled'] : ['-avoid_negative_ts', 'make_zero']),
       '-f', 'hls',
       '-hls_time', '4',
       '-hls_list_size', '0',
@@ -528,7 +530,7 @@ class FFmpegService {
     return this.continuousSessions.has(sessionId) || this.closingSessions.has(sessionId);
   }
 
-  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, _startTime: number = 0): string {
+  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0): string {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
     const segmentDuration = 4;
     const totalSegments = Math.ceil(duration / segmentDuration);
@@ -547,6 +549,10 @@ class FFmpegService {
     m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
     m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
+
+    if (startTime > 0) {
+      m3u8 += `#EXT-X-START:TIME-OFFSET=${startTime.toFixed(3)},PRECISE=YES\n`;
+    }
 
     if (useFmp4) {
       m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
