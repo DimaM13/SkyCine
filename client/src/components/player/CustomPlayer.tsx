@@ -159,9 +159,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
 
+    const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
+    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+    const useFmp4 = !isAppleDevice || isHevc || isVp9;
+
     const isAudioTrans = !isDirectPlay && (
       isAppleDevice
-        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC'].some(c => rawAudioCodec.includes(c))
+        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
         : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
     );
 
@@ -197,7 +201,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const chText = channelsNum === 6 ? '5.1' : channelsNum === 8 ? '7.1' : channelsNum === 2 ? '2.0' : channelsNum ? `${channelsNum}.0` : '';
     const audioLabel = `${aLang}${aCodec ? ` • ${aCodec}` : ''}${chText ? ` ${chText}` : ''}`;
 
-    const containerLabel = isDirectPlay ? 'Direct MP4' : isAppleDevice ? 'MPEG-TS (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)';
+    const containerLabel = isDirectPlay
+      ? 'Direct MP4'
+      : useFmp4
+        ? (isAppleDevice ? 'fMP4 CMAF (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)')
+        : 'MPEG-TS (Apple HLS)';
     const engineLabel = isDirectPlay ? 'HTML5 Native Player' : isAppleDevice ? 'Apple Native AVPlayer' : 'Hls.js Engine (MSE)';
 
     return {
