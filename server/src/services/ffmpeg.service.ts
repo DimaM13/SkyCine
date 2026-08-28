@@ -356,8 +356,10 @@ class FFmpegService {
       '-fflags', '+genpts+discardcorrupt+nobuffer',
     ];
 
-    // Fast seek with preserved timestamps for instant startup and perfect A/V sync
-    if (cleanStartTime > 0) {
+    // Fast seek: at 0s force clean 0.000s start; for >0s preserve timestamps with -copyts for perfect A/V sync
+    if (cleanStartTime === 0) {
+      args.push('-noaccurate_seek', '-ss', '0');
+    } else {
       args.push('-noaccurate_seek', '-ss', cleanStartTime.toString(), '-copyts');
     }
     args.push('-i', media.filePath);
