@@ -150,18 +150,20 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
     const rawAudioCodec = (currentAudioTrack?.codec || media.audioCodec || '').toUpperCase();
 
+    const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
+    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+    const is4k = media.resolution === '4K';
+    const isApple4kVp9 = isAppleDevice && isVp9 && is4k;
+
     // Check if video codec is supported by browser for Direct Copy without transcoding
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedVideo = isAppleDevice
       ? appleSupportedCodecs.includes(rawVideoCodec)
       : pcSupportedCodecs.includes(rawVideoCodec);
 
     const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
-
-    const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
-    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-    const useFmp4 = !isAppleDevice || isHevc || isVp9;
+    const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
 
     const isAudioTrans = !isDirectPlay && (
       isAppleDevice
@@ -178,16 +180,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     } else if (isVideoDirectCopy) {
       modeType = 'stream';
       if (isAudioTrans) {
-        modeText = `Direct Stream • Звук: ${rawAudioCodec || 'DTS'} → AAC 512k`;
+        modeText = `Direct Stream • Звук: ${rawAudioCodec || 'DTS'} → AAC`;
       } else {
         modeText = 'Direct Stream (Оригинал)';
       }
     } else {
       modeType = 'transcode';
-      const reason = !isSupportedVideo
-        ? `Видео: ${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
-        : `Видео: ${selectedQuality}`;
-      modeText = `Транскодирование (${reason})`;
+      const vText = isApple4kVp9
+        ? '4K VP9 → H.264'
+        : !isSupportedVideo
+          ? `${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
+          : `${selectedQuality}`;
+      const aText = isAudioTrans
+        ? `Звук: ${rawAudioCodec || 'DTS'} → AAC`
+        : `Звук: Оригинал (${rawAudioCodec || 'AAC'})`;
+
+      modeText = `Транскодирование (Видео: ${vText} • ${aText})`;
     }
 
     const vCodec = (media.videoCodec || '').toUpperCase();
@@ -869,7 +877,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             </div>
             <div className="flex justify-between items-center px-1">
               <span className="text-slate-400">Качество видео:</span>
-              <span className="text-white font-mono">{selectedQuality === 'original' ? 'Оригинал (Direct Copy)' : `Транскод (${selectedQuality})`}</span>
+              <span className="text-white font-mono">{streamBadges.isVideoDirectCopy ? 'Оригинал (Direct Copy)' : `Транскод (${selectedQuality === 'original' ? (media.videoCodec || '').toUpperCase() + ' → H.264' : selectedQuality})`}</span>
             </div>
             <div className="flex justify-between items-center px-1">
               <span className="text-slate-400">Аудиодорожка:</span>
@@ -877,7 +885,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             </div>
             <div className="flex justify-between items-center px-1">
               <span className="text-slate-400">Обработка звука:</span>
-              <span className="text-white font-mono">{streamBadges.isAudioTrans ? 'Транскод в AAC 512k' : 'Оригинал (Direct Copy)'}</span>
+              <span className="text-white font-mono">{streamBadges.isAudioTrans ? `Транскод в AAC (${streamBadges.aCodec} → AAC)` : `Оригинал (${streamBadges.aCodec} Direct Copy)`}</span>
             </div>
             <div className="flex justify-between items-center px-1">
               <span className="text-slate-400">Контейнер / HLS:</span>

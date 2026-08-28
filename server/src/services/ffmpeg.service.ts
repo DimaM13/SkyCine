@@ -369,8 +369,12 @@ class FFmpegService {
       args.push('-map', '0:a:0?');
     }
 
+    const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
+    const is4k = media.resolution === '4K';
+    const isApple4kVp9 = isApple && isVp9OrVp8 && is4k;
+
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedCodec = isApple
       ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
       : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
@@ -396,7 +400,7 @@ class FFmpegService {
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
-    const canCopyAudio = canCopyVideo && (isApple ? isAppleNativeAudio : isPcNativeAudio);
+    const canCopyAudio = isApple ? isAppleNativeAudio : isPcNativeAudio;
 
     const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
     console.log(`[Continuous HLS] 🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iPad' : 'PC/Android'}): Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), StartPos=${cleanStartTime}s`);
@@ -448,7 +452,7 @@ class FFmpegService {
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const useFmp4 = !isApple || isHevc || isVp9;
+    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
 
     if (useFmp4) {
       args.push(
@@ -537,8 +541,10 @@ class FFmpegService {
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
+    const is4k = media.resolution === '4K';
     const isApple = sessionId.includes('_apple');
-    const useFmp4 = !isApple || isHevc || isVp9;
+    const isApple4kVp9 = isApple && isVp9 && is4k;
+    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
     const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
