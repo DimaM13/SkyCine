@@ -142,6 +142,81 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
   }, [media.filePath, media.audioCodec, media.videoCodec, selectedQuality, audioTracks, selectedAudioTrack, isAppleDevice]);
 
+  const currentAudioTrack = useMemo(() => {
+    return audioTracks.find(t => t.streamIndex === selectedAudioTrack) || audioTracks[0];
+  }, [audioTracks, selectedAudioTrack]);
+
+  const streamBadges = useMemo(() => {
+    const rawVideoCodec = (media.videoCodec || '').toLowerCase();
+    const rawAudioCodec = (currentAudioTrack?.codec || media.audioCodec || '').toUpperCase();
+
+    // Check if video codec is supported by browser for Direct Copy without transcoding
+    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    const isSupportedVideo = isAppleDevice
+      ? appleSupportedCodecs.includes(rawVideoCodec)
+      : pcSupportedCodecs.includes(rawVideoCodec);
+
+    const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
+
+    const isAudioTrans = !isDirectPlay && (
+      isAppleDevice
+        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC'].some(c => rawAudioCodec.includes(c))
+        : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
+    );
+
+    let modeText = 'Direct Stream (Оригинал)';
+    let modeType: 'direct' | 'stream' | 'transcode' = 'stream';
+
+    if (isDirectPlay) {
+      modeText = 'Direct Play (Оригинал)';
+      modeType = 'direct';
+    } else if (isVideoDirectCopy) {
+      modeType = 'stream';
+      if (isAudioTrans) {
+        modeText = `Direct Stream • Звук: ${rawAudioCodec || 'DTS'} → AAC 512k`;
+      } else {
+        modeText = 'Direct Stream (Оригинал)';
+      }
+    } else {
+      modeType = 'transcode';
+      const reason = !isSupportedVideo
+        ? `Видео: ${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
+        : `Видео: ${selectedQuality}`;
+      modeText = `Транскодирование (${reason})`;
+    }
+
+    const vCodec = (media.videoCodec || '').toUpperCase();
+    const res = media.resolution || '';
+    const videoLabel = [vCodec, res].filter(Boolean).join(' • ');
+
+    const aTrack = currentAudioTrack;
+    const aLang = aTrack?.language?.toUpperCase() || aTrack?.title || 'АУДИО';
+    const aCodec = (aTrack?.codec || media.audioCodec || '').toUpperCase();
+    const channelsNum = aTrack?.channels;
+    const chText = channelsNum === 6 ? '5.1' : channelsNum === 8 ? '7.1' : channelsNum === 2 ? '2.0' : channelsNum ? `${channelsNum}.0` : '';
+    const audioLabel = `${aLang}${aCodec ? ` • ${aCodec}` : ''}${chText ? ` ${chText}` : ''}`;
+
+    const containerLabel = isDirectPlay ? 'Direct MP4' : isAppleDevice ? 'MPEG-TS (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)';
+    const engineLabel = isDirectPlay ? 'HTML5 Native Player' : isAppleDevice ? 'Apple Native AVPlayer' : 'Hls.js Engine (MSE)';
+
+    return {
+      modeText,
+      modeType,
+      isVideoDirectCopy,
+      isAudioTrans,
+      vCodec,
+      res,
+      videoLabel,
+      aLang,
+      aCodec,
+      chText,
+      audioLabel,
+      containerLabel,
+      engineLabel,
+    };
+  }, [isDirectPlay, selectedQuality, media, currentAudioTrack, isAppleDevice]);
+
   const hlsRef = useRef<Hls | null>(null);
 
   const loadStreamSource = useCallback((url: string, isDirect: boolean, shouldPlay: boolean = false, startPos: number = 0) => {
@@ -684,14 +759,40 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             </button>
           )}
           <div className="min-w-0">
-            <h1 className="text-sm sm:text-base font-bold text-white truncate max-w-xs sm:max-w-md md:max-w-xl">
-              {media.title}
-            </h1>
-            {media.type === 'EPISODE' && media.seasonNumber && media.episodeNumber && (
-              <p className="text-[11px] text-cinema-gold font-semibold uppercase">
-                Сезон {media.seasonNumber} • Серия {media.episodeNumber}
-              </p>
-            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-sm sm:text-base font-bold text-white truncate max-w-xs sm:max-w-md md:max-w-xl">
+                {media.title}
+              </h1>
+              {media.type === 'EPISODE' && media.seasonNumber && media.episodeNumber && (
+                <span className="text-[11px] text-cinema-gold font-bold px-1.5 py-0.5 rounded bg-cinema-gold/10 border border-cinema-gold/20">
+                  Сезон {media.seasonNumber} • Серия {media.episodeNumber}
+                </span>
+              )}
+            </div>
+
+            {/* Stream Badges */}
+            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+              {/* Playback Mode Badge: Direct Play (green) or Direct Stream (green) or Transcoding (blue) */}
+              {streamBadges.modeType === 'direct' || streamBadges.modeType === 'stream' ? (
+                <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5 shadow-sm backdrop-blur-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  {streamBadges.modeText}
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1.5 shadow-sm backdrop-blur-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+                  {streamBadges.modeText}
+                </span>
+              )}
+
+              {/* Watch Together Badge */}
+              {isWatchTogether && (
+                <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1 shadow-sm backdrop-blur-md">
+                  <Users className="w-3 h-3 text-purple-400" />
+                  Комната ({members.length})
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -734,27 +835,49 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       {showStatsModal && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute top-16 right-4 w-72 bg-cinema-900/95 border border-cinema-gold/30 backdrop-blur-2xl rounded-2xl p-4 shadow-2xl z-50 text-xs text-slate-200"
+          className="absolute top-16 right-4 w-80 bg-cinema-900/95 border border-cinema-gold/30 backdrop-blur-2xl rounded-2xl p-4 shadow-2xl z-50 text-xs text-slate-200"
         >
           <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-3">
             <span className="font-bold text-white flex items-center gap-1.5">
               <Activity className="w-4 h-4 text-cinema-gold" /> Параметры потока
             </span>
-            <button onClick={() => setShowStatsModal(false)} className="text-slate-400 hover:text-white">✕</button>
+            <button onClick={() => setShowStatsModal(false)} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10">✕</button>
           </div>
           <div className="space-y-2 text-[11px]">
-            <div className="flex justify-between">
-              <span className="text-slate-400">Видео:</span>
-              <span className="text-white font-mono">{media.videoCodec?.toUpperCase() || 'H264'} ({selectedQuality})</span>
+            <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
+              <span className="text-slate-400">Режим:</span>
+              <span className="font-semibold text-cinema-gold text-right">{streamBadges.modeText}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-slate-400">Звук:</span>
-              <span className="text-white font-mono">{media.audioCodec?.toUpperCase() || 'AAC'}</span>
+            <div className="flex justify-between items-center px-1">
+              <span className="text-slate-400">Видеопоток:</span>
+              <span className="text-white font-mono">{streamBadges.videoLabel || 'Оригинал'}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-slate-400">Движок:</span>
-              <span className="text-cinema-gold font-mono">{isDirectPlay ? 'Direct Play' : isAppleDevice ? 'Apple Native HLS' : 'Hls.js Engine'}</span>
+            <div className="flex justify-between items-center px-1">
+              <span className="text-slate-400">Качество видео:</span>
+              <span className="text-white font-mono">{selectedQuality === 'original' ? 'Оригинал (Direct Copy)' : `Транскод (${selectedQuality})`}</span>
             </div>
+            <div className="flex justify-between items-center px-1">
+              <span className="text-slate-400">Аудиодорожка:</span>
+              <span className="text-white font-mono">{streamBadges.audioLabel}</span>
+            </div>
+            <div className="flex justify-between items-center px-1">
+              <span className="text-slate-400">Обработка звука:</span>
+              <span className="text-white font-mono">{streamBadges.isAudioTrans ? 'Транскод в AAC 512k' : 'Оригинал (Direct Copy)'}</span>
+            </div>
+            <div className="flex justify-between items-center px-1">
+              <span className="text-slate-400">Контейнер / HLS:</span>
+              <span className="text-white font-mono">{streamBadges.containerLabel}</span>
+            </div>
+            <div className="flex justify-between items-center px-1">
+              <span className="text-slate-400">Движок плеера:</span>
+              <span className="text-cinema-gold font-mono">{streamBadges.engineLabel}</span>
+            </div>
+            {effectiveDuration > 0 && (
+              <div className="flex justify-between items-center px-1 border-t border-white/5 pt-2 text-[10px]">
+                <span className="text-slate-500">Буфер / Длина:</span>
+                <span className="text-slate-400 font-mono">{Math.round(bufferedTime)}с / {Math.round(effectiveDuration)}с</span>
+              </div>
+            )}
           </div>
         </div>
       )}

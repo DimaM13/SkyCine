@@ -638,9 +638,12 @@ class ScannerService {
             const width = s.width || 0;
             const height = s.height || 0;
             if (width >= 3800 || height >= 2000) resolution = '4K';
-            else if (width >= 1900 || height >= 1000) resolution = '1080p';
-            else if (width >= 1200 || height >= 700) resolution = '720p';
-            else if (width > 0) resolution = '480p';
+            else if (width >= 2400 || height >= 1300) resolution = '1440p';
+            else if (width >= 1800 || height >= 900) resolution = '1080p';
+            else if (width >= 1100 || height >= 650) resolution = '720p';
+            else if (width >= 900 || height >= 520) resolution = '576p';
+            else if (width >= 600 || height >= 400) resolution = '480p';
+            else if (width > 0) resolution = '360p';
           } else if (s.codec_type === 'audio') {
             if (audioCodec === 'unknown') audioCodec = s.codec_name || 'aac';
             tracks.push({
