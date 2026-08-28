@@ -446,7 +446,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
 
     const totalPos = video.currentTime || 0;
-    if (!isScrubbing) {
+    if (!isScrubbing && !video.seeking) {
       setCurrentTime(totalPos);
     }
 
@@ -528,9 +528,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const lastSeekTimeRef = useRef<number>(0);
 
   const triggerSeek = (targetTime: number) => {
-    const now = Date.now();
-    if (now - lastSeekTimeRef.current < 250) return;
-    lastSeekTimeRef.current = now;
+    if (isWatchTogether) {
+      const now = Date.now();
+      if (now - lastSeekTimeRef.current < 250) return;
+      lastSeekTimeRef.current = now;
+    }
 
     const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
     setCurrentTime(safePos);
@@ -785,10 +787,16 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               setScrubTime(parseFloat((e.target as HTMLInputElement).value));
             }}
             onChange={(e) => {
-              setScrubTime(parseFloat(e.target.value));
+              if (isWatchTogether) {
+                setScrubTime(parseFloat(e.target.value));
+              } else {
+                triggerSeek(parseFloat(e.target.value));
+              }
             }}
             onPointerUp={(e) => {
-              triggerSeek(parseFloat((e.target as HTMLInputElement).value));
+              if (isWatchTogether) {
+                triggerSeek(parseFloat((e.target as HTMLInputElement).value));
+              }
             }}
             className="w-full h-1.5 bg-transparent appearance-none cursor-pointer relative z-10 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cinema-gold"
           />

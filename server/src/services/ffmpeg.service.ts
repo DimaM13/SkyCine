@@ -623,21 +623,17 @@ class FFmpegService {
         }
       }
 
-      // Handle seeking (atomic debounced restart)
-      const now = Date.now();
-      const lastRestart = this.restartDebounceMap.get(sessionId) || 0;
-      if (now - lastRestart > 800) {
-        this.restartDebounceMap.set(sessionId, now);
-        const targetStartTime = segmentIndex * 4;
-        const isApple = sessionId.includes('_apple');
-        const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
-        const audioMatch = sessionId.match(/_a(\d+)_/);
-        const quality = qualityMatch ? qualityMatch[1] : 'original';
-        const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
+      // Handle seeking: The requested segment is outside the active session's window.
+      // Immediately start or replace session at the requested segment's timestamp!
+      const targetStartTime = segmentIndex * 4;
+      const isApple = sessionId.includes('_apple');
+      const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
+      const audioMatch = sessionId.match(/_a(\d+)_/);
+      const quality = qualityMatch ? qualityMatch[1] : 'original';
+      const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
 
-        console.log(`[JIT HLS] Seeking session ${sessionId} to ${targetStartTime}s for segment ${segmentIndex}`);
-        await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
-      }
+      console.log(`[JIT HLS] Seeking session ${sessionId} to ${targetStartTime}s for segment ${segmentIndex}`);
+      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
 
       const activeSession = this.continuousSessions.get(sessionId);
       if (activeSession) {
