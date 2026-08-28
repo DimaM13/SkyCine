@@ -391,6 +391,9 @@ class SocketService {
         }, 4000);
       } else {
         this.emitRoomMembers(roomId);
+        if (member?.userId && !hasOtherConnections) {
+          ffmpegService.killUserSessionInRoom(roomId, member.userId);
+        }
       }
     }
   }

@@ -1,9 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execFile, ChildProcess } from 'child_process';
+import { promisify } from 'util';
 import { db } from '../config/db';
 import { MediaItem } from '../types';
 import { ProcessController } from '../utils/process_controller';
+
+const execFileAsync = promisify(execFile);
 
 export interface ContinuousHlsSession {
   sessionId: string;
@@ -61,9 +64,11 @@ class FFmpegService {
     }
   }
 
-  public terminateProcess(proc: ChildProcess): void {
+  public async terminateProcess(proc: ChildProcess): Promise<void> {
     if (!proc || !proc.pid) return;
-    ProcessController.kill(proc.pid);
+    try {
+      await ProcessController.kill(proc.pid);
+    } catch {}
     try {
       proc.kill('SIGKILL');
     } catch {}
@@ -276,7 +281,7 @@ class FFmpegService {
     }
   }
 
-  private retireSession(sessionId: string, session: ContinuousHlsSession): void {
+  private async retireSession(sessionId: string, session: ContinuousHlsSession): Promise<void> {
     this.stopSegmentWatcher(session);
     if (session.isSuspended) {
       session.isSuspended = false;
@@ -288,16 +293,16 @@ class FFmpegService {
     this.closingSessions.set(closingId, session);
     this.continuousSessions.delete(sessionId);
 
-    this.terminateProcess(session.process);
+    await this.terminateProcess(session.process);
 
-    // Give process 200ms to release file handles before purging and deleting folder
+    // Give process 100ms to release file handles before purging and deleting folder
     setTimeout(async () => {
       this.closingSessions.delete(closingId);
       this.purgeSessionDir(dirToDelete);
       try {
         await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 });
       } catch {}
-    }, 200);
+    }, 100);
   }
 
   public async warmupFile(filePath: string): Promise<void> {
@@ -671,6 +676,16 @@ class FFmpegService {
     }
   }
 
+  public killUserSessionInRoom(roomId: string, userId: string): void {
+    const userClean = userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
+    for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
+      if (sId.includes(`_r${roomId}`) && sId.includes(`_u${userClean}`)) {
+        console.log(`[Continuous HLS] 🛑 Killing room session for departed user ${userId}: ${sId}`);
+        this.killSession(sId);
+      }
+    }
+  }
+
   public killSoloSessionsForMedia(mediaId: string): void {
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (session.mediaId === mediaId && !sId.includes('_r')) {
@@ -725,20 +740,47 @@ class FFmpegService {
   private async cleanupIdleSessions() {
     try {
       const now = Date.now();
+
+      // 1. Terminate inactive sessions (>30s without segment requests)
       for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
-        if (now - session.lastAccess > 40000) {
-          console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>40s) for ${sessionId}, terminating process...`);
+        if (now - session.lastAccess > 30000) {
+          console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>30s) for ${sessionId}, terminating process...`);
           this.retireSession(sessionId, session);
         }
       }
 
-      // Clean orphaned session folders on RAM disk older than 10 seconds
+      // 2. Scan and terminate any zombie ffmpeg.exe processes on Windows not owned by active sessions
+      if (process.platform === 'win32') {
+        try {
+          const activePids = new Set<number>();
+          for (const session of this.continuousSessions.values()) {
+            if (session.process?.pid) activePids.add(session.process.pid);
+          }
+          for (const session of this.closingSessions.values()) {
+            if (session.process?.pid) activePids.add(session.process.pid);
+          }
+
+          const { stdout } = await execFileAsync('tasklist', ['/FI', 'IMAGENAME eq ffmpeg.exe', '/FO', 'CSV', '/NH'], { windowsHide: true });
+          const lines = stdout.split('\r\n').filter(l => l.trim());
+          for (const line of lines) {
+            const match = line.match(/^"ffmpeg\.exe","(\d+)"/i);
+            if (match) {
+              const pid = parseInt(match[1], 10);
+              if (pid && !activePids.has(pid)) {
+                console.log(`[FFmpeg Sweeper] 🧹 Terminating zombie FFmpeg PID ${pid}`);
+                ProcessController.kill(pid).catch(() => {});
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 3. Scan and wipe any orphaned session folders on RAM disk
       const baseTempDir = this.getBaseTempDir();
       const sessionsRoot = path.join(baseTempDir, 'hls_sessions');
 
       try {
-        const stats = await fs.promises.stat(sessionsRoot);
-        if (stats.isDirectory()) {
+        if (fs.existsSync(sessionsRoot)) {
           const dirs = await fs.promises.readdir(sessionsRoot);
           for (const dir of dirs) {
             const isKnown = Array.from(this.continuousSessions.values()).some(s => path.basename(s.sessionDir) === dir) ||
@@ -747,7 +789,7 @@ class FFmpegService {
               const dirPath = path.join(sessionsRoot, dir);
               try {
                 const dirStats = await fs.promises.stat(dirPath);
-                if (now - dirStats.mtimeMs > 10000) {
+                if (now - dirStats.mtimeMs > 5000) {
                   await fs.promises.rm(dirPath, { recursive: true, force: true, maxRetries: 3 });
                 }
               } catch {}
