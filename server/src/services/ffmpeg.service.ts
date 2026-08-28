@@ -262,12 +262,19 @@ class FFmpegService {
     if (existing && existing.process && !existing.process.killed) {
       existing.lastAccess = Date.now();
       const currentStart = existing.startTime;
-      // If position is within current streaming range, reuse session!
-      if (cleanStartTime >= currentStart && cleanStartTime < currentStart + 90) {
+      const currentLatestTime = existing.latestSegmentIndex * 4;
+
+      // When seeking BACKWARD (cleanStartTime < currentStart or cleanStartTime < currentLatestTime - 4) OR out of forward range,
+      // restart FFmpeg immediately to eliminate any lag or hangs!
+      const isSeekingBackward = cleanStartTime < currentStart || cleanStartTime < currentLatestTime - 4;
+      const isWithinForwardWindow = !isSeekingBackward && cleanStartTime >= currentStart && cleanStartTime < currentStart + 90;
+
+      if (isWithinForwardWindow) {
         return { sessionId };
       }
 
-      // Position changed (seek): gracefully retire existing session
+      // Position changed (seek backward or far forward): gracefully retire existing session
+      console.log(`[Continuous HLS] 🔄 Restarting session ${sessionId} for seek to ${cleanStartTime}s (prev start was ${currentStart}s, latest was ${currentLatestTime}s)`);
       this.retireSession(sessionId, existing);
     }
 
@@ -610,8 +617,10 @@ class FFmpegService {
         }
       }
 
-      // If segment is within reachable range, wait for it
-      if (segmentIndex >= session.startSegmentNumber && segmentIndex <= session.latestSegmentIndex + 20) {
+      // If segment is currently being produced forward by active FFmpeg (latestSegmentIndex <= segmentIndex <= latestSegmentIndex + 20), wait for it
+      // NOTE: FFmpeg only advances FORWARD. If segmentIndex < session.latestSegmentIndex and the segment file is missing,
+      // this is a SEEK BACKWARD — FFmpeg has already moved forward and deleted this old segment.
+      if (segmentIndex >= session.latestSegmentIndex && segmentIndex <= session.latestSegmentIndex + 20) {
         const foundPath = await this.waitForSegment(session.sessionDir, segmentName, sessionId);
         if (foundPath) {
           session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
@@ -620,7 +629,7 @@ class FFmpegService {
         return foundPath;
       }
 
-      // If segment is out of range, check closing sessions
+      // If segment is in a closing session (recent transcode), reuse it
       for (const [, closing] of this.closingSessions) {
         if (closing.mediaId !== media.id) continue;
         const closingPath = path.join(closing.sessionDir, segmentName);
@@ -629,8 +638,8 @@ class FFmpegService {
         }
       }
 
-      // Handle seeking: The requested segment is outside the active session's window.
-      // Immediately start or replace session at the requested segment's timestamp!
+      // Handle seeking (backward or far forward): The requested segment is outside the active session's window.
+      // Immediately start a fresh session at the requested segment's timestamp!
       const targetStartTime = segmentIndex * 4;
       const isApple = sessionId.includes('_apple');
       const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
@@ -638,7 +647,7 @@ class FFmpegService {
       const quality = qualityMatch ? qualityMatch[1] : 'original';
       const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
 
-      console.log(`[JIT HLS] Seeking session ${sessionId} to ${targetStartTime}s for segment ${segmentIndex}`);
+      console.log(`[JIT HLS] ⚡ Seek (backward/out-of-window) session ${sessionId} to ${targetStartTime}s for segment ${segmentIndex}`);
       await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
 
       const activeSession = this.continuousSessions.get(sessionId);
