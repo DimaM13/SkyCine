@@ -131,6 +131,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawAudioCodec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
 
+    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+    const is4k = media.resolution === '4K';
+    const is4kVp9 = isVp9 && is4k;
+    if (is4kVp9 && rawAudioCodec.includes('opus')) return false;
+
     if (isAppleDevice) {
       const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac'].some(c => rawAudioCodec.includes(c));
       const isNativeAppleVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(rawVideoCodec);
@@ -140,7 +145,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       const isNativePcVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'].includes(rawVideoCodec);
       return isNativePcAudio && isNativePcVideo;
     }
-  }, [media.filePath, media.audioCodec, media.videoCodec, selectedQuality, audioTracks, selectedAudioTrack, isAppleDevice]);
+  }, [media.filePath, media.audioCodec, media.videoCodec, media.resolution, selectedQuality, audioTracks, selectedAudioTrack, isAppleDevice]);
 
   const currentAudioTrack = useMemo(() => {
     return audioTracks.find(t => t.streamIndex === selectedAudioTrack) || audioTracks[0];
@@ -153,7 +158,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
     const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
     const is4k = media.resolution === '4K';
-    const isApple4kVp9 = isAppleDevice && isVp9 && is4k;
+    const is4kVp9 = isVp9 && is4k;
+    const isApple4kVp9 = isAppleDevice && is4kVp9;
 
     // Check if video codec is supported by browser for Direct Copy without transcoding
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
@@ -165,10 +171,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
     const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
 
+    const isOpusIn4kVp9 = is4kVp9 && rawAudioCodec.includes('OPUS');
     const isAudioTrans = !isDirectPlay && (
-      isAppleDevice
-        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
-        : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
+      isOpusIn4kVp9 || (
+        isAppleDevice
+          ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
+          : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
+      )
     );
 
     let modeText = 'Direct Stream (Оригинал)';

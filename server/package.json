@@ -1,6 +1,6 @@
 {
   "name": "myplex-server",
-  "version": "5.2.0",
+  "version": "5.2.2",
   "private": true,
   "main": "dist/index.js",
   "scripts": {

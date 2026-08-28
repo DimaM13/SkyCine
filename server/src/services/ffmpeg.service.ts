@@ -371,7 +371,8 @@ class FFmpegService {
 
     const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
     const is4k = media.resolution === '4K';
-    const isApple4kVp9 = isApple && isVp9OrVp8 && is4k;
+    const is4kVp9 = isVp9OrVp8 && is4k;
+    const isApple4kVp9 = isApple && is4kVp9;
 
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
     const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
@@ -400,7 +401,8 @@ class FFmpegService {
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
-    const canCopyAudio = isApple ? isAppleNativeAudio : isPcNativeAudio;
+    const isOpusIn4kVp9 = is4kVp9 && trackAudioCodec.includes('opus');
+    const canCopyAudio = (isApple ? isAppleNativeAudio : isPcNativeAudio) && !isOpusIn4kVp9;
 
     const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
     console.log(`[Continuous HLS] 🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iPad' : 'PC/Android'}): Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), StartPos=${cleanStartTime}s`);
