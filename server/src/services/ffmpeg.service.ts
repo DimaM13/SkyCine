@@ -38,8 +38,8 @@ class FFmpegService {
   constructor() {
     this.validateRamDisk();
     this.cleanupOrphanedTranscodes();
-    // Periodically clean dead sessions & orphaned files on RAM disk
-    setInterval(() => this.cleanupIdleSessions(), 8000);
+    // Periodically clean dead sessions & orphaned files on RAM disk every 5s
+    setInterval(() => this.cleanupIdleSessions(), 5000);
   }
 
   private getBaseTempDir(): string {
@@ -289,14 +289,15 @@ class FFmpegService {
     this.continuousSessions.delete(sessionId);
 
     this.terminateProcess(session.process);
-    this.purgeSessionDir(dirToDelete);
 
+    // Give process 200ms to release file handles before purging and deleting folder
     setTimeout(async () => {
       this.closingSessions.delete(closingId);
+      this.purgeSessionDir(dirToDelete);
       try {
         await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 });
       } catch {}
-    }, 1000);
+    }, 200);
   }
 
   public async warmupFile(filePath: string): Promise<void> {
@@ -731,7 +732,7 @@ class FFmpegService {
         }
       }
 
-      // Clean orphaned session folders on RAM disk older than 2 minutes
+      // Clean orphaned session folders on RAM disk older than 10 seconds
       const baseTempDir = this.getBaseTempDir();
       const sessionsRoot = path.join(baseTempDir, 'hls_sessions');
 
@@ -740,11 +741,13 @@ class FFmpegService {
         if (stats.isDirectory()) {
           const dirs = await fs.promises.readdir(sessionsRoot);
           for (const dir of dirs) {
-            if (!this.continuousSessions.has(dir) && !this.closingSessions.has(dir)) {
+            const isKnown = Array.from(this.continuousSessions.values()).some(s => path.basename(s.sessionDir) === dir) ||
+                            Array.from(this.closingSessions.values()).some(s => path.basename(s.sessionDir) === dir);
+            if (!isKnown) {
               const dirPath = path.join(sessionsRoot, dir);
               try {
                 const dirStats = await fs.promises.stat(dirPath);
-                if (now - dirStats.mtimeMs > 2 * 60 * 1000) {
+                if (now - dirStats.mtimeMs > 10000) {
                   await fs.promises.rm(dirPath, { recursive: true, force: true, maxRetries: 3 });
                 }
               } catch {}

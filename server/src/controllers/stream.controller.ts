@@ -389,7 +389,15 @@ export class StreamController {
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', stat.size);
       res.setHeader('Cache-Control', 'public, max-age=3600');
-      fs.createReadStream(segmentPath).pipe(res);
+
+      const fileStream = fs.createReadStream(segmentPath);
+      fileStream.pipe(res);
+      res.on('close', () => {
+        try { fileStream.destroy(); } catch {}
+      });
+      fileStream.on('error', () => {
+        try { fileStream.destroy(); } catch {}
+      });
     } catch (err) {
       logger.error("HLS_CRITICAL", "HLS segment error", err);
       res.status(500).send('Segment delivery error');
