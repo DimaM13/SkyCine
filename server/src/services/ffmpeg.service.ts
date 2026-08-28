@@ -762,6 +762,8 @@ class FFmpegService {
 
   private async cleanupIdleSessions() {
     try {
+      if (this.sessionCreationPromises.size > 0) return;
+
       const now = Date.now();
 
       // 1. Terminate inactive sessions (>30s without segment requests)
