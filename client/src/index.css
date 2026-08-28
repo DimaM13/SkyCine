@@ -6,6 +6,8 @@
   body {
     @apply bg-cinema-950 text-slate-100 font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   /* Custom Cinema Scrollbars */
@@ -22,6 +24,17 @@
   }
   ::-webkit-scrollbar-thumb:hover {
     background: #e5a00d;
+  }
+
+  /* Global removal of browser focus outlines and selection rings */
+  *, *:focus, *:focus-visible, *:active {
+    outline: none !important;
+    -webkit-tap-highlight-color: transparent !important;
+  }
+
+  button, input, select, textarea, [tabindex], [role="button"], [role="slider"] {
+    outline: none !important;
+    box-shadow: none !important;
   }
 }
 

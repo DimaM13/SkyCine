@@ -131,10 +131,11 @@ export const RoomPage: React.FC = () => {
   }
 
   const isYouTubeRoom = room.sourceType === 'YOUTUBE';
+  const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
 
   return (
-    <div className="w-full h-full flex flex-col md:flex-row overflow-hidden bg-black relative select-none touch-none">
-      <div className="flex-1 flex flex-col h-full relative overflow-hidden bg-black">
+    <div className={`w-full h-full flex flex-col md:flex-row overflow-hidden ${isDesktop ? 'bg-transparent' : 'bg-black'} relative select-none touch-none`}>
+      <div className={`flex-1 flex flex-col h-full relative overflow-hidden ${isDesktop ? 'bg-transparent' : 'bg-black'}`}>
         <div className="flex-1 w-full h-full">
           {isYouTubeRoom ? (
             <YouTubeSyncPlayer

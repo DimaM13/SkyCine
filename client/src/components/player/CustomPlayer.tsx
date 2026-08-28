@@ -4,7 +4,8 @@ import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
   RotateCcw, RotateCw, Settings, MessageSquare,
   Users, Radio, Disc3, Subtitles, Volume1,
-  ArrowLeft, Share2, Activity, Cpu, Film, Music
+  ArrowLeft, Share2, Activity, Cpu, Film, Music,
+  Minus, Square, X
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
@@ -218,18 +219,24 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const chText = channelsNum === 6 ? '5.1' : channelsNum === 8 ? '7.1' : channelsNum === 2 ? '2.0' : channelsNum ? `${channelsNum}.0` : '';
     const audioLabel = `${aLang}${aCodec ? ` • ${aCodec}` : ''}${chText ? ` ${chText}` : ''}`;
 
-    const containerLabel = isDirectPlay
-      ? 'Direct MP4'
-      : useFmp4
-        ? (isAppleDevice ? 'fMP4 CMAF (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)')
-        : 'MPEG-TS (Apple HLS)';
-    const engineLabel = isDirectPlay ? 'HTML5 Native Player' : isAppleDevice ? 'Apple Native AVPlayer' : 'Hls.js Engine (MSE)';
+    const isDesktopApp = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
+
+    const containerLabel = isDesktopApp
+      ? 'Native MKV / Direct Stream'
+      : isDirectPlay
+        ? 'Direct MP4'
+        : useFmp4
+          ? (isAppleDevice ? 'fMP4 CMAF (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)')
+          : 'MPEG-TS (Apple HLS)';
+    const engineLabel = isDesktopApp
+      ? 'MPV Native Engine (Direct3D11 / GPU NVDEC)'
+      : isDirectPlay ? 'HTML5 Native Player' : isAppleDevice ? 'Apple Native AVPlayer' : 'Hls.js Engine (MSE)';
 
     return {
-      modeText,
-      modeType,
-      isVideoDirectCopy,
-      isAudioTrans,
+      modeText: isDesktopApp ? 'Прямой нативный поток (Bit-perfect MPV Direct Play)' : modeText,
+      modeType: isDesktopApp ? 'direct' : modeType,
+      isVideoDirectCopy: isDesktopApp ? true : isVideoDirectCopy,
+      isAudioTrans: isDesktopApp ? false : isAudioTrans,
       vCodec,
       res,
       videoLabel,
@@ -243,8 +250,60 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [isDirectPlay, selectedQuality, media, currentAudioTrack, isAppleDevice]);
 
   const hlsRef = useRef<Hls | null>(null);
+  const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
+  const [hasVideoFrame, setHasVideoFrame] = useState(false);
+
+  useEffect(() => {
+    setHasVideoFrame(false);
+  }, [media.id]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    const dp = (window as any).desktopPlayer;
+    if (!dp) return;
+
+    const unsubs = [
+      dp.onVideoReady?.(() => {
+        setHasVideoFrame(true);
+      }),
+      dp.onTimeUpdate((t: number) => {
+        if (t > 0.3) {
+          setHasVideoFrame(true);
+        }
+        if (!isScrubbing) setCurrentTime(t);
+      }),
+      dp.onPlayState((playing: boolean) => {
+        setIsPlaying(playing);
+        setIsBuffering(false);
+      }),
+      dp.onDuration((d: number) => {
+        if (d > 0) setDuration(d);
+      }),
+      dp.onBuffering((buf: boolean) => {
+        setIsBuffering(buf);
+      }),
+      dp.onEnded(() => {
+        setIsPlaying(false);
+      })
+    ];
+
+    return () => {
+      unsubs.forEach((u: any) => u?.());
+    };
+  }, [isDesktop, isScrubbing]);
 
   const loadStreamSource = useCallback((url: string, isDirect: boolean, shouldPlay: boolean = false, startPos: number = 0) => {
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      const token = localStorage.getItem('myplex_token');
+      const serverOrigin = window.location.port === '3000'
+        ? `${window.location.protocol}//${window.location.hostname}:5000`
+        : window.location.origin;
+      const directUrl = `${serverOrigin}/api/stream/${media.id}/direct${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      dp?.loadFile(directUrl, startPos, media.title);
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -325,7 +384,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
           hls.attachMedia(video);
 
-          hls.on(Hls.Events.ERROR, (_event, data) => {
+          hls.on(Hls.Events.ERROR, (_event: any, data: any) => {
             if (data.fatal) {
               switch (data.type) {
                 case Hls.ErrorTypes.NETWORK_ERROR:
@@ -451,11 +510,21 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [media.id, isDirectPlay, isAppleDevice, isWatchTogether, room?.id]);
 
   const doSeek = useCallback((targetTime: number, forcePlayState?: boolean) => {
+    const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
+    setCurrentTime(safePos);
+    setScrubTime(safePos);
+
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      dp?.seek(safePos);
+      const shouldPlay = forcePlayState !== undefined ? forcePlayState : isPlaying;
+      if (shouldPlay) dp?.play();
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
-    const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
-    setCurrentTime(safePos);
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
     if (hlsRef.current) {
@@ -469,7 +538,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       video.pause();
       setIsPlaying(false);
     }
-  }, [effectiveDuration, videoRef]);
+  }, [effectiveDuration, isDesktop, isPlaying, videoRef]);
 
   useEffect(() => {
     onAttachSeekHandler?.(doSeek);
@@ -477,16 +546,18 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
   useEffect(() => {
     onAttachGetCurrentTime?.(() => {
+      if (isDesktop) return currentTime;
       return videoRef.current?.currentTime || 0;
     });
-  }, [onAttachGetCurrentTime, videoRef]);
+  }, [onAttachGetCurrentTime, isDesktop, currentTime, videoRef]);
 
   const isInitialMount = useRef(true);
+  const hasLoadedDesktopRef = useRef<string | null>(null);
 
   // Initial load
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    if (!isDesktop && !videoRef.current) return;
+    if (isDesktop && hasLoadedDesktopRef.current === media.id) return;
 
     const startPos = Math.max(0, initialPosition || 0);
     const shouldStartPlay = isWatchTogether ? (roomState === 'PLAYING') : true;
@@ -494,14 +565,28 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     setCurrentTime(startPos);
     setBufferedTime(startPos);
     isInitialMount.current = false;
+    hasLoadedDesktopRef.current = media.id;
 
     const url = buildStreamUrl(selectedQuality, selectedAudioTrack, startPos);
     loadStreamSource(url, isDirectPlay, shouldStartPlay, startPos);
-  }, [media.id]);
+  }, [media.id, isDesktop]);
 
   // Sync playback when roomState changes in Watch Together
   useEffect(() => {
     if (!isWatchTogether) return;
+
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      if (roomState === 'PLAYING') {
+        dp?.play();
+        setIsPlaying(true);
+      } else if (roomState === 'PAUSED') {
+        dp?.pause();
+        setIsPlaying(false);
+      }
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -518,7 +603,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         setIsPlaying(false);
       }
     }
-  }, [roomState, isWatchTogether, videoRef]);
+  }, [roomState, isWatchTogether, isDesktop, videoRef]);
 
   // Quality or audio track switch
   const prevQualityRef = useRef(selectedQuality);
@@ -533,6 +618,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     prevQualityRef.current = selectedQuality;
     prevAudioTrackRef.current = selectedAudioTrack;
 
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      if (selectedAudioTrack >= 0) {
+        dp?.setAudioTrack(selectedAudioTrack);
+      }
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -540,7 +633,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const wasPlaying = !video.paused;
     const url = buildStreamUrl(selectedQuality, selectedAudioTrack, currentPos);
     loadStreamSource(url, isDirectPlay, wasPlaying, currentPos);
-  }, [selectedQuality, selectedAudioTrack, isDirectPlay, buildStreamUrl, loadStreamSource, videoRef]);
+  }, [selectedQuality, selectedAudioTrack, isDirectPlay, isDesktop, buildStreamUrl, loadStreamSource, videoRef]);
 
   // Video Time Update
   const handleTimeUpdate = () => {
@@ -569,10 +662,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
   // Watch Progress Reporting
   const reportProgress = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || !media?.id) return;
-    const pos = video.currentTime || 0;
-    const dur = video.duration || media.durationSeconds || duration || 0;
+    if (!media?.id) return;
+    const pos = currentTime;
+    const dur = effectiveDuration;
 
     if (pos > 5 && dur > 0) {
       apiClient.post('/media/progress', {
@@ -581,7 +673,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         durationSeconds: Math.floor(dur)
       }).catch(() => {});
     }
-  }, [media.id, media.durationSeconds, duration, videoRef]);
+  }, [media.id, effectiveDuration, currentTime]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -611,9 +703,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   };
 
   const togglePlay = () => {
-    const video = videoRef.current;
-    if (!video) return;
-
     if (isWatchTogether) {
       if (isPlaying) {
         onPauseRequest?.();
@@ -622,6 +711,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
       return;
     }
+
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      dp?.togglePlay();
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video) return;
 
     if (!video.paused) {
       video.pause();
@@ -654,33 +752,46 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   };
 
   const skip = (seconds: number) => {
-    const video = videoRef.current;
-    if (!video) return;
-    const newPos = Math.max(0, Math.min(effectiveDuration, (video.currentTime || 0) + seconds));
+    const newPos = Math.max(0, Math.min(effectiveDuration, currentTime + seconds));
     triggerSeek(newPos);
   };
 
   const changeVolume = (val: number) => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.volume = val;
     setVolume(val);
     setIsMuted(val === 0);
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      dp?.setVolume(val * 100);
+      return;
+    }
+    const video = videoRef.current;
+    if (video) video.volume = val;
   };
 
   const toggleMute = () => {
+    const nextMute = !isMuted;
+    setIsMuted(nextMute);
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      dp?.setMute(nextMute);
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
-    if (isMuted) {
+    if (!nextMute) {
       video.volume = volume || 0.5;
-      setIsMuted(false);
     } else {
       video.volume = 0;
-      setIsMuted(true);
     }
   };
 
   const toggleFullscreen = () => {
+    if (isDesktop) {
+      const dp = (window as any).desktopPlayer;
+      dp?.toggleFullscreen?.();
+      setIsFullscreen(!isFullscreen);
+      return;
+    }
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
       containerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
@@ -733,36 +844,56 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="relative w-full h-full bg-black flex items-center justify-center select-none overflow-hidden group font-sans touch-none"
+      className={`relative w-full h-full ${isDesktop ? 'bg-transparent' : 'bg-black'} flex items-center justify-center select-none overflow-hidden group font-sans touch-none`}
     >
-      <video
-        ref={videoRef}
-        onTimeUpdate={handleTimeUpdate}
-        onWaiting={handleWaiting}
-        onCanPlay={handleCanPlay}
-        onCanPlayThrough={() => setIsBuffering(false)}
-        onSeeked={() => {
-          setIsBuffering(false);
-          if (videoRef.current) setIsPlaying(!videoRef.current.paused);
-        }}
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
-        onEnded={() => setIsPlaying(false)}
-        onClick={togglePlay}
-        className="w-full h-full object-contain cursor-pointer focus:outline-none"
-        playsInline
-        preload="auto"
-      >
-        {selectedSubtitleTrack >= 0 && (
-          <track
-            kind="subtitles"
-            src={`/api/stream/${media.id}/subtitle/${selectedSubtitleTrack}?format=vtt${localStorage.getItem('myplex_token') ? `&token=${encodeURIComponent(localStorage.getItem('myplex_token')!)}` : ''}`}
-            srcLang="ru"
-            label="Субтитры"
-            default
-          />
-        )}
-      </video>
+      {!isDesktop ? (
+        <video
+          ref={videoRef}
+          onTimeUpdate={handleTimeUpdate}
+          onWaiting={handleWaiting}
+          onCanPlay={handleCanPlay}
+          onCanPlayThrough={() => setIsBuffering(false)}
+          onSeeked={() => {
+            setIsBuffering(false);
+            if (videoRef.current) setIsPlaying(!videoRef.current.paused);
+          }}
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+          onEnded={() => setIsPlaying(false)}
+          onClick={togglePlay}
+          className="w-full h-full object-contain cursor-pointer focus:outline-none"
+          playsInline
+          preload="auto"
+        >
+          {selectedSubtitleTrack >= 0 && (
+            <track
+              kind="subtitles"
+              src={`/api/stream/${media.id}/subtitle/${selectedSubtitleTrack}?format=vtt${localStorage.getItem('myplex_token') ? `&token=${encodeURIComponent(localStorage.getItem('myplex_token')!)}` : ''}`}
+              srcLang="ru"
+              label="Субтитры"
+              default
+            />
+          )}
+        </video>
+      ) : (
+        <div
+          onClick={togglePlay}
+          className="w-full h-full cursor-pointer focus:outline-none bg-transparent"
+        />
+      )}
+
+      {/* Dark Cinema Solid Background until Video Frame is Decoded */}
+      {isDesktop && !hasVideoFrame && (
+        <div className="absolute inset-0 z-20 bg-[#07090e] flex flex-col items-center justify-center pointer-events-none select-none">
+          <div className="w-14 h-14 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin mb-4 shadow-glow-gold" />
+          <span className="text-sm font-semibold text-slate-200 tracking-wider">
+            Запуск аппаратного воспроизведения...
+          </span>
+          <span className="text-xs text-cinema-gold/80 mt-1 font-medium">
+            {media.title}
+          </span>
+        </div>
+      )}
 
       {/* Floating Reaction Overlay */}
       {reactions.length > 0 && <ReactionOverlay reactions={reactions} />}
@@ -776,14 +907,20 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
       {/* Top Header Controls */}
       <div
-        className={`absolute top-0 left-0 right-0 p-4 sm:p-6 bg-gradient-to-b from-black/90 via-black/50 to-transparent transition-opacity duration-300 z-30 flex items-center justify-between ${
+        className={`absolute top-0 left-0 right-0 p-4 sm:p-6 bg-gradient-to-b from-black/90 via-black/50 to-transparent transition-opacity duration-300 z-30 flex items-center justify-between select-none ${
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
+        style={{ WebkitAppRegion: 'drag' } as any}
       >
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-3 min-w-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
           {onBack && (
             <button
-              onClick={onBack}
+              onClick={() => {
+                if (isDesktop) {
+                  (window as any).desktopPlayer?.closePlayer();
+                }
+                onBack();
+              }}
               className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all cursor-pointer shrink-0"
               title="Назад"
             >
@@ -829,7 +966,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         </div>
 
         {/* Top Right Actions */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
           {isWatchTogether && onInvite && (
             <button
               onClick={onInvite}
@@ -860,6 +997,32 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           >
             <Activity className="w-4 h-4" />
           </button>
+
+          {isDesktop && (
+            <div className="flex items-center gap-1 ml-2 pl-2 border-l border-white/15">
+              <button
+                onClick={() => (window as any).desktopPlayer?.minimizeWindow?.()}
+                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 transition-colors cursor-pointer"
+                title="Свернуть"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => (window as any).desktopPlayer?.maximizeWindow?.()}
+                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 transition-colors cursor-pointer"
+                title="Развернуть"
+              >
+                <Square className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => (window as any).desktopPlayer?.closeWindow?.()}
+                className="p-2 rounded-xl bg-red-500/20 hover:bg-red-600 text-red-300 hover:text-white transition-colors cursor-pointer"
+                title="Закрыть"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

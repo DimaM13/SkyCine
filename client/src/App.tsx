@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SocketProvider } from './context/SocketContext';
@@ -15,6 +15,7 @@ import { DirectPlayerPage } from './pages/DirectPlayerPage';
 import { FriendsPage } from './pages/FriendsPage';
 import { AdminPage } from './pages/AdminPage';
 import { AuthPage } from './pages/AuthPage';
+import { Titlebar } from './components/layout/Titlebar';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isLoading } = useAuth();
@@ -49,14 +50,31 @@ const MainLayout: React.FC = () => {
     return () => clearTimeout(timer);
   }, [location.pathname]);
 
+  const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
+
   const isPlayerScreen =
     location.pathname.startsWith('/watch') ||
     (/^\/rooms\/[a-zA-Z0-9_-]+$/.test(location.pathname) && location.pathname !== '/rooms');
 
+  const prevIsPlayerScreen = useRef(isPlayerScreen);
+  useEffect(() => {
+    if (isDesktop) {
+      if (isPlayerScreen) {
+        document.body.style.backgroundColor = 'transparent';
+      } else {
+        document.body.style.backgroundColor = '#07090e';
+        if (prevIsPlayerScreen.current) {
+          (window as any).desktopPlayer?.closePlayer();
+        }
+      }
+      prevIsPlayerScreen.current = isPlayerScreen;
+    }
+  }, [isPlayerScreen, isDesktop]);
+
   if (isPlayerScreen) {
     return (
-      <div className="fixed inset-0 w-full h-full bg-black overflow-hidden select-none touch-none z-50 flex flex-col">
-        <main className="w-full h-full flex-1 relative overflow-hidden">
+      <div className={`fixed inset-0 w-full h-full ${isDesktop ? 'bg-transparent' : 'bg-black'} overflow-hidden select-none touch-none z-50 flex flex-col`}>
+        <main className={`w-full h-full flex-1 relative overflow-hidden ${isDesktop ? 'bg-transparent' : 'bg-black'}`}>
           <Routes>
             <Route path="/rooms/:code" element={<ProtectedRoute><RoomPage /></ProtectedRoute>} />
             <Route path="/watch/:id" element={<ProtectedRoute><DirectPlayerPage /></ProtectedRoute>} />
@@ -68,6 +86,7 @@ const MainLayout: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-cinema-950 text-slate-100 flex flex-col">
+      <Titlebar />
       <Navbar onToggleSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)} />
       <InviteToast />
 

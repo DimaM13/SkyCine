@@ -1,6 +1,6 @@
 {
   "name": "myplex-watch-together",
-  "version": "5.4.0",
+  "version": "6.0.0",
   "description": "Self-hosted media server with ultra-precise Watch Together synchronization and universal format playback",
   "private": true,
   "scripts": {
@@ -11,7 +11,10 @@
     "dev:online": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run tunnel\"",
     "build:server": "npm --prefix server run build",
     "build:client": "npm --prefix client run build",
-    "build": "npm run build:server && npm run build:client",
+    "build:desktop": "npm --prefix desktop run build",
+    "build": "npm run build:server && npm run build:client && npm run build:desktop",
+    "dev:desktop": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm --prefix desktop start\"",
+    "start:desktop": "npm --prefix desktop start",
     "start": "npm --prefix server start"
   },
   "devDependencies": {

@@ -7,5 +7,6 @@ server/data/logs/
 server/data/db/
 server/uploads/
 uploads/
+desktop/
 *.log
 .DS_Store

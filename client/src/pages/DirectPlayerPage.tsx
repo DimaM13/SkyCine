@@ -63,10 +63,12 @@ export const DirectPlayerPage: React.FC = () => {
     initialPosition = (media as any).userProgress;
   }
 
+  const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
+
   return (
-    <div className="w-full h-full relative bg-black overflow-hidden select-none touch-none">
+    <div className={`w-full h-full relative ${isDesktop ? 'bg-transparent' : 'bg-black'} overflow-hidden select-none touch-none`}>
       <CustomPlayer
-        key={`${media.id}_${initialPosition}`}
+        key={media.id}
         media={media}
         initialPosition={initialPosition}
         isWatchTogether={false}
