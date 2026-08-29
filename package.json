@@ -1,6 +1,6 @@
 {
   "name": "myplex-watch-together",
-  "version": "6.0.0",
+  "version": "6.0.1",
   "description": "Self-hosted media server with ultra-precise Watch Together synchronization and universal format playback",
   "private": true,
   "scripts": {
