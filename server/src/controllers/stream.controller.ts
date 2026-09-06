@@ -6,7 +6,7 @@ import path from 'path';
 import mime from 'mime-types';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { ffmpegService } from '../services/ffmpeg.service';
+import { ffmpegService, FFmpegService } from '../services/ffmpeg.service';
 import { MediaItem } from '../types';
 import { permissionService } from '../services/permission.service';
 
@@ -245,9 +245,15 @@ export class StreamController {
         const proc = spawn('ffmpeg', ffmpegArgs, { windowsHide: true });
         proc.stdout.pipe(res);
 
-        req.on('close', () => {
+        if (proc.pid) FFmpegService.registerDirectPid(proc.pid);
+
+        const cleanup = () => {
+          if (proc.pid) FFmpegService.unregisterDirectPid(proc.pid);
           try { proc.kill(); } catch (e) {}
-        });
+        };
+
+        req.on('close', cleanup);
+        proc.on('close', cleanup);
         proc.stderr.on('data', (d) => {
           const str = d.toString();
           if (str.includes('Error') || str.includes('error') || str.includes('Cannot') || str.includes('failed')) {

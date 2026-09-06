@@ -32,6 +32,14 @@ const WINDOW_AHEAD = 8;    // Max 8 segments ahead (~32 sec of video)
 const WINDOW_BEHIND = 3;   // Keep 3 segments behind for buffer re-read (~12 sec)
 
 class FFmpegService {
+  public static activeDirectPids = new Set<number>();
+  public static registerDirectPid(pid?: number) {
+    if (pid) this.activeDirectPids.add(pid);
+  }
+  public static unregisterDirectPid(pid?: number) {
+    if (pid) this.activeDirectPids.delete(pid);
+  }
+
   private continuousSessions: Map<string, ContinuousHlsSession> = new Map();
   private closingSessions: Map<string, ContinuousHlsSession> = new Map();
   private sessionCreationPromises: Map<string, Promise<{ sessionId: string }>> = new Map();
@@ -786,6 +794,9 @@ class FFmpegService {
           for (const session of this.closingSessions.values()) {
             if (session.process?.pid) activePids.add(session.process.pid);
           }
+          for (const pid of FFmpegService.activeDirectPids) {
+            activePids.add(pid);
+          }
 
           const { stdout } = await execFileAsync('tasklist', ['/FI', 'IMAGENAME eq ffmpeg.exe', '/FO', 'CSV', '/NH'], { windowsHide: true });
           const lines = stdout.split('\r\n').filter(l => l.trim());
@@ -828,4 +839,5 @@ class FFmpegService {
   }
 }
 
+export { FFmpegService };
 export const ffmpegService = new FFmpegService();
