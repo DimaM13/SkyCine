@@ -169,35 +169,142 @@ export class StreamController {
         return;
       }
 
+      // 1. Check if target audio track is DTS or TrueHD (unsupported by TV hardware)
+      const audioIndex = parseInt(req.query.audioIndex as string || '0', 10);
+      let targetTrack: { codec: string; channels: number; streamIndex: number } | undefined;
+
+      if (audioIndex > 0) {
+        try {
+          targetTrack = db.prepare('SELECT codec, channels, streamIndex FROM media_tracks WHERE mediaItemId = ? AND streamIndex = ?').get(media.id, audioIndex) as any;
+        } catch {}
+      } else {
+        try {
+          targetTrack = db.prepare('SELECT codec, channels, streamIndex FROM media_tracks WHERE mediaItemId = ? AND type = "AUDIO" ORDER BY isDefault DESC, streamIndex ASC LIMIT 1').get(media.id) as any;
+        } catch {}
+      }
+
+      const codecLower = (targetTrack?.codec || media.audioCodec || '').toLowerCase();
+      const isDtsOrTrueHd = 
+        codecLower.includes('dts') || 
+        codecLower.includes('dca') || 
+        codecLower.includes('truehd') || 
+        codecLower.includes('mlp');
+
+      if (isDtsOrTrueHd) {
+        logger.info('STREAM', `[DirectStream] Audio track "${codecLower}" requires on-the-fly AC3 remuxing for TV. Video is 100% copied 1:1.`);
+
+        if (req.method === 'HEAD') {
+          res.setHeader('Content-Type', 'video/mp4');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('X-Audio-Remux', '1');
+          res.status(200).end();
+          return;
+        }
+
+        const startTime = Math.max(0, parseFloat(req.query.startTime as string || '0'));
+        const ffmpegArgs: string[] = [
+          '-fflags', '+genpts+discardcorrupt+nobuffer',
+        ];
+        if (startTime > 0) {
+          ffmpegArgs.push('-noaccurate_seek', '-ss', startTime.toString());
+        }
+        ffmpegArgs.push('-i', media.filePath);
+
+        // Video bitstream is 100% original copy (0% CPU, identical 4K/HDR quality)
+        ffmpegArgs.push('-map', '0:v:0', '-c:v', 'copy');
+
+        // Audio is remuxed to Dolby Digital AC3 5.1 (supported by 100% of TVs)
+        const targetAudioStream = targetTrack ? `0:${targetTrack.streamIndex}` : (audioIndex > 0 ? `0:${audioIndex}` : '0:a:0?');
+        const channels = (targetTrack?.channels && targetTrack.channels >= 6) ? '6' : '2';
+        const bitrate = channels === '6' ? '640k' : '384k';
+
+        ffmpegArgs.push(
+          '-map', targetAudioStream,
+          '-c:a', 'ac3',
+          '-b:a', bitrate,
+          '-ac', channels,
+          '-af', 'aresample=async=1:first_pts=0',
+          '-avoid_negative_ts', 'make_zero',
+          '-max_muxing_queue_size', '2048',
+          '-flush_packets', '1',
+          '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+          '-f', 'mp4',
+          'pipe:1'
+        );
+
+        res.writeHead(200, {
+          'Content-Type': 'video/mp4',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Expose-Headers': 'Content-Type, X-Audio-Remux',
+          'X-Audio-Remux': '1',
+        });
+
+        const proc = spawn('ffmpeg', ffmpegArgs, { windowsHide: true });
+        proc.stdout.pipe(res);
+
+        req.on('close', () => {
+          try { proc.kill(); } catch (e) {}
+        });
+        proc.on('error', (err) => {
+          logger.error('STREAM', `FFmpeg DTS remux pipe error: ${err.message}`);
+        });
+        return;
+      }
+
       const stat = fs.statSync(media.filePath);
       const fileSize = stat.size;
       const range = req.headers.range;
       const mimeType = mime.lookup(media.filePath) || 'video/mp4';
 
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length, Content-Type');
+
+      if (req.method === 'HEAD') {
+        res.setHeader('Content-Length', fileSize);
+        res.status(200).end();
+        return;
+      }
+
       if (range) {
         const parts = range.replace(/bytes=/, '').split('-');
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        if (isNaN(start) || start >= fileSize || end >= fileSize || start > end) {
+          res.setHeader('Content-Range', `bytes */${fileSize}`);
+          res.status(416).end();
+          return;
+        }
+
         const chunksize = (end - start) + 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+        res.setHeader('Content-Length', chunksize);
 
         const file = fs.createReadStream(media.filePath, { start, end });
-        const head = {
-          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-          'Accept-Ranges': 'bytes',
-          'Content-Length': chunksize,
-          'Content-Type': mimeType,
-        };
-
-        res.writeHead(206, head);
+        file.on('error', () => {
+          if (!res.headersSent) res.status(500).end();
+        });
+        req.on('close', () => {
+          file.destroy();
+        });
         file.pipe(res);
       } else {
-        const head = {
-          'Content-Length': fileSize,
-          'Content-Type': mimeType,
-          'Accept-Ranges': 'bytes',
-        };
-        res.writeHead(200, head);
-        fs.createReadStream(media.filePath).pipe(res);
+        res.status(200);
+        res.setHeader('Content-Length', fileSize);
+
+        const file = fs.createReadStream(media.filePath);
+        file.on('error', () => {
+          if (!res.headersSent) res.status(500).end();
+        });
+        req.on('close', () => {
+          file.destroy();
+        });
+        file.pipe(res);
       }
     } catch (err) {
       console.error('DirectStream error:', err);
