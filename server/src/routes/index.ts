@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { logger } from '../services/logger.service';
 import { AuthController } from '../controllers/auth.controller';
 import { FriendsController } from '../controllers/friends.controller';
 import { LibraryController } from '../controllers/library.controller';
@@ -60,6 +61,7 @@ router.get('/stream/youtube/:videoId', YouTubeController.stream);
 // --- Stream Routes ---
 router.get('/stream/:id/info', authenticateToken, StreamController.getStreamInfo);
 router.get('/stream/:id/direct', authenticateToken, StreamController.directStream);
+router.get('/stream/:id/direct/:filename', authenticateToken, StreamController.directStream);
 router.get('/stream/:id/remux', authenticateToken, StreamController.remuxStream);
 router.get('/stream/:id/master.m3u8', authenticateToken, StreamController.getHlsMaster);
 router.get('/stream/hls/session/start/:id', authenticateToken, StreamController.startHlsSession);
@@ -99,5 +101,34 @@ router.get('/admin/logs', requireAdmin, AdminController.getLogs);
 router.delete('/admin/logs', requireAdmin, AdminController.clearLogs);
 router.get('/admin/fs/browse', requireAdmin, AdminController.browseFilesystem);
 router.post('/admin/restart', requireAdmin, AdminController.restartServer);
+
+// --- TV Remote Logging Routes (Tizen & WebOS) ---
+router.post('/debug/tizen-log', (req, res) => {
+  const { level = 'info', tag = 'TIZEN', message = '', data } = req.body;
+  const detail = data !== undefined ? ` | ${typeof data === 'object' ? JSON.stringify(data) : data}` : '';
+  const fullMsg = `${message}${detail}`;
+  if (level === 'error') {
+    logger.error(tag, fullMsg);
+  } else if (level === 'warn') {
+    logger.warn(tag, fullMsg);
+  } else {
+    logger.info(tag, fullMsg);
+  }
+  res.json({ ok: true });
+});
+
+router.post('/debug/webos-log', (req, res) => {
+  const { level = 'info', tag = 'WEBOS_APP', message = '', data } = req.body;
+  const detail = data !== undefined ? ` | ${typeof data === 'object' ? JSON.stringify(data) : data}` : '';
+  const fullMsg = `${message}${detail}`;
+  if (level === 'error') {
+    logger.error(tag, fullMsg);
+  } else if (level === 'warn') {
+    logger.warn(tag, fullMsg);
+  } else {
+    logger.info(tag, fullMsg);
+  }
+  res.json({ ok: true });
+});
 
 export default router;

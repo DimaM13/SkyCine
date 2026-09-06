@@ -133,6 +133,17 @@ export class StreamController {
       const canDirectPlay = isMp4 && isH264 && isAac;
       const canDirectStream = isH264;
 
+      // Check if audio tracks require selective DTS/TrueHD AC3 remuxing for TVs
+      const defaultAudioTrack = tracks.find(t => t.type === 'AUDIO' && t.isDefault) || tracks.find(t => t.type === 'AUDIO');
+      const activeAudioCodec = (defaultAudioTrack?.codec || media.audioCodec || '').toLowerCase();
+      const hasDtsTrack = tracks.some(t => t.type === 'AUDIO' && /dts|dca|truehd|mlp/i.test(t.codec || ''));
+      const requiresAudioRemux = 
+        activeAudioCodec.includes('dts') || 
+        activeAudioCodec.includes('dca') || 
+        activeAudioCodec.includes('truehd') || 
+        activeAudioCodec.includes('mlp') ||
+        hasDtsTrack;
+
       res.json({
         mediaId: media.id,
         title: media.title,
@@ -143,6 +154,8 @@ export class StreamController {
         fileExtension: ext,
         canDirectPlay,
         canDirectStream,
+        requiresAudioRemux,
+        tracks,
         audioTracks: tracks.filter(t => t.type === 'AUDIO'),
         subtitleTracks: tracks.filter(t => t.type === 'SUBTITLE'),
         availableQualities: ['original', '1080p', '720p', '480p'],
@@ -223,6 +236,9 @@ export class StreamController {
           '-c:a', 'ac3',
           '-b:a', bitrate,
           '-ac', channels,
+          '-sn',
+          '-dn',
+          '-map_chapters', '-1',
           '-af', 'aresample=async=1:first_pts=0',
           '-avoid_negative_ts', 'make_zero',
           '-max_muxing_queue_size', '2048',

@@ -33,7 +33,7 @@ export class AuthController {
       // First registered user gets ADMIN role automatically!
       const role = countUsers.count === 0 ? 'ADMIN' : 'USER';
 
-      const existingUser = db.prepare('SELECT id FROM users WHERE username = ? OR email = ?').get(username, email);
+      const existingUser = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE').get(username, email);
       if (existingUser) {
         res.status(400).json({ error: 'Пользователь с таким именем или email уже существует' });
         return;
@@ -82,14 +82,16 @@ export class AuthController {
 
   public static async login(req: Request, res: Response): Promise<void> {
     try {
-      const { login, password } = req.body; // login can be username or email
+      const loginRaw = req.body.login || req.body.username;
+      const login = typeof loginRaw === 'string' ? loginRaw.trim() : '';
+      const password = req.body.password;
 
       if (!login || !password) {
         res.status(400).json({ error: 'Введите имя пользователя/email и пароль' });
         return;
       }
 
-      const user = db.prepare('SELECT * FROM users WHERE username = ? OR email = ?').get(login, login) as User | undefined;
+      const user = db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE').get(login, login) as User | undefined;
       if (!user) {
         res.status(401).json({ error: 'Неверные учетные данные' });
         return;

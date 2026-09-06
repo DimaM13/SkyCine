@@ -123,7 +123,10 @@ export class MediaController {
       const filter = permissionService.getMediaFilter(userId, userRole, 'm');
 
       let query = `
-        SELECT m.showTitle,
+        SELECT MIN(m.id) as id,
+               m.showTitle,
+               m.showTitle as title,
+               'SHOW' as type,
                m.libraryId,
                COUNT(m.id) as totalEpisodes,
                COUNT(DISTINCT m.seasonNumber) as totalSeasons,
@@ -243,8 +246,9 @@ export class MediaController {
 
       const items = db.prepare(`
         SELECT wh.progressSeconds, wh.durationSeconds, wh.lastWatchedAt,
-               m.id as mediaId, m.title, m.posterPath, m.backdropPath, m.stillPath,
-               m.type, m.showTitle, m.seasonNumber, m.episodeNumber, m.durationSeconds as fullDuration
+               m.id, m.id as mediaId, m.title, m.posterPath, m.backdropPath, m.stillPath,
+               m.type, m.showTitle, m.seasonNumber, m.episodeNumber, m.durationSeconds as fullDuration,
+               m.audioCodec, m.videoCodec, m.filePath, m.resolution
         FROM watch_history wh
         JOIN media_items m ON wh.mediaItemId = m.id
         WHERE wh.userId = ? AND wh.isCompleted = 0 AND wh.progressSeconds > 15 AND ${filter.sql}
