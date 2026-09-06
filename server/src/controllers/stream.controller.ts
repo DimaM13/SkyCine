@@ -227,7 +227,7 @@ export class StreamController {
           '-avoid_negative_ts', 'make_zero',
           '-max_muxing_queue_size', '2048',
           '-flush_packets', '1',
-          '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+          '-movflags', 'frag_keyframe+empty_moov+default_base_moof+delay_moov',
           '-f', 'mp4',
           'pipe:1'
         );
@@ -236,6 +236,7 @@ export class StreamController {
           'Content-Type': 'video/mp4',
           'Cache-Control': 'no-cache, no-store, must-revalidate',
           'Connection': 'keep-alive',
+          'Accept-Ranges': 'none',
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Expose-Headers': 'Content-Type, X-Audio-Remux',
           'X-Audio-Remux': '1',
@@ -246,6 +247,12 @@ export class StreamController {
 
         req.on('close', () => {
           try { proc.kill(); } catch (e) {}
+        });
+        proc.stderr.on('data', (d) => {
+          const str = d.toString();
+          if (str.includes('Error') || str.includes('error') || str.includes('Cannot') || str.includes('failed')) {
+            logger.error('STREAM', `FFmpeg DTS remux stderr: ${str.trim()}`);
+          }
         });
         proc.on('error', (err) => {
           logger.error('STREAM', `FFmpeg DTS remux pipe error: ${err.message}`);
