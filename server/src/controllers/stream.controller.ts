@@ -98,10 +98,10 @@ export class StreamController {
       });
 
       proc.on('error', (err) => {
-        console.error('Remux ffmpeg error:', err);
+        logger.error('STREAM', `Remux ffmpeg error for ${id}: ${err?.message || err}`);
       });
-    } catch (err) {
-      console.error('remuxStream error:', err);
+    } catch (err: any) {
+      logger.error('STREAM', `remuxStream error for ${req.params.id}: ${err?.message || err}`);
       res.status(500).json({ error: 'Ошибка при отдаче ремукс-потока' });
     }
   }
@@ -335,8 +335,8 @@ export class StreamController {
         });
         file.pipe(res);
       }
-    } catch (err) {
-      console.error('DirectStream error:', err);
+    } catch (err: any) {
+      logger.error('STREAM', `DirectStream error for ${req.params.id}: ${err?.message || err}`);
       res.status(500).json({ error: 'Ошибка при отдаче видеопотока' });
     }
   }
@@ -374,8 +374,8 @@ export class StreamController {
       ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
 
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
-    } catch (err) {
-      console.error('startHlsSession error:', err);
+    } catch (err: any) {
+      logger.error('HLS', `startHlsSession error for ${req.params.id}: ${err?.message || err}`);
       res.status(500).json({ error: 'Ошибка запуска сессии HLS' });
     }
   }
@@ -417,8 +417,8 @@ export class StreamController {
         }
       }
       res.json({ success: true });
-    } catch (err) {
-      console.error('endHlsSession error:', err);
+    } catch (err: any) {
+      logger.error('HLS', `endHlsSession error: ${err?.message || err}`);
       res.status(500).json({ error: 'Ошибка завершения сессии HLS' });
     }
   }
@@ -557,8 +557,8 @@ export class StreamController {
       res.setHeader('Content-Type', format === 'ass' ? 'text/plain; charset=utf-8' : 'text/vtt; charset=utf-8');
       res.setHeader('Cache-Control', 'public, max-age=86400');
       res.send(subtitleContent);
-    } catch (err) {
-      console.error('getSubtitle error:', err);
+    } catch (err: any) {
+      logger.error('STREAM', `getSubtitle error for media ${req.params.id}: ${err?.message || err}`);
       res.status(500).send('Subtitle extraction error');
     }
   }

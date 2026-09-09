@@ -108,7 +108,7 @@ class ScannerService {
       try {
         await this.scanLibrary(lib.id);
       } catch (err: any) {
-        console.warn(`[Scanner] Could not scan library ${lib.id}:`, err.message);
+        logger.warn('SCANNER', `Could not scan library ${lib.id}: ${err?.message || err}`);
       }
     }
   }
@@ -156,7 +156,7 @@ class ScannerService {
             const res = await this.addShowFolder(subPath, libraryId, sub.name);
             totalEpisodes += res.episodesAdded;
           } catch (e: any) {
-            console.warn(`[Scanner] Could not process show folder ${sub.name}:`, e.message);
+            logger.warn('SCANNER', `Could not process show folder ${sub.name}: ${e?.message || e}`);
           }
         }
       } else {
@@ -346,7 +346,7 @@ class ScannerService {
         await this.processEpisodeFile(filePath, library, finalShowTitle, showMetadata, i + 1, seasonEpisodeCache);
         count++;
       } catch (err: any) {
-        console.warn(`[Scanner] Could not process episode file ${filePath}:`, err.message);
+        logger.warn('SCANNER', `Could not process episode file ${filePath}: ${err?.message || err}`);
       }
     }
 
@@ -613,6 +613,7 @@ class ScannerService {
     return new Promise((resolve) => {
       ffmpeg.ffprobe(filePath, (err, metadata) => {
         if (err || !metadata) {
+          logger.error('SCANNER', `[PROBE] Failed to probe "${filePath}": ${err?.message || 'No metadata returned'}`);
           return resolve({
             durationSeconds: 0,
             resolution: '1080p',
@@ -630,11 +631,15 @@ class ScannerService {
         let videoCodec = 'unknown';
         let audioCodec = 'unknown';
         let resolution = '1080p';
+        let videoDurationSeconds = 0;
         const tracks: any[] = [];
 
         for (const s of streams) {
           if (s.codec_type === 'video' && videoCodec === 'unknown') {
             videoCodec = s.codec_name || 'h264';
+            if (s.duration) {
+              videoDurationSeconds = parseFloat(s.duration.toString());
+            }
             const width = s.width || 0;
             const height = s.height || 0;
             if (width >= 3800 || height >= 2000) resolution = '4K';
@@ -667,6 +672,12 @@ class ScannerService {
             });
           }
         }
+
+        if (videoDurationSeconds > 0 && Math.abs(durationSeconds - videoDurationSeconds) > 10) {
+          logger.warn('SCANNER', `[PROBE] Duration discrepancy detected for "${path.basename(filePath)}": format.duration=${durationSeconds.toFixed(1)}s vs videoStream.duration=${videoDurationSeconds.toFixed(1)}s (diff: ${Math.abs(durationSeconds - videoDurationSeconds).toFixed(1)}s)`);
+        }
+
+        logger.info('SCANNER', `[PROBE] "${path.basename(filePath)}": formatDur=${durationSeconds.toFixed(1)}s, res=${resolution}, video=${videoCodec}, audio=${audioCodec}, tracks=${tracks.length}`);
 
         resolve({
           durationSeconds,

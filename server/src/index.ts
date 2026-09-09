@@ -44,7 +44,14 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = Date.now() - start;
-    if (!req.path.startsWith('/stream/hls')) {
+    const isSegment = req.originalUrl.includes('/segment_') || req.originalUrl.includes('/init.mp4');
+    if (res.statusCode >= 500) {
+      logger.error('HTTP', `${req.method} ${req.originalUrl} -> ${res.statusCode} (${duration}ms)`);
+    } else if (res.statusCode >= 400) {
+      logger.warn('HTTP', `${req.method} ${req.originalUrl} -> ${res.statusCode} (${duration}ms)`);
+    } else if (isSegment) {
+      logger.debug('HTTP', `${req.method} ${req.originalUrl} -> ${res.statusCode} (${duration}ms)`);
+    } else {
       logger.info('HTTP', `${req.method} ${req.originalUrl} -> ${res.statusCode} (${duration}ms)`);
     }
   });

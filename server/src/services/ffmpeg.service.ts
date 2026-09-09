@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import { db } from '../config/db';
 import { MediaItem } from '../types';
 import { ProcessController } from '../utils/process_controller';
+import { logger } from './logger.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -63,12 +64,12 @@ class FFmpegService {
     if (!fs.existsSync(baseTempDir)) {
       try {
         fs.mkdirSync(baseTempDir, { recursive: true });
-        console.log(`[FFmpeg] ✅ Created RAM disk temp directory: ${baseTempDir}`);
-      } catch (e) {
-        console.warn(`[FFmpeg] ⚠️ RAM disk temp directory not found at ${baseTempDir}, using local fallback`);
+        logger.info('FFMPEG', `✅ Created RAM disk temp directory: ${baseTempDir}`);
+      } catch (e: any) {
+        logger.warn('FFMPEG', `⚠️ RAM disk temp directory not found at ${baseTempDir}, using local fallback: ${e.message}`);
       }
     } else {
-      console.log(`[FFmpeg] ✅ RAM disk validated: ${baseTempDir}`);
+      logger.info('FFMPEG', `✅ RAM disk validated: ${baseTempDir}`);
     }
   }
 
@@ -88,13 +89,18 @@ class FFmpegService {
     if (minToKeep <= session.startSegmentNumber) return;
 
     fs.promises.readdir(session.sessionDir).then(files => {
+      let purgedCount = 0;
       for (const file of files) {
         const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
         if (!match) continue;
         const idx = parseInt(match[1], 10);
         if (idx < minToKeep) {
           fs.promises.unlink(path.join(session.sessionDir, file)).catch(() => {});
+          purgedCount++;
         }
+      }
+      if (purgedCount > 0) {
+        logger.debug('HLS_CLEANUP', `Purged ${purgedCount} segments behind #${minToKeep} for session ${session.sessionId}`);
       }
     }).catch(() => {});
   }
@@ -106,7 +112,8 @@ class FFmpegService {
     session.isSuspended = true;
     const ok = await ProcessController.suspend(session.process.pid);
     if (ok) {
-      console.log(`[HLS Throttle] ⏸️ Suspended FFmpeg PID ${session.process.pid} (session ${session.sessionId}, ahead: ${session.latestSegmentIndex - session.lastRequestedSegmentIndex})`);
+      const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
+      logger.info('HLS_THROTTLE', `⏸️ Suspended FFmpeg PID ${session.process.pid} (session ${session.sessionId}, ahead: ${ahead} segments > ${WINDOW_AHEAD})`);
     } else {
       session.isSuspended = false;
     }
@@ -122,7 +129,7 @@ class FFmpegService {
     session.isSuspended = false;
     const ok = await ProcessController.resume(session.process.pid);
     if (ok) {
-      console.log(`[HLS Throttle] ▶️ Resumed FFmpeg PID ${session.process.pid} (session ${session.sessionId})`);
+      logger.info('HLS_THROTTLE', `▶️ Resumed FFmpeg PID ${session.process.pid} (session ${session.sessionId})`);
     }
   }
 
@@ -208,9 +215,10 @@ class FFmpegService {
       if (fs.existsSync(hlsSessionsDir)) {
         fs.rmSync(hlsSessionsDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
         fs.mkdirSync(hlsSessionsDir, { recursive: true });
+        logger.info('FFMPEG', `🧹 Cleaned up old HLS transcode sessions at ${hlsSessionsDir}`);
       }
-    } catch (e) {
-      console.warn('[FFmpeg] Initial cleanup notice:', e);
+    } catch (e: any) {
+      logger.warn('FFMPEG', `Initial cleanup notice: ${e.message}`);
     }
   }
 
@@ -222,6 +230,7 @@ class FFmpegService {
 
     if (preference !== 'auto' && preference !== 'cpu') {
       this.detectedEncoder = preference === 'nvenc' ? 'h264_nvenc' : preference === 'qsv' ? 'h264_qsv' : preference === 'amf' ? 'h264_amf' : 'libx264';
+      logger.info('FFMPEG', `Using user configured video encoder: ${this.detectedEncoder}`);
       return this.detectedEncoder;
     }
 
@@ -230,12 +239,13 @@ class FFmpegService {
       const works = await this.testEncoder(enc);
       if (works) {
         this.detectedEncoder = enc;
-        console.log(`[FFmpeg] Using video encoder: ${enc}`);
+        logger.info('FFMPEG', `Hardware encoder detected & verified: ${enc}`);
         return enc;
       }
     }
 
     this.detectedEncoder = 'libx264';
+    logger.info('FFMPEG', 'Fallback to software CPU video encoder: libx264');
     return this.detectedEncoder;
   }
 
@@ -262,6 +272,7 @@ class FFmpegService {
     // 1. Check if session creation is already in flight
     const inFlight = this.sessionCreationPromises.get(sessionId);
     if (inFlight) {
+      logger.debug('HLS', `Session creation in-flight for ${sessionId}, awaiting existing promise...`);
       return inFlight;
     }
 
@@ -278,11 +289,12 @@ class FFmpegService {
       const isWithinForwardWindow = !isSeekingBackward && cleanStartTime >= currentStart && cleanStartTime < currentStart + 90;
 
       if (isWithinForwardWindow) {
+        logger.debug('HLS', `Reusing existing session ${sessionId}: requested=${cleanStartTime}s is within window [${currentStart}s..${currentStart + 90}s]`);
         return { sessionId };
       }
 
       // Position changed (seek backward or far forward): gracefully retire existing session
-      console.log(`[Continuous HLS] 🔄 Restarting session ${sessionId} for seek to ${cleanStartTime}s (prev start was ${currentStart}s, latest was ${currentLatestTime}s)`);
+      logger.info('HLS', `🔄 Restarting session ${sessionId} for seek to ${cleanStartTime}s (prev start: ${currentStart}s, latest produced: ${currentLatestTime}s)`);
       this.retireSession(sessionId, existing);
     }
 
@@ -308,6 +320,7 @@ class FFmpegService {
     this.closingSessions.set(closingId, session);
     this.continuousSessions.delete(sessionId);
 
+    logger.info('HLS', `Retiring session ${sessionId}, terminating process PID ${session.process?.pid}`);
     await this.terminateProcess(session.process);
 
     // Give process 100ms to release file handles before purging and deleting folder
@@ -326,8 +339,8 @@ class FFmpegService {
       try {
         await fs.promises.stat(filePath);
         const elapsed = Date.now() - start;
-        if (elapsed > 2000) {
-          console.log(`[HDD] ⏳ External disk wakeup took ${elapsed}ms for ${path.basename(filePath)}`);
+        if (elapsed > 1500) {
+          logger.info('HDD', `⏳ External disk wakeup took ${elapsed}ms for ${path.basename(filePath)}`);
         }
         return;
       } catch {
@@ -414,8 +427,16 @@ class FFmpegService {
     const isOpusIn4kVp9 = is4kVp9 && trackAudioCodec.includes('opus');
     const canCopyAudio = (isApple ? isAppleNativeAudio : isPcNativeAudio) && !isOpusIn4kVp9;
 
+    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
+    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
+    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
+
     const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
-    console.log(`[Continuous HLS] 🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iPad' : 'PC/Android'}): Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), StartPos=${cleanStartTime}s`);
+    logger.info('HLS', `🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iOS' : 'PC/Android'}): ` +
+      `File="${path.basename(media.filePath)}" (DB Dur=${media.durationSeconds || 0}s), ` +
+      `Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), ` +
+      `Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), ` +
+      `StartPos=${cleanStartTime}s (seg #${Math.floor(cleanStartTime / 4)}), Container=${useFmp4 ? 'fMP4' : 'MPEG-TS'}`);
 
     if (canCopyVideo) {
       args.push('-c:v', 'copy');
@@ -462,10 +483,6 @@ class FFmpegService {
       '-start_number', Math.floor(cleanStartTime / 4).toString()
     );
 
-    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
-
     if (useFmp4) {
       args.push(
         '-hls_segment_type', 'fmp4',
@@ -483,6 +500,8 @@ class FFmpegService {
     }
 
     args.push(`${ffmpegSessionDir}/playlist.m3u8`);
+
+    logger.debug('FFMPEG_CMD', `[${sessionId}] ffmpeg ${args.join(' ')}`);
 
     const proc = spawn('ffmpeg', args, { windowsHide: true });
     const startNumber = Math.floor(cleanStartTime / 4);
@@ -507,12 +526,32 @@ class FFmpegService {
     this.continuousSessions.set(sessionId, sessionObj);
     this.startSegmentWatcher(sessionObj);
 
+    const lastStderrLines: string[] = [];
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      for (const line of lines) {
+        lastStderrLines.push(line);
+        if (lastStderrLines.length > 40) lastStderrLines.shift();
+        if (/error|failed|invalid|corrupt|cannot|non-monotonous/i.test(line)) {
+          logger.warn('FFMPEG_STDERR', `[${sessionId}] ${line}`);
+        }
+      }
+    });
+
     proc.on('error', (err) => {
-      console.error(`[Continuous HLS] session ${sessionId} error:`, err);
+      logger.error('HLS', `Session [${sessionId}] process spawn/runtime error:`, err);
     });
 
     proc.on('close', (code) => {
-      console.log(`[Continuous HLS] session ${sessionId} exited (code: ${code})`);
+      const elapsedSec = ((Date.now() - sessionObj._createdAt) / 1000).toFixed(1);
+      if (code === 0 || code === null) {
+        logger.info('HLS', `Session [${sessionId}] process exited cleanly (code: ${code}, active: ${elapsedSec}s)`);
+      } else {
+        logger.error('HLS', `Session [${sessionId}] process exited with error code ${code} (active: ${elapsedSec}s). Recent stderr:`, {
+          lastStderr: lastStderrLines.slice(-10)
+        });
+      }
     });
 
     // Wait until first segment is ready
@@ -531,11 +570,17 @@ class FFmpegService {
         const stats = await fs.promises.stat(firstSegPath);
         if (stats.size > 100) {
           sessionObj.isReady = true;
-          console.log(`[Continuous HLS] ⚡ Session ready in ${Date.now() - startWait}ms: ${sessionId}`);
+          logger.info('HLS', `⚡ Session ready [${sessionId}] first segment produced in ${Date.now() - startWait}ms (${(stats.size / 1024).toFixed(1)} KB)`);
           break;
         }
       } catch {}
       await new Promise(r => setTimeout(r, 20));
+    }
+
+    if (!sessionObj.isReady) {
+      logger.error('HLS', `⚠️ First segment wait timeout (>12s) for [${sessionId}]. Last stderr:`, {
+        lastStderr: lastStderrLines.slice(-10)
+      });
     }
 
     sessionObj.isReady = true;
@@ -583,6 +628,8 @@ class FFmpegService {
     }
 
     m3u8 += `#EXT-X-ENDLIST\n`;
+
+    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, startOffset=${startTime}s, type=${ext}`);
     return m3u8;
   }
 
@@ -626,6 +673,7 @@ class FFmpegService {
           }
         }
 
+        logger.debug('HLS', `⚡ Segment HIT [${sessionId}] ${segmentName} (${(fs.statSync(segPath).size / 1024).toFixed(1)} KB)`);
         return segPath;
       }
 
@@ -642,15 +690,18 @@ class FFmpegService {
       }
 
       // If segment is currently being produced forward by active FFmpeg (latestSegmentIndex <= segmentIndex <= latestSegmentIndex + 20), wait for it
-      // NOTE: FFmpeg only advances FORWARD. If segmentIndex < session.latestSegmentIndex and the segment file is missing,
-      // this is a SEEK BACKWARD — FFmpeg has already moved forward and deleted this old segment.
       if (segmentIndex >= session.latestSegmentIndex && segmentIndex <= session.latestSegmentIndex + 20) {
+        const waitStart = Date.now();
         const foundPath = await this.waitForSegment(session.sessionDir, segmentName, sessionId);
         if (foundPath) {
+          logger.info('HLS', `Segment READY [${sessionId}] ${segmentName} generated in ${Date.now() - waitStart}ms`);
           session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
           this.cleanupOldSegments(session, segmentIndex);
+          return foundPath;
+        } else {
+          logger.error('HLS', `Segment TIMEOUT [${sessionId}] ${segmentName} not ready after ${Date.now() - waitStart}ms (latest produced is seg_${session.latestSegmentIndex})`);
+          return null;
         }
-        return foundPath;
       }
 
       // If segment is in a closing session (recent transcode), reuse it
@@ -658,6 +709,7 @@ class FFmpegService {
         if (closing.mediaId !== media.id) continue;
         const closingPath = path.join(closing.sessionDir, segmentName);
         if (fs.existsSync(closingPath) && fs.statSync(closingPath).size > 100) {
+          logger.info('HLS', `Reusing segment [${sessionId}] ${segmentName} from recent closing session`);
           return closingPath;
         }
       }
@@ -671,7 +723,7 @@ class FFmpegService {
       const quality = qualityMatch ? qualityMatch[1] : 'original';
       const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
 
-      console.log(`[JIT HLS] ⚡ Seek (backward/out-of-window) session ${sessionId} to ${targetStartTime}s for segment ${segmentIndex}`);
+      logger.info('HLS', `⚡ Seek detected [${sessionId}] to segment #${segmentIndex} (${targetStartTime}s). Active window latest is #${session.latestSegmentIndex}. Re-starting session at ${targetStartTime}s`);
       await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
 
       const activeSession = this.continuousSessions.get(sessionId);
@@ -679,13 +731,14 @@ class FFmpegService {
         return this.waitForSegment(activeSession.sessionDir, segmentName, sessionId);
       }
 
+      logger.error('HLS', `Failed to start active session for seek to segment #${segmentIndex} on ${sessionId}`);
       return null;
     }
 
     // 3. Strict Anti-Ghosting Rule:
     // If NO session exists and this is a segment request (not init.mp4), return NULL (404).
-    // This stops tablet background loops from spawning ghost FFmpeg sessions!
     if (!isInit) {
+      logger.warn('HLS', `Anti-ghosting: rejecting segment ${segmentName} for non-existent session ${sessionId} (404)`);
       return null;
     }
 
@@ -695,7 +748,7 @@ class FFmpegService {
   public killSession(sessionId: string): void {
     const session = this.continuousSessions.get(sessionId);
     if (session) {
-      console.log(`[Continuous HLS] 🛑 Kill requested for session: ${sessionId}`);
+      logger.info('HLS', `🛑 Kill requested for session: ${sessionId}`);
       this.retireSession(sessionId, session);
     }
   }
@@ -703,7 +756,7 @@ class FFmpegService {
   public killSessionsForRoom(roomId: string): void {
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (sId.includes(`_r${roomId}`)) {
-        console.log(`[Continuous HLS] 🧹 Cleaning up session for empty room ${roomId}: ${sId}`);
+        logger.info('HLS', `🧹 Cleaning up session for empty room ${roomId}: ${sId}`);
         this.killSession(sId);
       }
     }
@@ -713,7 +766,7 @@ class FFmpegService {
     const userClean = userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (sId.includes(`_r${roomId}`) && sId.includes(`_u${userClean}`)) {
-        console.log(`[Continuous HLS] 🛑 Killing room session for departed user ${userId}: ${sId}`);
+        logger.info('HLS', `🛑 Killing room session for departed user ${userId}: ${sId}`);
         this.killSession(sId);
       }
     }
@@ -722,7 +775,7 @@ class FFmpegService {
   public killSoloSessionsForMedia(mediaId: string): void {
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (session.mediaId === mediaId && !sId.includes('_r')) {
-        console.log(`[Continuous HLS] 🛑 Killing solo session for media ${mediaId}: ${sId}`);
+        logger.info('HLS', `🛑 Killing solo session for media ${mediaId}: ${sId}`);
         this.killSession(sId);
       }
     }
@@ -779,7 +832,7 @@ class FFmpegService {
       // 1. Terminate inactive sessions (>30s without segment requests)
       for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
         if (now - session.lastAccess > 30000) {
-          console.log(`[Continuous HLS] ⏱️ Inactive session timeout (>30s) for ${sessionId}, terminating process...`);
+          logger.info('HLS', `⏱️ Inactive session timeout (>30s) for ${sessionId}, terminating process...`);
           this.retireSession(sessionId, session);
         }
       }
@@ -805,7 +858,7 @@ class FFmpegService {
             if (match) {
               const pid = parseInt(match[1], 10);
               if (pid && !activePids.has(pid)) {
-                console.log(`[FFmpeg Sweeper] 🧹 Terminating zombie FFmpeg PID ${pid}`);
+                logger.info('SWEEPER', `🧹 Terminating zombie FFmpeg PID ${pid}`);
                 ProcessController.kill(pid).catch(() => {});
               }
             }
