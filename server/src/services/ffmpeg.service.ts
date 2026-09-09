@@ -972,10 +972,11 @@ class FFmpegService {
 
       const now = Date.now();
 
-      // 1. Terminate inactive sessions (>30s without segment requests)
+      // 1. Terminate inactive sessions (>10 minutes without segment requests)
+      const INACTIVE_SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (600,000 ms)
       for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
-        if (now - session.lastAccess > 30000) {
-          logger.info('HLS', `⏱️ Inactive session timeout (>30s) for ${sessionId}, terminating process...`);
+        if (now - session.lastAccess > INACTIVE_SESSION_TIMEOUT_MS) {
+          logger.info('HLS', `⏱️ Inactive session timeout (>10m) for ${sessionId}, terminating process...`);
           this.retireSession(sessionId, session);
         }
       }
