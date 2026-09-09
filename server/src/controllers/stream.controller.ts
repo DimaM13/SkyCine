@@ -458,7 +458,8 @@ export class StreamController {
       ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
 
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
-      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT);
+      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple);
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, segDuration);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');
@@ -485,8 +486,12 @@ export class StreamController {
         return;
       }
 
+      const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
+      const quality = qualityMatch ? qualityMatch[1] : 'original';
+      const isApple = sessionId.includes('_apple');
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
-      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT);
+      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple);
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, segDuration);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');

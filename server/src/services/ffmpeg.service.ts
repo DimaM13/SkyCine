@@ -19,6 +19,7 @@ export interface ContinuousHlsSession {
   audioIndex: number;
   startTime: number;
   startSegmentNumber: number;
+  segmentDuration: number;
   isReady: boolean;
   latestSegmentIndex: number;
   lastRequestedSegmentIndex: number;
@@ -45,7 +46,78 @@ class FFmpegService {
   private closingSessions: Map<string, ContinuousHlsSession> = new Map();
   private sessionCreationPromises: Map<string, Promise<{ sessionId: string }>> = new Map();
   private restartDebounceMap: Map<string, number> = new Map();
+  private segmentDurationCache: Map<string, number> = new Map();
   private detectedEncoder: string | null = null;
+
+  public async getSegmentDuration(media: MediaItem, quality: string = 'original', isApple: boolean = false): Promise<number> {
+    const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
+    const is4k = media.resolution === '4K';
+    const is4kVp9 = isVp9OrVp8 && is4k;
+    const isApple4kVp9 = isApple && is4kVp9;
+
+    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    const isSupportedCodec = isApple
+      ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
+      : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
+    const canCopyVideo = quality === 'original' && isSupportedCodec;
+
+    if (!canCopyVideo) {
+      return 4.0;
+    }
+
+    if (this.segmentDurationCache.has(media.id)) {
+      return this.segmentDurationCache.get(media.id)!;
+    }
+
+    try {
+      const res = await new Promise<string>((resolve) => {
+        const proc = spawn('ffprobe', [
+          '-v', 'error',
+          '-select_streams', 'v:0',
+          '-show_entries', 'packet=pts_time,flags',
+          '-of', 'csv=p=0',
+          '-read_intervals', '%+20',
+          media.filePath
+        ], { windowsHide: true });
+
+        let stdout = '';
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.on('close', () => resolve(stdout));
+        proc.on('error', () => resolve(''));
+        setTimeout(() => {
+          try { proc.kill(); } catch {}
+          resolve(stdout);
+        }, 3000);
+      });
+
+      const keyframes = res.split('\n')
+        .filter(l => l.includes(',K'))
+        .map(l => parseFloat(l.split(',')[0]))
+        .filter(n => !isNaN(n));
+
+      if (keyframes.length >= 2) {
+        const diff = Math.abs(keyframes[1] - keyframes[0]);
+        if (diff >= 3.5 && diff <= 15) {
+          const duration = Math.round(diff * 100) / 100;
+          this.segmentDurationCache.set(media.id, duration);
+          logger.info('HLS', `Detected GOP interval for ${media.title || media.id}: ${duration}s`);
+          return duration;
+        } else if (diff > 0.5 && diff < 3.5) {
+          const factor = Math.ceil(4.0 / diff);
+          const duration = Math.round(diff * factor * 100) / 100;
+          this.segmentDurationCache.set(media.id, duration);
+          logger.info('HLS', `Detected frequent GOP (${diff}s), normalized segment duration for ${media.title || media.id}: ${duration}s`);
+          return duration;
+        }
+      }
+    } catch (e: any) {
+      logger.warn('HLS', `Failed to probe keyframe interval for ${media.id}: ${e?.message || e}`);
+    }
+
+    this.segmentDurationCache.set(media.id, 4.0);
+    return 4.0;
+  }
 
   constructor() {
     this.validateRamDisk();
@@ -265,6 +337,7 @@ class FFmpegService {
     isApple: boolean = false,
     sessionIdOverride?: string
   ): Promise<{ sessionId: string }> {
+    const segDuration = await this.getSegmentDuration(media, quality, isApple);
     const cleanStartTime = Math.max(0, Math.floor(startTime));
     const deviceSuffix = isApple ? 'apple' : 'pc';
     const sessionId = sessionIdOverride || `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
@@ -281,15 +354,16 @@ class FFmpegService {
     if (existing && existing.process && !existing.process.killed) {
       existing.lastAccess = Date.now();
       const currentStart = existing.startTime;
-      const currentLatestTime = existing.latestSegmentIndex * 4;
+      const currentLatestTime = existing.latestSegmentIndex * segDuration;
 
-      // When seeking BACKWARD (cleanStartTime < currentStart or cleanStartTime < currentLatestTime - 4) OR out of forward range,
+      // When seeking BACKWARD (cleanStartTime < currentStart or cleanStartTime < currentLatestTime - segDuration) OR out of forward range,
       // restart FFmpeg immediately to eliminate any lag or hangs!
-      const isSeekingBackward = cleanStartTime < currentStart || cleanStartTime < currentLatestTime - 4;
-      const isWithinForwardWindow = !isSeekingBackward && cleanStartTime >= currentStart && cleanStartTime < currentStart + 90;
+      const isSeekingBackward = cleanStartTime < currentStart || cleanStartTime < currentLatestTime - segDuration;
+      const forwardLimit = currentStart + (WINDOW_AHEAD * segDuration);
+      const isWithinForwardWindow = !isSeekingBackward && cleanStartTime >= currentStart && cleanStartTime <= forwardLimit;
 
       if (isWithinForwardWindow) {
-        logger.debug('HLS', `Reusing existing session ${sessionId}: requested=${cleanStartTime}s is within window [${currentStart}s..${currentStart + 90}s]`);
+        logger.debug('HLS', `Reusing existing session ${sessionId}: requested=${cleanStartTime}s is within window [${currentStart}s..${forwardLimit}s]`);
         return { sessionId };
       }
 
@@ -298,7 +372,7 @@ class FFmpegService {
       this.retireSession(sessionId, existing);
     }
 
-    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix);
+    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration);
     this.sessionCreationPromises.set(sessionId, promise);
 
     try {
@@ -356,7 +430,8 @@ class FFmpegService {
     cleanStartTime: number,
     isApple: boolean,
     sessionId: string,
-    deviceSuffix: string
+    deviceSuffix: string,
+    segDuration: number
   ): Promise<{ sessionId: string }> {
     await this.warmupFile(media.filePath);
 
@@ -371,6 +446,9 @@ class FFmpegService {
     const ffmpegSessionDir = sessionDir.replace(/\\/g, '/');
     const encoder = await this.detectHardwareEncoder();
 
+    const startNumber = Math.floor(cleanStartTime / segDuration);
+    const alignedStartTime = startNumber * segDuration;
+
     const args: string[] = [
       '-loglevel', 'error',
       '-err_detect', 'ignore_err',
@@ -381,7 +459,7 @@ class FFmpegService {
     if (cleanStartTime === 0) {
       args.push('-noaccurate_seek', '-ss', '0');
     } else {
-      args.push('-noaccurate_seek', '-ss', cleanStartTime.toString(), '-copyts');
+      args.push('-noaccurate_seek', '-ss', alignedStartTime.toString(), '-copyts');
     }
     args.push('-i', media.filePath);
 
@@ -436,7 +514,7 @@ class FFmpegService {
       `File="${path.basename(media.filePath)}" (DB Dur=${media.durationSeconds || 0}s), ` +
       `Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), ` +
       `Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), ` +
-      `StartPos=${cleanStartTime}s (seg #${Math.floor(cleanStartTime / 4)}), Container=${useFmp4 ? 'fMP4' : 'MPEG-TS'}`);
+      `StartPos=${cleanStartTime}s (seg #${startNumber}, ${alignedStartTime}s), segDuration=${segDuration}s, Container=${useFmp4 ? 'fMP4' : 'MPEG-TS'}`);
 
     if (canCopyVideo) {
       args.push('-c:v', 'copy');
@@ -476,11 +554,11 @@ class FFmpegService {
       '-muxpreload', '0',
       ...(cleanStartTime > 0 ? ['-avoid_negative_ts', 'disabled'] : ['-avoid_negative_ts', 'make_zero']),
       '-f', 'hls',
-      '-hls_time', '4',
+      '-hls_time', segDuration.toString(),
       '-hls_list_size', '0',
       '-hls_playlist_type', 'event',
       '-hls_flags', 'independent_segments+temp_file',
-      '-start_number', Math.floor(cleanStartTime / 4).toString()
+      '-start_number', startNumber.toString()
     );
 
     if (useFmp4) {
@@ -504,7 +582,6 @@ class FFmpegService {
     logger.debug('FFMPEG_CMD', `[${sessionId}] ffmpeg ${args.join(' ')}`);
 
     const proc = spawn('ffmpeg', args, { windowsHide: true });
-    const startNumber = Math.floor(cleanStartTime / 4);
 
     const sessionObj: ContinuousHlsSession = {
       sessionId,
@@ -516,6 +593,7 @@ class FFmpegService {
       audioIndex,
       startTime: cleanStartTime,
       startSegmentNumber: startNumber,
+      segmentDuration: segDuration,
       isReady: false,
       latestSegmentIndex: startNumber,
       lastRequestedSegmentIndex: startNumber,
@@ -545,8 +623,8 @@ class FFmpegService {
 
     proc.on('close', (code) => {
       const elapsedSec = ((Date.now() - sessionObj._createdAt) / 1000).toFixed(1);
-      if (code === 0 || code === null) {
-        logger.info('HLS', `Session [${sessionId}] process exited cleanly (code: ${code}, active: ${elapsedSec}s)`);
+      if (code === 0 || code === null || code === 4294967295 || proc.killed) {
+        logger.info('HLS', `Session [${sessionId}] process exited cleanly or retired (code: ${code}, active: ${elapsedSec}s)`);
       } else {
         logger.error('HLS', `Session [${sessionId}] process exited with error code ${code} (active: ${elapsedSec}s). Recent stderr:`, {
           lastStderr: lastStderrLines.slice(-10)
@@ -591,10 +669,10 @@ class FFmpegService {
     return this.continuousSessions.has(sessionId) || this.closingSessions.has(sessionId);
   }
 
-  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0): string {
+  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0, segDuration: number = 4): string {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
-    const segmentDuration = 4;
-    const totalSegments = Math.ceil(duration / segmentDuration);
+    const segmentDuration = segDuration && segDuration > 0 ? segDuration : 4;
+    const totalSegments = Math.max(1, Math.round(duration / segmentDuration));
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
@@ -609,7 +687,7 @@ class FFmpegService {
     let m3u8 = `#EXTM3U\n`;
     m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
     m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
-    m3u8 += `#EXT-X-TARGETDURATION:${segmentDuration}\n`;
+    m3u8 += `#EXT-X-TARGETDURATION:${Math.ceil(segmentDuration)}\n`;
     m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
 
@@ -629,7 +707,7 @@ class FFmpegService {
 
     m3u8 += `#EXT-X-ENDLIST\n`;
 
-    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, startOffset=${startTime}s, type=${ext}`);
+    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, segDuration=${segmentDuration}s, startOffset=${startTime}s, type=${ext}`);
     return m3u8;
   }
 
@@ -650,6 +728,14 @@ class FFmpegService {
     }
 
     let session = this.continuousSessions.get(sessionId);
+    const segDuration = session?.segmentDuration || 4;
+
+    // Reject segments past the end of the media duration immediately (zero timeout)
+    const totalSegments = Math.max(1, Math.round((media.durationSeconds || 7200) / segDuration));
+    if (!isInit && segmentIndex >= totalSegments) {
+      logger.debug('HLS', `Rejecting segment beyond duration [${sessionId}] seg_${segmentIndex} >= ${totalSegments}`);
+      return null;
+    }
 
     // 2. If session exists, deliver segment or resume
     if (session) {
@@ -716,7 +802,7 @@ class FFmpegService {
 
       // Handle seeking (backward or far forward): The requested segment is outside the active session's window.
       // Immediately start a fresh session at the requested segment's timestamp!
-      const targetStartTime = segmentIndex * 4;
+      const targetStartTime = segmentIndex * segDuration;
       const isApple = sessionId.includes('_apple');
       const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
       const audioMatch = sessionId.match(/_a(\d+)_/);
