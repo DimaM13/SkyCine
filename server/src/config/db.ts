@@ -73,6 +73,7 @@ export function initDatabase() {
       seasonNumber INTEGER,
       episodeNumber INTEGER,
       streamDetails TEXT,
+      segmentDuration REAL,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -153,6 +154,10 @@ export function initDatabase() {
 
   try {
     db.exec('ALTER TABLE media_items ADD COLUMN stillPath TEXT;');
+  } catch (e) {}
+
+  try {
+    db.exec('ALTER TABLE media_items ADD COLUMN segmentDuration REAL;');
   } catch (e) {}
 
   try {

@@ -70,6 +70,20 @@ class FFmpegService {
       return this.segmentDurationCache.get(media.id)!;
     }
 
+    // 1. Check if already stored in database
+    if (media.segmentDuration && media.segmentDuration > 0) {
+      this.segmentDurationCache.set(media.id, media.segmentDuration);
+      return media.segmentDuration;
+    }
+
+    try {
+      const row = db.prepare('SELECT segmentDuration FROM media_items WHERE id = ?').get(media.id) as { segmentDuration?: number } | undefined;
+      if (row?.segmentDuration && row.segmentDuration > 0) {
+        this.segmentDurationCache.set(media.id, row.segmentDuration);
+        return row.segmentDuration;
+      }
+    } catch {}
+
     try {
       const res = await new Promise<string>((resolve) => {
         const proc = spawn('ffprobe', [
@@ -101,13 +115,19 @@ class FFmpegService {
         if (diff >= 3.5 && diff <= 15) {
           const duration = Math.round(diff * 100) / 100;
           this.segmentDurationCache.set(media.id, duration);
-          logger.info('HLS', `Detected GOP interval for ${media.title || media.id}: ${duration}s`);
+          try {
+            db.prepare('UPDATE media_items SET segmentDuration = ? WHERE id = ?').run(duration, media.id);
+          } catch {}
+          logger.info('HLS', `Detected GOP interval for ${media.title || media.id}: ${duration}s (saved to database)`);
           return duration;
         } else if (diff > 0.5 && diff < 3.5) {
           const factor = Math.ceil(4.0 / diff);
           const duration = Math.round(diff * factor * 100) / 100;
           this.segmentDurationCache.set(media.id, duration);
-          logger.info('HLS', `Detected frequent GOP (${diff}s), normalized segment duration for ${media.title || media.id}: ${duration}s`);
+          try {
+            db.prepare('UPDATE media_items SET segmentDuration = ? WHERE id = ?').run(duration, media.id);
+          } catch {}
+          logger.info('HLS', `Detected frequent GOP (${diff}s), normalized segment duration for ${media.title || media.id}: ${duration}s (saved to database)`);
           return duration;
         }
       }
@@ -116,6 +136,9 @@ class FFmpegService {
     }
 
     this.segmentDurationCache.set(media.id, 4.0);
+    try {
+      db.prepare('UPDATE media_items SET segmentDuration = ? WHERE id = ?').run(4.0, media.id);
+    } catch {}
     return 4.0;
   }
 

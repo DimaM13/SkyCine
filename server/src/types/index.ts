@@ -71,6 +71,7 @@ export interface MediaItem {
   seasonNumber?: number;
   episodeNumber?: number;
   streamDetails?: any;
+  segmentDuration?: number;
   createdAt: string;
   updatedAt: string;
   tracks?: MediaTrack[];

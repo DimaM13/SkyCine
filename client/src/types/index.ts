@@ -77,6 +77,7 @@ export interface MediaItem {
   episodeNumber?: number;
   userProgress?: number;
   userCompleted?: number;
+  segmentDuration?: number;
   tracks?: MediaTrack[];
 }
 

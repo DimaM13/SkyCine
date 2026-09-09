@@ -52,9 +52,15 @@ class LoggerService {
   }
 
   private writeStartupBanner() {
+    let version = '6.3.0';
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'));
+      if (pkg.version) version = pkg.version;
+    } catch {}
+
     const banner = [
       '================================================================================',
-      `🎬 SkyCine Cinema Server v6.2.0 - Session Log`,
+      `🎬 SkyCine Cinema Server v${version} - Session Log`,
       `Session Started: ${this.formatTimestamp(this.startTime)}`,
       `Node.js: ${process.version} | OS: ${os.type()} ${os.release()} (${os.arch()}) | PID: ${process.pid}`,
       `Session File:   ${path.basename(this.sessionLogFile)}`,
