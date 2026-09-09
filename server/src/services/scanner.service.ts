@@ -635,10 +635,26 @@ class ScannerService {
         const tracks: any[] = [];
 
         for (const s of streams) {
-          if (s.codec_type === 'video' && videoCodec === 'unknown') {
+          if (s.codec_type === 'video' && s.disposition?.attached_pic !== 1 && videoCodec === 'unknown') {
             videoCodec = s.codec_name || 'h264';
             if (s.duration) {
               videoDurationSeconds = parseFloat(s.duration.toString());
+            } else if (s.tags) {
+              for (const [k, v] of Object.entries(s.tags)) {
+                if (k.toUpperCase().startsWith('DURATION') && typeof v === 'string') {
+                  const match = v.match(/^(\d+):(\d+):(\d+(?:\.\d+)?)/);
+                  if (match) {
+                    const hours = parseFloat(match[1]);
+                    const minutes = parseFloat(match[2]);
+                    const seconds = parseFloat(match[3]);
+                    const totalSec = hours * 3600 + minutes * 60 + seconds;
+                    if (totalSec > 0) {
+                      videoDurationSeconds = totalSec;
+                      break;
+                    }
+                  }
+                }
+              }
             }
             const width = s.width || 0;
             const height = s.height || 0;
@@ -673,14 +689,23 @@ class ScannerService {
           }
         }
 
-        if (videoDurationSeconds > 0 && Math.abs(durationSeconds - videoDurationSeconds) > 10) {
-          logger.warn('SCANNER', `[PROBE] Duration discrepancy detected for "${path.basename(filePath)}": format.duration=${durationSeconds.toFixed(1)}s vs videoStream.duration=${videoDurationSeconds.toFixed(1)}s (diff: ${Math.abs(durationSeconds - videoDurationSeconds).toFixed(1)}s)`);
+        let effectiveDuration = durationSeconds;
+        if (videoDurationSeconds > 0) {
+          if (durationSeconds > 0) {
+            effectiveDuration = Math.min(videoDurationSeconds, durationSeconds);
+          } else {
+            effectiveDuration = videoDurationSeconds;
+          }
         }
 
-        logger.info('SCANNER', `[PROBE] "${path.basename(filePath)}": formatDur=${durationSeconds.toFixed(1)}s, res=${resolution}, video=${videoCodec}, audio=${audioCodec}, tracks=${tracks.length}`);
+        if (videoDurationSeconds > 0 && Math.abs(durationSeconds - videoDurationSeconds) > 5) {
+          logger.warn('SCANNER', `[PROBE] Duration discrepancy corrected for "${path.basename(filePath)}": format.duration=${durationSeconds.toFixed(1)}s vs videoStream.duration=${videoDurationSeconds.toFixed(1)}s -> using ${effectiveDuration.toFixed(1)}s`);
+        }
+
+        logger.info('SCANNER', `[PROBE] "${path.basename(filePath)}": dur=${effectiveDuration.toFixed(1)}s, res=${resolution}, video=${videoCodec}, audio=${audioCodec}, tracks=${tracks.length}`);
 
         resolve({
-          durationSeconds,
+          durationSeconds: effectiveDuration,
           resolution,
           videoCodec,
           audioCodec,
