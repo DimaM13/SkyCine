@@ -56,11 +56,22 @@ export const DirectPlayerPage: React.FC = () => {
   const queryParams = new URLSearchParams(location.search);
   const startParam = queryParams.get('start');
 
+  const dur = media?.durationSeconds || 0;
   let initialPosition = 0;
   if (startParam !== null) {
-    initialPosition = parseFloat(startParam) || 0;
-  } else if ((media as any).userProgress && (media as any).userProgress > 15) {
-    initialPosition = (media as any).userProgress;
+    initialPosition = Math.max(0, parseFloat(startParam) || 0);
+  } else if ((media as any).userProgress && (media as any).userProgress > 5) {
+    const progress = (media as any).userProgress;
+    const isCompleted = (media as any).userCompleted;
+    // Only resume if progress is within video bounds and not marked completed
+    if (!isCompleted && (dur === 0 || progress < dur - 10)) {
+      initialPosition = progress;
+    }
+  }
+
+  // Ensure initialPosition never exceeds video duration
+  if (dur > 0 && initialPosition >= dur - 2) {
+    initialPosition = 0;
   }
 
   const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);

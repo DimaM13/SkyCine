@@ -54,8 +54,12 @@ export const MoviesPage: React.FC = () => {
     fetchMovies();
   };
 
-  const handlePlayDirect = (media: MediaItem) => {
-    navigate(`/watch/${media.id}`);
+  const handlePlayDirect = (media: MediaItem, startPos?: number) => {
+    if (startPos !== undefined && startPos >= 0) {
+      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`);
+    } else {
+      navigate(`/watch/${media.id}`);
+    }
   };
 
   const handleCreateRoom = async (media: MediaItem) => {

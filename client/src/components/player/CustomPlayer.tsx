@@ -76,6 +76,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const effectiveDuration = (media.durationSeconds && media.durationSeconds > 0)
     ? media.durationSeconds
     : (duration > 0 ? duration : 0);
+  const currentTimeRef = useRef<number>(initialPosition || 0);
+  const effectiveDurationRef = useRef<number>(effectiveDuration);
+  useEffect(() => {
+    effectiveDurationRef.current = effectiveDuration;
+  }, [effectiveDuration]);
   const [bufferedTime, setBufferedTime] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
@@ -442,9 +447,37 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   useEffect(() => {
     const endSession = () => {
       const { mediaId, quality, audioIndex, isApple, isDirectPlay } = streamInfoRef.current;
+      const currentPos = currentTimeRef.current;
+      const dur = effectiveDurationRef.current || media.durationSeconds || 0;
+      const token = localStorage.getItem('myplex_token');
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+
+      // Save watch progress on exit / pagehide / beforeunload
+      if (mediaId && currentPos >= 2 && dur > 0) {
+        const progressPayload = JSON.stringify({
+          mediaItemId: mediaId,
+          progressSeconds: Math.floor(currentPos),
+          durationSeconds: Math.floor(dur)
+        });
+
+        try {
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon(`/api/media/progress${tokenParam}`, new Blob([progressPayload], { type: 'application/json' }));
+          }
+        } catch (e) {}
+
+        fetch(`/api/media/progress${tokenParam}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
+          body: progressPayload,
+          keepalive: true
+        }).catch(() => {});
+      }
+
       if (!isDirectPlay && !isWatchTogether) {
-        const token = localStorage.getItem('myplex_token');
-        const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
         const payload = JSON.stringify({ mediaId, quality, audioIndex, isApple });
 
         try {
@@ -559,7 +592,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (!isDesktop && !videoRef.current) return;
     if (isDesktop && hasLoadedDesktopRef.current === media.id) return;
 
-    const startPos = Math.max(0, initialPosition || 0);
+    const dur = media.durationSeconds || 0;
+    let startPos = Math.max(0, initialPosition || 0);
+    if (dur > 0 && startPos >= dur - 2) {
+      startPos = 0;
+    }
     const shouldStartPlay = isWatchTogether ? (roomState === 'PLAYING') : true;
 
     setCurrentTime(startPos);
@@ -646,6 +683,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
 
     const totalPos = video.currentTime || 0;
+    currentTimeRef.current = totalPos;
     if (!isScrubbing && !video.seeking) {
       setCurrentTime(totalPos);
     }
@@ -660,26 +698,35 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
   };
 
-  // Watch Progress Reporting
-  const reportProgress = useCallback(() => {
-    if (!media?.id) return;
-    const pos = currentTime;
-    const dur = effectiveDuration;
+  const lastReportedPosRef = useRef<number>(-1);
 
-    if (pos > 5 && dur > 0) {
+  // Watch Progress Reporting (stable callback - reads refs, doesn't re-create every frame)
+  const reportProgress = useCallback((overridePos?: number) => {
+    if (!media?.id) return;
+    const video = videoRef.current;
+    const pos = overridePos !== undefined
+      ? overridePos
+      : (isDesktop ? ((window as any).desktopPlayer?.getCurrentTime?.() || currentTimeRef.current) : (video?.currentTime ?? currentTimeRef.current));
+    const dur = effectiveDurationRef.current || media.durationSeconds || video?.duration || 0;
+
+    if (pos >= 2 && dur > 0) {
+      if (overridePos === undefined && Math.abs(pos - lastReportedPosRef.current) < 1) {
+        return;
+      }
+      lastReportedPosRef.current = pos;
       apiClient.post('/media/progress', {
         mediaItemId: media.id,
         progressSeconds: Math.floor(pos),
         durationSeconds: Math.floor(dur)
       }).catch(() => {});
     }
-  }, [media.id, effectiveDuration, currentTime]);
+  }, [media?.id, media?.durationSeconds, isDesktop, videoRef]);
 
   useEffect(() => {
     if (!isPlaying) return;
     const timer = setInterval(() => {
       reportProgress();
-    }, 6000);
+    }, 5000);
     return () => clearInterval(timer);
   }, [isPlaying, reportProgress]);
 
@@ -740,6 +787,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
 
     const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
+    currentTimeRef.current = safePos;
     setCurrentTime(safePos);
     setScrubTime(safePos);
     setIsScrubbing(false);
@@ -748,6 +796,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       onSeekRequest?.(safePos);
     } else {
       doSeek(safePos);
+      reportProgress(safePos);
     }
   };
 
@@ -858,8 +907,17 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             if (videoRef.current) setIsPlaying(!videoRef.current.paused);
           }}
           onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
-          onEnded={() => setIsPlaying(false)}
+          onPause={() => {
+            setIsPlaying(false);
+            reportProgress();
+          }}
+          onEnded={() => {
+            setIsPlaying(false);
+            const dur = effectiveDurationRef.current || media.durationSeconds || 0;
+            if (dur > 0) {
+              reportProgress(dur);
+            }
+          }}
           onClick={togglePlay}
           className="w-full h-full object-contain cursor-pointer focus:outline-none"
           playsInline
@@ -916,6 +974,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           {onBack && (
             <button
               onClick={() => {
+                reportProgress();
                 if (isDesktop) {
                   (window as any).desktopPlayer?.closePlayer();
                 }
