@@ -143,7 +143,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (is4kVp9 && rawAudioCodec.includes('opus')) return false;
 
     if (isAppleDevice) {
-      const isNativeAppleAudio = ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'alac'].some(c => rawAudioCodec.includes(c));
+      const isNativeAppleAudio = ['aac', 'mp3', 'ac3', 'eac3', 'alac'].some(c => rawAudioCodec.includes(c));
       const isNativeAppleVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(rawVideoCodec);
       return isNativeAppleAudio && isNativeAppleVideo;
     } else {
@@ -181,7 +181,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const isAudioTrans = !isDirectPlay && (
       isOpusIn4kVp9 || (
         isAppleDevice
-          ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
+          ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC'].some(c => rawAudioCodec.includes(c))
           : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
       )
     );
