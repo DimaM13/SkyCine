@@ -42,6 +42,14 @@ class FFmpegService {
     if (pid) this.activeDirectPids.delete(pid);
   }
 
+  public static knownSpawnedPids = new Map<number, number>(); // pid -> spawnTimeMs
+  public static registerSpawnedPid(pid?: number) {
+    if (pid) this.knownSpawnedPids.set(pid, Date.now());
+  }
+  public static unregisterSpawnedPid(pid?: number) {
+    if (pid) this.knownSpawnedPids.delete(pid);
+  }
+
   private continuousSessions: Map<string, ContinuousHlsSession> = new Map();
   private closingSessions: Map<string, ContinuousHlsSession> = new Map();
   private sessionCreationPromises: Map<string, Promise<{ sessionId: string }>> = new Map();
@@ -347,8 +355,15 @@ class FFmpegService {
   private testEncoder(encoderName: string): Promise<boolean> {
     return new Promise((resolve) => {
       const proc = spawn('ffmpeg', ['-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.1', '-c:v', encoderName, '-f', 'null', '-']);
-      proc.on('close', (code) => resolve(code === 0));
-      proc.on('error', () => resolve(false));
+      FFmpegService.registerSpawnedPid(proc.pid);
+      proc.on('close', (code) => {
+        FFmpegService.unregisterSpawnedPid(proc.pid);
+        resolve(code === 0);
+      });
+      proc.on('error', () => {
+        FFmpegService.unregisterSpawnedPid(proc.pid);
+        resolve(false);
+      });
     });
   }
 
@@ -454,7 +469,8 @@ class FFmpegService {
     isApple: boolean,
     sessionId: string,
     deviceSuffix: string,
-    segDuration: number
+    segDuration: number,
+    isRetry: boolean = false
   ): Promise<{ sessionId: string }> {
     await this.warmupFile(media.filePath);
 
@@ -605,6 +621,7 @@ class FFmpegService {
     logger.debug('FFMPEG_CMD', `[${sessionId}] ffmpeg ${args.join(' ')}`);
 
     const proc = spawn('ffmpeg', args, { windowsHide: true });
+    FFmpegService.registerSpawnedPid(proc.pid);
 
     const sessionObj: ContinuousHlsSession = {
       sessionId,
@@ -641,10 +658,12 @@ class FFmpegService {
     });
 
     proc.on('error', (err) => {
+      FFmpegService.unregisterSpawnedPid(proc.pid);
       logger.error('HLS', `Session [${sessionId}] process spawn/runtime error:`, err);
     });
 
     proc.on('close', (code) => {
+      FFmpegService.unregisterSpawnedPid(proc.pid);
       const elapsedSec = ((Date.now() - sessionObj._createdAt) / 1000).toFixed(1);
       if (code === 0 || code === null || code === 4294967295 || proc.killed) {
         logger.info('HLS', `Session [${sessionId}] process exited cleanly or retired (code: ${code}, active: ${elapsedSec}s)`);
@@ -665,7 +684,9 @@ class FFmpegService {
     const startWait = Date.now();
 
     while (Date.now() - startWait < maxWaitMs) {
-      if (proc.killed || !this.continuousSessions.has(sessionId)) break;
+      if (proc.killed || proc.exitCode !== null || proc.signalCode !== null || !this.continuousSessions.has(sessionId)) {
+        break;
+      }
 
       try {
         const stats = await fs.promises.stat(firstSegPath);
@@ -679,9 +700,17 @@ class FFmpegService {
     }
 
     if (!sessionObj.isReady) {
-      logger.error('HLS', `⚠️ First segment wait timeout (>12s) for [${sessionId}]. Last stderr:`, {
+      const isDead = proc.killed || proc.exitCode !== null || proc.signalCode !== null;
+      logger.error('HLS', `⚠️ First segment wait failed (${isDead ? `process exited early with code ${proc.exitCode}` : 'timeout >12s'}) for [${sessionId}]. Last stderr:`, {
         lastStderr: lastStderrLines.slice(-10)
       });
+
+      // Self-healing: if process unexpectedly died and this is not already a retry, restart once immediately
+      if (isDead && !isRetry) {
+        logger.warn('HLS', `🔄 Self-healing: restarting session [${sessionId}] after unexpected process exit`);
+        this.retireSession(sessionId, sessionObj);
+        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, true);
+      }
     }
 
     sessionObj.isReady = true;
@@ -922,13 +951,18 @@ class FFmpegService {
       ];
 
       const proc = spawn('ffmpeg', args);
+      FFmpegService.registerSpawnedPid(proc.pid);
       let output = '';
       proc.stdout.on('data', (chunk) => { output += chunk.toString(); });
       proc.on('close', (code) => {
+        FFmpegService.unregisterSpawnedPid(proc.pid);
         if (code === 0) resolve(output);
         else reject(new Error(`Failed to extract subtitle: exit code ${code}`));
       });
-      proc.on('error', (err) => reject(err));
+      proc.on('error', (err) => {
+        FFmpegService.unregisterSpawnedPid(proc.pid);
+        reject(err);
+      });
     });
   }
 
@@ -949,6 +983,14 @@ class FFmpegService {
       // 2. Scan and terminate any zombie ffmpeg.exe processes on Windows not owned by active sessions
       if (process.platform === 'win32') {
         try {
+          // If a session is being created or restarted, skip process sweeping to avoid race conditions
+          if (this.sessionCreationPromises.size > 0) return;
+
+          const { stdout } = await execFileAsync('tasklist', ['/FI', 'IMAGENAME eq ffmpeg.exe', '/FO', 'CSV', '/NH'], { windowsHide: true });
+
+          // Re-check after awaiting tasklist!
+          if (this.sessionCreationPromises.size > 0) return;
+
           const activePids = new Set<number>();
           for (const session of this.continuousSessions.values()) {
             if (session.process?.pid) activePids.add(session.process.pid);
@@ -959,16 +1001,29 @@ class FFmpegService {
           for (const pid of FFmpegService.activeDirectPids) {
             activePids.add(pid);
           }
+          const nowTs = Date.now();
+          for (const [pid, spawnTime] of FFmpegService.knownSpawnedPids.entries()) {
+            // Grace period: any process spawned within the last 30 seconds is protected
+            if (nowTs - spawnTime < 30000) {
+              activePids.add(pid);
+            }
+          }
 
-          const { stdout } = await execFileAsync('tasklist', ['/FI', 'IMAGENAME eq ffmpeg.exe', '/FO', 'CSV', '/NH'], { windowsHide: true });
           const lines = stdout.split('\r\n').filter(l => l.trim());
           for (const line of lines) {
             const match = line.match(/^"ffmpeg\.exe","(\d+)"/i);
             if (match) {
               const pid = parseInt(match[1], 10);
               if (pid && !activePids.has(pid)) {
+                // Final safety check: re-verify against latest active sessions and spawn timestamps
+                const spawnTime = FFmpegService.knownSpawnedPids.get(pid);
+                if (spawnTime && Date.now() - spawnTime < 30000) continue;
+                if (Array.from(this.continuousSessions.values()).some(s => s.process?.pid === pid)) continue;
+                if (Array.from(this.closingSessions.values()).some(s => s.process?.pid === pid)) continue;
+
                 logger.info('SWEEPER', `🧹 Terminating zombie FFmpeg PID ${pid}`);
                 ProcessController.kill(pid).catch(() => {});
+                FFmpegService.knownSpawnedPids.delete(pid);
               }
             }
           }
