@@ -160,6 +160,7 @@ class SocketService {
         position: number;
         playbackRate?: number;
         shouldPlay?: boolean;
+        userId?: string;
       }) => {
         const { roomId, action, position, playbackRate = 1.0, shouldPlay } = data;
         if (!roomId) return;
@@ -167,6 +168,7 @@ class SocketService {
         const now = Date.now();
         const user = this.users.get(socket.id);
         const initiatedBy = user?.username || 'Участник';
+        const initiatedByUserId = user?.userId || data.userId || '';
 
         if (action === 'PAUSE') {
           try {
@@ -182,7 +184,7 @@ class SocketService {
             playbackRate,
             action: 'PAUSE',
             initiatedBy,
-            initiatedByUserId: user?.userId || '',
+            initiatedByUserId,
           });
         } else if (action === 'PLAY') {
           // 150ms synchronized lockstep startup so all clients fire play() together
@@ -200,7 +202,7 @@ class SocketService {
             playbackRate,
             action: 'PLAY',
             initiatedBy,
-            initiatedByUserId: user?.userId || '',
+            initiatedByUserId,
           });
         } else if (action === 'SEEK') {
           const targetState: RoomState = shouldPlay ? 'PLAYING' : 'PAUSED';
@@ -219,7 +221,7 @@ class SocketService {
             playbackRate,
             action: 'SEEK',
             initiatedBy,
-            initiatedByUserId: user?.userId || '',
+            initiatedByUserId,
           });
         }
       });

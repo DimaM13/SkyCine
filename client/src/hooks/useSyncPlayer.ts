@@ -34,7 +34,19 @@ export function useSyncPlayer({
 
   const roomStateRef = useRef<RoomState>(room?.state || 'PAUSED');
   const isInternalAction = useRef<boolean>(false);
+  const internalActionTimer = useRef<NodeJS.Timeout | null>(null);
   const scheduledPlayTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const blockSyncFor = useCallback((ms: number) => {
+    isInternalAction.current = true;
+    if (internalActionTimer.current) {
+      clearTimeout(internalActionTimer.current);
+    }
+    internalActionTimer.current = setTimeout(() => {
+      isInternalAction.current = false;
+      internalActionTimer.current = null;
+    }, ms);
+  }, []);
 
   useEffect(() => {
     if (room && user) {
@@ -139,14 +151,13 @@ export function useSyncPlayer({
           const livePos = data.livePosition || data.room.currentPosition || 0;
           const shouldPlay = data.room.state === 'PLAYING';
 
-          isInternalAction.current = true;
+          blockSyncFor(2000);
           executeSeek(livePos, shouldPlay);
           if (shouldPlay) {
             executePlay();
           } else {
             executePause();
           }
-          setTimeout(() => { isInternalAction.current = false; }, 200);
         }
       }
     });
@@ -163,6 +174,7 @@ export function useSyncPlayer({
       playbackRate: number;
       action: string;
       initiatedBy: string;
+      initiatedByUserId?: string;
     }) => {
       roomStateRef.current = data.state;
       setRoomState(data.state);
@@ -172,14 +184,20 @@ export function useSyncPlayer({
         scheduledPlayTimer.current = null;
       }
 
-      isInternalAction.current = true;
+      // Point 1: Check if this client was the initiator of the action
+      const isInitiator = Boolean(
+        data.initiatedByUserId &&
+        userRef.current?.id &&
+        data.initiatedByUserId === userRef.current.id
+      );
 
       if (data.action === 'PAUSE') {
         executePause();
         const cur = getRealPos();
-        if (Math.abs(cur - data.currentPosition) > 0.8) {
+        if (!isInitiator && Math.abs(cur - data.currentPosition) > 0.8) {
           executeSeek(data.currentPosition, false);
         }
+        blockSyncFor(2000);
       } else if (data.action === 'PLAY') {
         const now = getSyncedServerTimeRef.current();
         const delay = Math.max(0, data.serverTimestamp - now);
@@ -189,24 +207,28 @@ export function useSyncPlayer({
           executeSeek(data.currentPosition, true);
         }
 
+        blockSyncFor(4000);
+
         if (delay > 0) {
           scheduledPlayTimer.current = setTimeout(() => {
-            isInternalAction.current = true;
             executePlay();
-            setTimeout(() => { isInternalAction.current = false; }, 100);
           }, delay);
         } else {
           executePlay();
         }
       } else if (data.action === 'SEEK') {
         const shouldPlay = data.state === 'PLAYING';
-        executeSeek(data.currentPosition, shouldPlay);
+        // Point 2: 6 seconds grace period so buffering finishes without drift interference
+        blockSyncFor(6000);
+
+        // Point 1: Do NOT re-execute seek on the initiator's device (prevents double-seek & range abortion)
+        if (!isInitiator) {
+          executeSeek(data.currentPosition, shouldPlay);
+        }
         if (!shouldPlay) {
           executePause();
         }
       }
-
-      setTimeout(() => { isInternalAction.current = false; }, 1500);
     });
 
     // Host Heartbeat Time Anchor
@@ -224,15 +246,14 @@ export function useSyncPlayer({
       // Auto-correct only if drift is between 3.0s and 20.0s (avoid micro-stutter and don't fight major seeks)
       if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 3.0 && Math.abs(diff) < 20.0 && !isInternalAction.current) {
         console.log(`[WatchTogether] 🔄 Auto-aligning drift of ${diff.toFixed(1)}s to host pos: ${hostExpectedPos.toFixed(1)}s`);
-        isInternalAction.current = true;
+        blockSyncFor(4000);
         executeSeek(hostExpectedPos, true);
-        setTimeout(() => { isInternalAction.current = false; }, 1500);
       }
     });
 
     // Force Sync All from Host
     socket.on('room:force_sync_all', (data: { position: number; serverTimestamp: number; initiatedBy: string }) => {
-      isInternalAction.current = true;
+      blockSyncFor(4000);
       const shouldPlay = roomStateRef.current === 'PLAYING';
       executeSeek(data.position, shouldPlay);
       if (shouldPlay) {
@@ -240,7 +261,6 @@ export function useSyncPlayer({
       } else {
         executePause();
       }
-      setTimeout(() => { isInternalAction.current = false; }, 200);
       setSyncDiffSec(0);
     });
 
@@ -271,6 +291,8 @@ export function useSyncPlayer({
 
     return () => {
       if (scheduledPlayTimer.current) clearTimeout(scheduledPlayTimer.current);
+      if (internalActionTimer.current) clearTimeout(internalActionTimer.current);
+      if (seekDebounceTimer.current) clearTimeout(seekDebounceTimer.current);
       socket.emit('room:leave', { roomId: targetRoomId });
       socket.off('connect', joinRoom);
       socket.off('room:initial_state');
@@ -328,7 +350,7 @@ export function useSyncPlayer({
   const sendSeek = useCallback((pos: number, shouldPlay?: boolean) => {
     if (!socket || !room?.id) return;
     const willPlay = shouldPlay !== undefined ? shouldPlay : !getRealPaused();
-    isInternalAction.current = true;
+    blockSyncFor(6000);
     executeSeek(pos, willPlay);
 
     if (seekDebounceTimer.current) {
@@ -341,11 +363,12 @@ export function useSyncPlayer({
         action: 'SEEK',
         position: pos,
         shouldPlay: willPlay,
+        userId: userRef.current?.id,
       });
       seekDebounceTimer.current = null;
-      setTimeout(() => { isInternalAction.current = false; }, 1500);
+      blockSyncFor(6000);
     }, 150);
-  }, [socket, room?.id, executeSeek, getRealPaused]);
+  }, [socket, room?.id, executeSeek, getRealPaused, blockSyncFor]);
 
   const forceSyncAll = useCallback(() => {
     if (!socket || !room?.id) return;
@@ -361,12 +384,11 @@ export function useSyncPlayer({
     if (!socket || !room?.id) return;
     const hostMember = members.find((m) => m.userId === room.hostUserId);
     if (hostMember && hostMember.currentPosition > 0) {
-      isInternalAction.current = true;
+      blockSyncFor(4000);
       executeSeek(hostMember.currentPosition, roomStateRef.current === 'PLAYING');
-      setTimeout(() => { isInternalAction.current = false; }, 200);
       setSyncDiffSec(0);
     }
-  }, [socket, room?.id, room?.hostUserId, members, executeSeek]);
+  }, [socket, room?.id, room?.hostUserId, members, executeSeek, blockSyncFor]);
 
   const sendMessage = useCallback((text: string) => {
     if (!socket || !room?.id || !text.trim()) return;
