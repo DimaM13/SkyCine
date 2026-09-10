@@ -196,6 +196,7 @@ export class StreamController {
         } catch {}
       }
 
+      const isDesktop = req.query.client === 'desktop' || req.headers['user-agent']?.includes('SkyCine-Desktop');
       const codecLower = (targetTrack?.codec || media.audioCodec || '').toLowerCase();
       const isDtsOrTrueHd = 
         codecLower.includes('dts') || 
@@ -203,7 +204,9 @@ export class StreamController {
         codecLower.includes('truehd') || 
         codecLower.includes('mlp');
 
-      if (isDtsOrTrueHd) {
+      if (isDesktop) {
+        logger.info('STREAM', `[DirectStream] Native Direct Play for Desktop (MPV handles "${codecLower}" natively, 0% CPU). Serving raw bitstream.`);
+      } else if (isDtsOrTrueHd) {
         logger.info('STREAM', `[DirectStream] Audio track "${codecLower}" requires on-the-fly AC3 remuxing for TV. Video is 100% copied 1:1.`);
 
         if (req.method === 'HEAD') {
