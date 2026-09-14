@@ -67,6 +67,8 @@ export const RoomPage: React.FC = () => {
 
   const { user } = useAuth();
 
+  const [currentStreamMode, setCurrentStreamMode] = useState<'direct' | 'apple_ts' | 'fmp4'>('direct');
+
   const {
     roomState,
     members,
@@ -74,6 +76,10 @@ export const RoomPage: React.FC = () => {
     reactions,
     syncDiffSec,
     isHost,
+    isMicroCorrection,
+    microCorrectionOffset,
+    toggleMicroCorrection,
+    adjustMicroCorrection,
     sendPlay,
     sendPause,
     sendSeek,
@@ -85,6 +91,7 @@ export const RoomPage: React.FC = () => {
   } = useSyncPlayer({
     room,
     videoRef,
+    streamMode: currentStreamMode,
     onSeekTo: (pos: number, shouldPlay?: boolean) => {
       if (doSeekRef.current) {
         doSeekRef.current(pos, shouldPlay);
@@ -178,6 +185,11 @@ export const RoomPage: React.FC = () => {
               onSeekRequest={sendSeek}
               onSyncToHost={syncToHost}
               onForceSyncAll={forceSyncAll}
+              isMicroCorrection={isMicroCorrection}
+              microCorrectionOffset={microCorrectionOffset}
+              onToggleMicroCorrection={toggleMicroCorrection}
+              onAdjustMicroCorrection={adjustMicroCorrection}
+              onStreamModeDetected={(mode) => setCurrentStreamMode(mode)}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
               isSidebarOpen={isSidebarOpen}
               onBack={() => navigate('/rooms')}

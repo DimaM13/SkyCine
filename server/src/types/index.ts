@@ -107,12 +107,13 @@ export interface Room {
   state: RoomState;
   currentPosition: number;
   serverTimestamp: number;
-  playbackRate: number;
-  isPrivate: boolean;
-  password?: string;
-  createdAt: string;
-  mediaItem?: MediaItem;
-  hostUser?: Partial<User>;
+  mediaTitle?: string;
+  posterPath?: string;
+  backdropPath?: string;
+  durationSeconds?: number;
+  segmentDuration?: number;
+  hostUsername?: string;
+  hostAvatar?: string;
 }
 
 export interface RoomMember {
@@ -125,6 +126,7 @@ export interface RoomMember {
   currentPosition: number;
   pingMs: number;
   bufferPercent?: number;
+  streamMode?: 'direct' | 'apple_ts' | 'fmp4';
   joinedAt: string;
 }
 

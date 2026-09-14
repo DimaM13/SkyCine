@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
 import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState } from '../types';
@@ -6,6 +6,7 @@ import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState } from '../t
 interface UseSyncPlayerProps {
   room: Room | null;
   videoRef?: React.RefObject<HTMLVideoElement | null>;
+  streamMode?: 'direct' | 'apple_ts' | 'fmp4';
   onSeekTo?: (pos: number, shouldPlay?: boolean) => void;
   onPlay?: () => void;
   onPause?: () => void;
@@ -16,6 +17,7 @@ interface UseSyncPlayerProps {
 export function useSyncPlayer({
   room,
   videoRef,
+  streamMode = 'direct',
   onSeekTo,
   onPlay,
   onPause,
@@ -31,9 +33,23 @@ export function useSyncPlayer({
   const [reactions, setReactions] = useState<RoomReaction[]>([]);
   const [syncDiffSec, setSyncDiffSec] = useState<number>(0);
   const [isHost, setIsHost] = useState(false);
+  const [isMicroCorrection, setIsMicroCorrection] = useState(false);
 
   const roomStateRef = useRef<RoomState>(room?.state || 'PAUSED');
   const isInternalAction = useRef<boolean>(false);
+  const isMicroCorrectionRef = useRef<boolean>(false);
+  isMicroCorrectionRef.current = isMicroCorrection;
+
+  const [microCorrectionOffset, setMicroCorrectionOffset] = useState<number>(0);
+  const microCorrectionOffsetRef = useRef<number>(0);
+  microCorrectionOffsetRef.current = microCorrectionOffset;
+
+  const streamModeRef = useRef<'direct' | 'apple_ts' | 'fmp4'>(streamMode);
+  streamModeRef.current = streamMode;
+
+  const lastSentSeekPosRef = useRef<number | null>(null);
+  const lastSentSeekTimeRef = useRef<number>(0);
+
   const internalActionTimer = useRef<NodeJS.Timeout | null>(null);
   const scheduledPlayTimer = useRef<NodeJS.Timeout | null>(null);
 
@@ -110,6 +126,19 @@ export function useSyncPlayer({
     }
   }, [videoRef]);
 
+  const adjustMicroCorrection = useCallback((delta: number) => {
+    setMicroCorrectionOffset((prev) => {
+      const next = prev + delta;
+      microCorrectionOffsetRef.current = next;
+      if (isMicroCorrectionRef.current) {
+        const cur = getRealPos();
+        blockSyncFor(2000);
+        executeSeek(Math.max(0, cur + delta), !getRealPaused());
+      }
+      return next;
+    });
+  }, [getRealPos, getRealPaused, executeSeek, blockSyncFor]);
+
   const hasInitializedRef = useRef(false);
 
   const isHostRef = useRef(isHost);
@@ -131,6 +160,7 @@ export function useSyncPlayer({
         userId: currentUser?.id || 'guest',
         username: currentUser?.username || 'Гость',
         avatarUrl: currentUser?.avatarUrl,
+        streamMode: streamModeRef.current,
       });
     };
 
@@ -148,11 +178,12 @@ export function useSyncPlayer({
 
         if (!hasInitializedRef.current) {
           hasInitializedRef.current = true;
-          const livePos = data.livePosition || data.room.currentPosition || 0;
+          const rawPos = data.livePosition || data.room.currentPosition || 0;
+          const livePos = isMicroCorrectionRef.current ? (rawPos + microCorrectionOffsetRef.current) : rawPos;
           const shouldPlay = data.room.state === 'PLAYING';
 
           blockSyncFor(2000);
-          executeSeek(livePos, shouldPlay);
+          executeSeek(Math.max(0, livePos), shouldPlay);
           if (shouldPlay) {
             executePlay();
           } else {
@@ -184,27 +215,37 @@ export function useSyncPlayer({
         scheduledPlayTimer.current = null;
       }
 
-      // Point 1: Check if this client was the initiator of the action
+      // Check if this client was the initiator of the action
+      const now = Date.now();
+      const isRecentLocalSeek =
+        data.action === 'SEEK' &&
+        lastSentSeekPosRef.current !== null &&
+        Math.abs(data.currentPosition - lastSentSeekPosRef.current) < 1.5 &&
+        (now - lastSentSeekTimeRef.current) < 5000;
+
       const isInitiator = Boolean(
-        data.initiatedByUserId &&
-        userRef.current?.id &&
-        data.initiatedByUserId === userRef.current.id
+        isRecentLocalSeek ||
+        (data.initiatedByUserId &&
+          userRef.current?.id &&
+          data.initiatedByUserId === userRef.current.id)
       );
 
       if (data.action === 'PAUSE') {
         executePause();
         const cur = getRealPos();
-        if (!isInitiator && Math.abs(cur - data.currentPosition) > 0.8) {
-          executeSeek(data.currentPosition, false);
+        const targetPos = isMicroCorrectionRef.current ? (data.currentPosition + microCorrectionOffsetRef.current) : data.currentPosition;
+        if (!isInitiator && Math.abs(cur - targetPos) > 0.8) {
+          executeSeek(Math.max(0, targetPos), false);
         }
         blockSyncFor(2000);
       } else if (data.action === 'PLAY') {
-        const now = getSyncedServerTimeRef.current();
-        const delay = Math.max(0, data.serverTimestamp - now);
+        const serverNow = getSyncedServerTimeRef.current();
+        const delay = Math.max(0, data.serverTimestamp - serverNow);
         const cur = getRealPos();
+        const targetPos = isMicroCorrectionRef.current ? (data.currentPosition + microCorrectionOffsetRef.current) : data.currentPosition;
 
-        if (Math.abs(cur - data.currentPosition) > 1.5) {
-          executeSeek(data.currentPosition, true);
+        if (Math.abs(cur - targetPos) > 1.5) {
+          executeSeek(Math.max(0, targetPos), true);
         }
 
         blockSyncFor(4000);
@@ -218,12 +259,17 @@ export function useSyncPlayer({
         }
       } else if (data.action === 'SEEK') {
         const shouldPlay = data.state === 'PLAYING';
-        // Point 2: 6 seconds grace period so buffering finishes without drift interference
-        blockSyncFor(6000);
+        // Grace period so buffering finishes without drift interference
+        blockSyncFor(4000);
 
-        // Point 1: Do NOT re-execute seek on the initiator's device (prevents double-seek & range abortion)
+        // Do NOT re-execute seek on the initiator's device (prevents double-seek & range abortion)
         if (!isInitiator) {
-          executeSeek(data.currentPosition, shouldPlay);
+          const targetPos = isMicroCorrectionRef.current
+            ? data.currentPosition + microCorrectionOffsetRef.current
+            : data.currentPosition;
+          executeSeek(Math.max(0, targetPos), shouldPlay);
+        } else {
+          lastSentSeekPosRef.current = null;
         }
         if (!shouldPlay) {
           executePause();
@@ -239,7 +285,8 @@ export function useSyncPlayer({
       const elapsed = Math.max(0, (now - data.serverTimestamp) / 1000);
       const hostExpectedPos = data.currentPosition + (roomStateRef.current === 'PLAYING' ? elapsed : 0);
       const myPos = getRealPos();
-      const diff = myPos - hostExpectedPos;
+      const effectivePos = isMicroCorrectionRef.current ? (myPos - microCorrectionOffsetRef.current) : myPos;
+      const diff = effectivePos - hostExpectedPos;
 
       setSyncDiffSec(Math.round(diff * 10) / 10);
 
@@ -247,7 +294,8 @@ export function useSyncPlayer({
       if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 3.0 && Math.abs(diff) < 20.0 && !isInternalAction.current) {
         console.log(`[WatchTogether] 🔄 Auto-aligning drift of ${diff.toFixed(1)}s to host pos: ${hostExpectedPos.toFixed(1)}s`);
         blockSyncFor(4000);
-        executeSeek(hostExpectedPos, true);
+        const targetPos = isMicroCorrectionRef.current ? (hostExpectedPos + microCorrectionOffsetRef.current) : hostExpectedPos;
+        executeSeek(Math.max(0, targetPos), true);
       }
     });
 
@@ -311,7 +359,8 @@ export function useSyncPlayer({
     if (!isHost || !socket || !room?.id || roomState !== 'PLAYING') return;
 
     const interval = setInterval(() => {
-      if (!getRealPaused()) {
+      // Do not send heartbeat if user is paused, or if seeking / syncing is in progress
+      if (!getRealPaused() && !isInternalAction.current) {
         const cur = getRealPos();
         socket.emit('room:host_heartbeat', {
           roomId: room.id,
@@ -325,39 +374,56 @@ export function useSyncPlayer({
 
   // ── Action Triggers ──
   const sendPlay = useCallback(() => {
-    if (!socket || !room?.id || isInternalAction.current) return;
+    if (!socket || !room?.id) return;
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PLAY',
       position: cur,
+      userId: userRef.current?.id,
     });
   }, [socket, room?.id, getRealPos]);
 
   const sendPause = useCallback(() => {
-    if (!socket || !room?.id || isInternalAction.current) return;
+    if (!socket || !room?.id) return;
     executePause();
     const cur = getRealPos();
     socket.emit('room:action', {
       roomId: room.id,
       action: 'PAUSE',
       position: cur,
+      userId: userRef.current?.id,
     });
   }, [socket, room?.id, executePause, getRealPos]);
 
   const seekDebounceTimer = useRef<NodeJS.Timeout | null>(null);
 
+  // Send streamMode update when it changes
+  useEffect(() => {
+    if (!socket || !room?.id) return;
+    socket.emit('room:member_status', {
+      roomId: room.id,
+      currentPosition: getRealPos(),
+      streamMode,
+    });
+  }, [socket, room?.id, streamMode, getRealPos]);
+
   const sendSeek = useCallback((pos: number, shouldPlay?: boolean) => {
     if (!socket || !room?.id) return;
     const willPlay = shouldPlay !== undefined ? shouldPlay : !getRealPaused();
-    blockSyncFor(6000);
-    executeSeek(pos, willPlay);
+    blockSyncFor(5000);
+    lastSentSeekPosRef.current = pos;
+    lastSentSeekTimeRef.current = Date.now();
+    const localTarget = isMicroCorrectionRef.current ? (pos + microCorrectionOffsetRef.current) : pos;
+    executeSeek(Math.max(0, localTarget), willPlay);
 
     if (seekDebounceTimer.current) {
       clearTimeout(seekDebounceTimer.current);
     }
 
     seekDebounceTimer.current = setTimeout(() => {
+      lastSentSeekPosRef.current = pos;
+      lastSentSeekTimeRef.current = Date.now();
       socket.emit('room:action', {
         roomId: room.id,
         action: 'SEEK',
@@ -366,9 +432,30 @@ export function useSyncPlayer({
         userId: userRef.current?.id,
       });
       seekDebounceTimer.current = null;
-      blockSyncFor(6000);
+      blockSyncFor(5000);
     }, 150);
   }, [socket, room?.id, executeSeek, getRealPaused, blockSyncFor]);
+
+  const toggleMicroCorrection = useCallback(() => {
+    setIsMicroCorrection((prev) => {
+      const next = !prev;
+      isMicroCorrectionRef.current = next;
+      const cur = getRealPos();
+      let offset = microCorrectionOffsetRef.current;
+      if (next && offset === 0) {
+        offset = 1;
+        setMicroCorrectionOffset(1);
+        microCorrectionOffsetRef.current = 1;
+      }
+      if (offset !== 0) {
+        // When turning ON: add offset to video. When turning OFF: subtract offset back
+        const target = next ? (cur + offset) : Math.max(0, cur - offset);
+        blockSyncFor(2000);
+        executeSeek(target, !getRealPaused());
+      }
+      return next;
+    });
+  }, [getRealPos, getRealPaused, executeSeek, blockSyncFor]);
 
   const forceSyncAll = useCallback(() => {
     if (!socket || !room?.id) return;
@@ -385,7 +472,10 @@ export function useSyncPlayer({
     const hostMember = members.find((m) => m.userId === room.hostUserId);
     if (hostMember && hostMember.currentPosition > 0) {
       blockSyncFor(4000);
-      executeSeek(hostMember.currentPosition, roomStateRef.current === 'PLAYING');
+      const targetPos = isMicroCorrectionRef.current
+        ? (hostMember.currentPosition + microCorrectionOffsetRef.current)
+        : hostMember.currentPosition;
+      executeSeek(Math.max(0, targetPos), roomStateRef.current === 'PLAYING');
       setSyncDiffSec(0);
     }
   }, [socket, room?.id, room?.hostUserId, members, executeSeek, blockSyncFor]);
@@ -431,6 +521,10 @@ export function useSyncPlayer({
     reactions,
     syncDiffSec,
     isHost,
+    isMicroCorrection,
+    microCorrectionOffset,
+    toggleMicroCorrection,
+    adjustMicroCorrection,
     sendPlay,
     sendPause,
     sendSeek,

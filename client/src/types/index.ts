@@ -120,6 +120,7 @@ export interface Room {
   posterPath?: string;
   backdropPath?: string;
   durationSeconds?: number;
+  segmentDuration?: number;
   hostUsername?: string;
   hostAvatar?: string;
 }
@@ -134,6 +135,7 @@ export interface RoomMember {
   currentPosition: number;
   pingMs: number;
   bufferPercent?: number;
+  streamMode?: 'direct' | 'apple_ts' | 'fmp4';
   joinedAt: string;
 }
 

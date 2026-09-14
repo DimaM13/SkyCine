@@ -34,6 +34,11 @@ interface CustomPlayerProps {
   onAttachGetCurrentTime?: (fn: () => number) => void;
   initialPosition?: number;
   videoRef?: React.RefObject<HTMLVideoElement>;
+  isMicroCorrection?: boolean;
+  microCorrectionOffset?: number;
+  onToggleMicroCorrection?: () => void;
+  onAdjustMicroCorrection?: (delta: number) => void;
+  onStreamModeDetected?: (mode: 'direct' | 'apple_ts' | 'fmp4') => void;
 }
 
 export const CustomPlayer: React.FC<CustomPlayerProps> = ({
@@ -46,6 +51,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   members = [],
   reactions = [],
   initialPosition = 0,
+  isMicroCorrection = false,
+  microCorrectionOffset = 0,
+  onToggleMicroCorrection,
+  onAdjustMicroCorrection,
+  onStreamModeDetected,
   onPlayRequest,
   onPauseRequest,
   onSeekRequest,
@@ -253,6 +263,24 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       engineLabel,
     };
   }, [isDirectPlay, selectedQuality, media, currentAudioTrack, isAppleDevice]);
+
+  const calculatedStreamMode = useMemo((): 'direct' | 'apple_ts' | 'fmp4' => {
+    if (isDirectPlay) return 'direct';
+    const rawVideoCodec = (media.videoCodec || '').toLowerCase();
+    const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
+    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+    const is4k = media.resolution === '4K';
+    const is4kVp9 = isVp9 && is4k;
+    const isApple4kVp9 = isAppleDevice && is4kVp9;
+    const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
+    return useFmp4 ? 'fmp4' : 'apple_ts';
+  }, [isDirectPlay, isAppleDevice, media.videoCodec, media.resolution]);
+
+  useEffect(() => {
+    if (isWatchTogether && onStreamModeDetected) {
+      onStreamModeDetected(calculatedStreamMode);
+    }
+  }, [isWatchTogether, calculatedStreamMode, onStreamModeDetected]);
 
   const hlsRef = useRef<Hls | null>(null);
   const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
@@ -1175,6 +1203,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 triggerSeek(parseFloat((e.target as HTMLInputElement).value));
               }
             }}
+            onKeyUp={(e) => {
+              if (isWatchTogether && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
+                triggerSeek(parseFloat((e.target as HTMLInputElement).value));
+              }
+            }}
             className="w-full h-1.5 bg-transparent appearance-none cursor-pointer relative z-10 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cinema-gold"
           />
         </div>
@@ -1239,6 +1272,45 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 >
                   {justSynced ? '✓ Выровнено' : isHost ? '👑 Выровнять всех' : '📡 Выровнять'}
                 </button>
+              )}
+
+              {isWatchTogether && onToggleMicroCorrection && (
+                <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-white/15">
+                  <button
+                    onClick={onToggleMicroCorrection}
+                    className={`px-2 py-0.5 rounded-md border text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer select-none ${
+                      isMicroCorrection
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-sm'
+                        : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10 hover:text-slate-300'
+                    }`}
+                    title={isMicroCorrection ? 'Выключить микрокоррекцию' : 'Включить ручную микрокоррекцию времени'}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${isMicroCorrection ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+                    <span>Микрокоррекция</span>
+                  </button>
+
+                  {isMicroCorrection && onAdjustMicroCorrection && (
+                    <div className="flex items-center gap-1 bg-black/50 border border-emerald-500/40 rounded-md px-1 py-0.5 shadow-sm">
+                      <button
+                        onClick={() => onAdjustMicroCorrection(-1)}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
+                        title="Сдвинуть видео на 1 секунду назад (-1с)"
+                      >
+                        -1с
+                      </button>
+                      <span className="text-[10px] font-mono font-bold text-emerald-300 px-1 min-w-[32px] text-center">
+                        {microCorrectionOffset > 0 ? `+${microCorrectionOffset}с` : `${microCorrectionOffset}с`}
+                      </span>
+                      <button
+                        onClick={() => onAdjustMicroCorrection(1)}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
+                        title="Сдвинуть видео на 1 секунду вперед (+1с)"
+                      >
+                        +1с
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>

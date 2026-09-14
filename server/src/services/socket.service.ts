@@ -19,6 +19,7 @@ class SocketService {
   private users: Map<string, ConnectedUser> = new Map(); // socketId -> user
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set<socketId>
   private roomMembers: Map<string, Map<string, RoomMember>> = new Map(); // roomId -> (socketId -> RoomMember)
+  private lastSeekTimeByRoom: Map<string, number> = new Map(); // roomId -> timestamp of last seek
 
   public init(io: Server) {
     this.io = io;
@@ -65,8 +66,8 @@ class SocketService {
       });
 
       // 3. Room Join / Leave
-      socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string }) => {
-        const { roomId, userId, username, avatarUrl } = data;
+      socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string; streamMode?: 'direct' | 'apple_ts' | 'fmp4' }) => {
+        const { roomId, userId, username, avatarUrl, streamMode } = data;
         if (!roomId) return;
 
         socket.join(roomId);
@@ -94,6 +95,7 @@ class SocketService {
           bufferedPosition: 0,
           currentPosition: 0,
           pingMs: 0,
+          streamMode: streamMode || 'direct',
           joinedAt: new Date().toISOString(),
         };
 
@@ -104,11 +106,11 @@ class SocketService {
           user.currentRoomId = roomId;
         }
 
-        logger.info('ROOM_JOIN', `User ${username} joined room ${roomId}. Total members: ${roomMap.size}`);
+        logger.info('ROOM_JOIN', `User ${username} joined room ${roomId} (stream: ${member.streamMode}). Total members: ${roomMap.size}`);
 
         // Fetch room state
         const room = db.prepare(`
-          SELECT r.*, m.title as mediaTitle, m.durationSeconds, m.posterPath, m.backdropPath
+          SELECT r.*, m.title as mediaTitle, m.durationSeconds, m.segmentDuration, m.posterPath, m.backdropPath
           FROM rooms r
           LEFT JOIN media_items m ON r.mediaItemId = m.id
           WHERE r.id = ?
@@ -167,8 +169,11 @@ class SocketService {
 
         const now = Date.now();
         const user = this.users.get(socket.id);
-        const initiatedBy = user?.username || 'Участник';
-        const initiatedByUserId = user?.userId || data.userId || '';
+        const member = this.roomMembers.get(roomId)?.get(socket.id);
+        const initiatedBy = user?.username || member?.username || 'Участник';
+        const initiatedByUserId = user?.userId || member?.userId || data.userId || '';
+
+        logger.info('ROOM_ACTION', `Room ${roomId} action: ${action} pos: ${position.toFixed(1)}s (by: ${initiatedBy})`);
 
         if (action === 'PAUSE') {
           try {
@@ -205,6 +210,7 @@ class SocketService {
             initiatedByUserId,
           });
         } else if (action === 'SEEK') {
+          this.lastSeekTimeByRoom.set(roomId, now);
           const targetState: RoomState = shouldPlay ? 'PLAYING' : 'PAUSED';
           const scheduledPlayAt = shouldPlay ? now + 150 : now;
 
@@ -230,6 +236,12 @@ class SocketService {
       socket.on('room:host_heartbeat', (data: { roomId: string; position: number }) => {
         if (!data?.roomId) return;
         const now = Date.now();
+
+        // If a seek happened in the last 8 seconds, ignore host heartbeat to prevent rollback loop while FFmpeg transcodes
+        const lastSeek = this.lastSeekTimeByRoom.get(data.roomId) || 0;
+        if (now - lastSeek < 8000) {
+          return;
+        }
 
         try {
           db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, now, data.roomId);
@@ -266,13 +278,17 @@ class SocketService {
       });
 
       // 7. Member Status & Position Reporting
-      socket.on('room:member_status', (data: { roomId: string; currentPosition: number; bufferedPosition?: number }) => {
+      socket.on('room:member_status', (data: { roomId: string; currentPosition: number; bufferedPosition?: number; streamMode?: 'direct' | 'apple_ts' | 'fmp4' }) => {
         if (!data?.roomId) return;
         const members = this.roomMembers.get(data.roomId);
         if (members && members.has(socket.id)) {
           const m = members.get(socket.id)!;
           m.currentPosition = data.currentPosition || 0;
           if (data.bufferedPosition !== undefined) m.bufferedPosition = data.bufferedPosition;
+          if (data.streamMode && m.streamMode !== data.streamMode) {
+            m.streamMode = data.streamMode;
+            this.emitRoomMembers(data.roomId);
+          }
         }
       });
 
@@ -384,6 +400,7 @@ class SocketService {
 
       if (members.size === 0) {
         this.roomMembers.delete(roomId);
+        this.lastSeekTimeByRoom.delete(roomId);
         // Clean up FFmpeg session for empty room with 4s grace period (handles React remount / page reload)
         setTimeout(() => {
           const currentMembers = this.roomMembers.get(roomId);

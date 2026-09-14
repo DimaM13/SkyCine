@@ -189,7 +189,7 @@ export class RoomsController {
       const { codeOrId } = req.params;
       const room = db.prepare(`
         SELECT r.*,
-               m.title as mediaTitle, m.originalTitle, m.durationSeconds, m.posterPath, m.backdropPath,
+               m.title as mediaTitle, m.originalTitle, m.durationSeconds, m.segmentDuration, m.posterPath, m.backdropPath,
                m.filePath, m.fileSize, m.videoCodec, m.audioCodec, m.resolution, m.type, m.year,
                m.seasonNumber, m.episodeNumber, m.libraryId,
                u.username as hostUsername, u.avatarUrl as hostAvatar
