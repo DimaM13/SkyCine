@@ -195,7 +195,10 @@ export const RoomPage: React.FC = () => {
               onBack={() => navigate('/rooms')}
               onInvite={() => setIsInviteModalOpen(true)}
               onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
+              onAttachPlayHandler={(fn) => { doPlayRef.current = fn; }}
+              onAttachPauseHandler={(fn) => { doPauseRef.current = fn; }}
               onAttachGetCurrentTime={(fn) => { getCurrentTimeRef.current = fn; }}
+              onAttachGetIsPaused={(fn) => { getIsPausedRef.current = fn; }}
               videoRef={videoRef}
             />
           ) : null}

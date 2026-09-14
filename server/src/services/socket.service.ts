@@ -20,6 +20,7 @@ class SocketService {
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set<socketId>
   private roomMembers: Map<string, Map<string, RoomMember>> = new Map(); // roomId -> (socketId -> RoomMember)
   private lastSeekTimeByRoom: Map<string, number> = new Map(); // roomId -> timestamp of last seek
+  private lastMembersEmitByRoom: Map<string, number> = new Map(); // roomId -> timestamp of last room:members emit
 
   public init(io: Server) {
     this.io = io;
@@ -232,14 +233,15 @@ class SocketService {
         }
       });
 
-      // 5. Periodic Time Anchor from Host (every 3 seconds while playing)
+      // 5. Periodic Time Anchor from any playing client (раньше только хост + игнор 8с после seek —
+      // при активных экшенах якоря не доходили вообще, дрейф копился)
       socket.on('room:host_heartbeat', (data: { roomId: string; position: number }) => {
         if (!data?.roomId) return;
         const now = Date.now();
 
-        // If a seek happened in the last 8 seconds, ignore host heartbeat to prevent rollback loop while FFmpeg transcodes
+        // Короткое окно после seek, чтобы не откатывать свежий seek якорем от тормозящего клиента
         const lastSeek = this.lastSeekTimeByRoom.get(data.roomId) || 0;
-        if (now - lastSeek < 8000) {
+        if (now - lastSeek < 2500) {
           return;
         }
 
@@ -277,7 +279,7 @@ class SocketService {
         });
       });
 
-      // 7. Member Status & Position Reporting
+      // 7. Member Status & Position Reporting (позиции нужны для syncToHost — рассылаем троттлингом 2с)
       socket.on('room:member_status', (data: { roomId: string; currentPosition: number; bufferedPosition?: number; streamMode?: 'direct' | 'apple_ts' | 'fmp4' }) => {
         if (!data?.roomId) return;
         const members = this.roomMembers.get(data.roomId);
@@ -287,6 +289,8 @@ class SocketService {
           if (data.bufferedPosition !== undefined) m.bufferedPosition = data.bufferedPosition;
           if (data.streamMode && m.streamMode !== data.streamMode) {
             m.streamMode = data.streamMode;
+            this.emitRoomMembers(data.roomId, true);
+          } else {
             this.emitRoomMembers(data.roomId);
           }
         }
@@ -355,6 +359,76 @@ class SocketService {
         }
       });
 
+      // 10b. YouTube video change (раньше клиент эмитил, а хендлера не было — смена никому не уходила)
+      socket.on('room:change_youtube', async (data: { roomId: string; youtubeUrl: string }) => {
+        try {
+          if (!data?.roomId || !data?.youtubeUrl?.trim()) return;
+          const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(data.roomId) as any;
+          if (!room || room.sourceType !== 'YOUTUBE') return;
+
+          const user = this.users.get(socket.id);
+          // Менять видео может только хост (кнопка и так только у хоста)
+          if (user && room.hostUserId && user.userId !== room.hostUserId) return;
+
+          const trimmed = data.youtubeUrl.trim();
+          let ytId: string | null = null;
+          if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
+            ytId = trimmed;
+          } else {
+            const m = trimmed.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+            ytId = m ? m[1] : null;
+          }
+          if (!ytId) return;
+
+          let ytTitle = 'YouTube Видео';
+          let ytThumb = `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+          try {
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 4000);
+            const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${ytId}&format=json`, { signal: ctrl.signal });
+            clearTimeout(t);
+            if (res.ok) {
+              const info = (await res.json()) as any;
+              if (info?.title) ytTitle = info.title;
+              if (info?.thumbnail_url) ytThumb = info.thumbnail_url;
+            }
+          } catch {}
+
+          const now = Date.now();
+          const ytUrl = `https://www.youtube.com/watch?v=${ytId}`;
+          db.prepare(`
+            UPDATE rooms SET youtubeId = ?, youtubeUrl = ?, youtubeTitle = ?, youtubeThumbnail = ?,
+              state = 'PAUSED', currentPosition = 0, serverTimestamp = ? WHERE id = ?
+          `).run(ytId, ytUrl, ytTitle, ytThumb, now, data.roomId);
+          this.lastSeekTimeByRoom.set(data.roomId, now);
+
+          io.to(data.roomId).emit('room:youtube_changed', {
+            youtubeId: ytId,
+            youtubeUrl: ytUrl,
+            youtubeTitle: ytTitle,
+            youtubeThumbnail: ytThumb,
+            initiatedBy: user?.username || 'Хост',
+          });
+          io.to(data.roomId).emit('room:sync_state', {
+            state: 'PAUSED',
+            currentPosition: 0,
+            serverTimestamp: now,
+            playbackRate: 1.0,
+            action: 'SEEK',
+            initiatedBy: user?.username || 'Хост',
+            initiatedByUserId: user?.userId || '',
+          });
+          io.to(data.roomId).emit('room:system_message', {
+            text: `▶ Включено новое видео: ${ytTitle}`,
+            type: 'sync',
+            timestamp: now,
+          });
+          logger.info('ROOM_YOUTUBE', `Room ${data.roomId} switched YouTube video to ${ytId} (by: ${user?.username || '?'})`);
+        } catch (err) {
+          logger.error('ROOM_YOUTUBE', 'change_youtube error', err);
+        }
+      });
+
       // 11. Disconnect Cleanup
       socket.on('disconnect', () => {
         for (const [roomId, roomMap] of this.roomMembers.entries()) {
@@ -417,8 +491,17 @@ class SocketService {
     }
   }
 
-  private emitRoomMembers(roomId: string) {
+  private emitRoomMembers(roomId: string, force: boolean = false) {
     if (!this.io) return;
+    // Троттлинг позиционных апдейтов: не чаще 1 раза в 2с (force — смена streamMode/join/leave — идёт сразу)
+    if (!force) {
+      const now = Date.now();
+      const last = this.lastMembersEmitByRoom.get(roomId) || 0;
+      if (now - last < 2000) return;
+      this.lastMembersEmitByRoom.set(roomId, now);
+    } else {
+      this.lastMembersEmitByRoom.set(roomId, Date.now());
+    }
     const members = this.roomMembers.get(roomId);
     if (members) {
       const unique = new Map<string, RoomMember>();

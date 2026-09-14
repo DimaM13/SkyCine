@@ -237,7 +237,7 @@ export function useSyncPlayer({
         if (!isInitiator && Math.abs(cur - targetPos) > 0.8) {
           executeSeek(Math.max(0, targetPos), false);
         }
-        blockSyncFor(2000);
+        blockSyncFor(1500);
       } else if (data.action === 'PLAY') {
         const serverNow = getSyncedServerTimeRef.current();
         const delay = Math.max(0, data.serverTimestamp - serverNow);
@@ -248,7 +248,7 @@ export function useSyncPlayer({
           executeSeek(Math.max(0, targetPos), true);
         }
 
-        blockSyncFor(4000);
+        blockSyncFor(1500);
 
         if (delay > 0) {
           scheduledPlayTimer.current = setTimeout(() => {
@@ -260,7 +260,7 @@ export function useSyncPlayer({
       } else if (data.action === 'SEEK') {
         const shouldPlay = data.state === 'PLAYING';
         // Grace period so buffering finishes without drift interference
-        blockSyncFor(4000);
+        blockSyncFor(2500);
 
         // Do NOT re-execute seek on the initiator's device (prevents double-seek & range abortion)
         if (!isInitiator) {
@@ -277,9 +277,10 @@ export function useSyncPlayer({
       }
     });
 
-    // Host Heartbeat Time Anchor
+    // Host Heartbeat Time Anchor (теперь якоря шлют ВСЕ играющие, а не только хост —
+    // иначе при частых экшенах isInternalAction вечно true и time_anchor мёртв, см. логи)
     socket.on('room:time_anchor', (data: { currentPosition: number; serverTimestamp: number }) => {
-      if (isHostRef.current || isInternalAction.current) return;
+      if (isInternalAction.current) return;
 
       const now = getSyncedServerTimeRef.current();
       const elapsed = Math.max(0, (now - data.serverTimestamp) / 1000);
@@ -290,10 +291,10 @@ export function useSyncPlayer({
 
       setSyncDiffSec(Math.round(diff * 10) / 10);
 
-      // Auto-correct only if drift is between 3.0s and 20.0s (avoid micro-stutter and don't fight major seeks)
-      if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 3.0 && Math.abs(diff) < 20.0 && !isInternalAction.current) {
+      // Auto-correct при дрейфе от 1.5с (было 3.0с — мелкий рассинхрон копился и давал "у одного мотается, у другого нет")
+      if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 1.5 && Math.abs(diff) < 20.0 && !isInternalAction.current) {
         console.log(`[WatchTogether] 🔄 Auto-aligning drift of ${diff.toFixed(1)}s to host pos: ${hostExpectedPos.toFixed(1)}s`);
-        blockSyncFor(4000);
+        blockSyncFor(2500);
         const targetPos = isMicroCorrectionRef.current ? (hostExpectedPos + microCorrectionOffsetRef.current) : hostExpectedPos;
         executeSeek(Math.max(0, targetPos), true);
       }
@@ -301,7 +302,7 @@ export function useSyncPlayer({
 
     // Force Sync All from Host
     socket.on('room:force_sync_all', (data: { position: number; serverTimestamp: number; initiatedBy: string }) => {
-      blockSyncFor(4000);
+      blockSyncFor(2500);
       const shouldPlay = roomStateRef.current === 'PLAYING';
       executeSeek(data.position, shouldPlay);
       if (shouldPlay) {
@@ -354,9 +355,10 @@ export function useSyncPlayer({
     };
   }, [socket, room?.id]);
 
-  // Host Periodic Heartbeat (every 3 seconds while playing)
+  // Periodic Heartbeat (каждый играющий клиент шлёт якорь каждые 3с —
+  // раньше слал только хост и только когда !isInternalAction, при активных экшенах якоря не уходили вообще)
   useEffect(() => {
-    if (!isHost || !socket || !room?.id || roomState !== 'PLAYING') return;
+    if (!socket || !room?.id || roomState !== 'PLAYING') return;
 
     const interval = setInterval(() => {
       // Do not send heartbeat if user is paused, or if seeking / syncing is in progress
@@ -370,7 +372,7 @@ export function useSyncPlayer({
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [isHost, socket, room?.id, roomState, getRealPaused, getRealPos]);
+  }, [socket, room?.id, roomState, getRealPaused, getRealPos]);
 
   // ── Action Triggers ──
   const sendPlay = useCallback(() => {
@@ -408,10 +410,33 @@ export function useSyncPlayer({
     });
   }, [socket, room?.id, streamMode, getRealPos]);
 
+  // Periodic position report (каждые 3с) — без него room:members всегда с position=0
+  // и кнопка "Выровнять" (syncToHost) молча ничего не делает
+  useEffect(() => {
+    if (!socket || !room?.id) return;
+    const interval = setInterval(() => {
+      try {
+        const cur = getRealPos();
+        let buffered: number | undefined;
+        const v = videoRef?.current;
+        if (v && v.buffered && v.buffered.length > 0) {
+          try { buffered = v.buffered.end(v.buffered.length - 1); } catch {}
+        }
+        socket.emit('room:member_status', {
+          roomId: room!.id,
+          currentPosition: cur,
+          bufferedPosition: buffered,
+          streamMode: streamModeRef.current,
+        });
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [socket, room?.id]);
+
   const sendSeek = useCallback((pos: number, shouldPlay?: boolean) => {
     if (!socket || !room?.id) return;
     const willPlay = shouldPlay !== undefined ? shouldPlay : !getRealPaused();
-    blockSyncFor(5000);
+    blockSyncFor(2500);
     lastSentSeekPosRef.current = pos;
     lastSentSeekTimeRef.current = Date.now();
     const localTarget = isMicroCorrectionRef.current ? (pos + microCorrectionOffsetRef.current) : pos;
@@ -432,7 +457,7 @@ export function useSyncPlayer({
         userId: userRef.current?.id,
       });
       seekDebounceTimer.current = null;
-      blockSyncFor(5000);
+      blockSyncFor(2500);
     }, 150);
   }, [socket, room?.id, executeSeek, getRealPaused, blockSyncFor]);
 
@@ -471,7 +496,7 @@ export function useSyncPlayer({
     if (!socket || !room?.id) return;
     const hostMember = members.find((m) => m.userId === room.hostUserId);
     if (hostMember && hostMember.currentPosition > 0) {
-      blockSyncFor(4000);
+      blockSyncFor(2500);
       const targetPos = isMicroCorrectionRef.current
         ? (hostMember.currentPosition + microCorrectionOffsetRef.current)
         : hostMember.currentPosition;

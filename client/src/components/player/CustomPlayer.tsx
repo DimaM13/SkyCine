@@ -23,7 +23,7 @@ interface CustomPlayerProps {
   reactions?: any[];
   onPlayRequest?: () => void;
   onPauseRequest?: () => void;
-  onSeekRequest?: (pos: number) => void;
+  onSeekRequest?: (pos: number, shouldPlay?: boolean) => void;
   onSyncToHost?: () => void;
   onForceSyncAll?: () => void;
   onToggleSidebar?: () => void;
@@ -31,7 +31,10 @@ interface CustomPlayerProps {
   onBack?: () => void;
   onInvite?: () => void;
   onAttachSeekHandler?: (fn: (pos: number, shouldPlay?: boolean) => void) => void;
+  onAttachPlayHandler?: (fn: () => void) => void;
+  onAttachPauseHandler?: (fn: () => void) => void;
   onAttachGetCurrentTime?: (fn: () => number) => void;
+  onAttachGetIsPaused?: (fn: () => boolean) => void;
   initialPosition?: number;
   videoRef?: React.RefObject<HTMLVideoElement>;
   isMicroCorrection?: boolean;
@@ -66,7 +69,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   onBack,
   onInvite,
   onAttachSeekHandler,
+  onAttachPlayHandler,
+  onAttachPauseHandler,
   onAttachGetCurrentTime,
+  onAttachGetIsPaused,
   videoRef: externalVideoRef,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -574,6 +580,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
     setCurrentTime(safePos);
     setScrubTime(safePos);
+    // Коммит seek всегда завершает скраббинг (иначе timeupdate игносрится и строка/время стоят)
+    setIsScrubbing(false);
 
     if (isDesktop) {
       const dp = (window as any).desktopPlayer;
@@ -605,12 +613,55 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     onAttachSeekHandler?.(doSeek);
   }, [doSeek, onAttachSeekHandler]);
 
+  const doPlay = useCallback(() => {
+    if (isDesktop) {
+      (window as any).desktopPlayer?.play();
+      setIsPlaying(true);
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+    video.play().then(() => {
+      setIsPlaying(true);
+      setIsBuffering(false);
+    }).catch(() => {});
+  }, [isDesktop, videoRef]);
+
+  const doPause = useCallback(() => {
+    if (isDesktop) {
+      (window as any).desktopPlayer?.pause();
+      setIsPlaying(false);
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    setIsPlaying(false);
+  }, [isDesktop, videoRef]);
+
+  useEffect(() => {
+    onAttachPlayHandler?.(doPlay);
+  }, [doPlay, onAttachPlayHandler]);
+
+  useEffect(() => {
+    onAttachPauseHandler?.(doPause);
+  }, [doPause, onAttachPauseHandler]);
+
   useEffect(() => {
     onAttachGetCurrentTime?.(() => {
       if (isDesktop) return currentTime;
       return videoRef.current?.currentTime || 0;
     });
   }, [onAttachGetCurrentTime, isDesktop, currentTime, videoRef]);
+
+  useEffect(() => {
+    onAttachGetIsPaused?.(() => {
+      if (isDesktop) return !isPlaying;
+      const video = videoRef.current;
+      if (video) return video.paused;
+      return !isPlaying;
+    });
+  }, [onAttachGetIsPaused, isDesktop, isPlaying, videoRef]);
 
   const isInitialMount = useRef(true);
   const hasLoadedDesktopRef = useRef<string | null>(null);
@@ -636,39 +687,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     loadStreamSource(url, isDirectPlay, shouldStartPlay, startPos);
   }, [media.id, isDesktop]);
 
-  // Sync playback when roomState changes in Watch Together
-  useEffect(() => {
-    if (!isWatchTogether) return;
-
-    if (isDesktop) {
-      const dp = (window as any).desktopPlayer;
-      if (roomState === 'PLAYING') {
-        dp?.play();
-        setIsPlaying(true);
-      } else if (roomState === 'PAUSED') {
-        dp?.pause();
-        setIsPlaying(false);
-      }
-      return;
-    }
-
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (roomState === 'PLAYING') {
-      if (video.paused) {
-        video.play().then(() => {
-          setIsPlaying(true);
-          setIsBuffering(false);
-        }).catch(() => {});
-      }
-    } else if (roomState === 'PAUSED') {
-      if (!video.paused) {
-        video.pause();
-        setIsPlaying(false);
-      }
-    }
-  }, [roomState, isWatchTogether, isDesktop, videoRef]);
+  // NOTE (watch-together): play/pause/seek управляются ТОЛЬКО через useSyncPlayer
+  // (room:sync_state -> doSeek/doPlay/doPause выше). Отдельный useEffect[roomState] здесь
+  // удалён — он дублировал те же video.play()/pause() и давал гонку/двойные вызовы.
 
   // Quality or audio track switch
   const prevQualityRef = useRef(selectedQuality);
@@ -806,22 +827,42 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   };
 
   const lastSeekTimeRef = useRef<number>(0);
+  // Защита от запоздалых тач-событий слайдера (только joint): после pointerup-коммита
+  // приехавшие позже input/change игнорятся до следующего pointerdown
+  const seekCommitGuardRef = useRef<boolean>(false);
+
+  // Коммит перемотки по координате касания (только joint): на таче в момент pointerup
+  // e.target.value ещё старый (input приедет позже), поэтому тап коммитил прошлое место
+  // и видео уходило «немного назад» или стояло. Координата из события — всегда актуальна.
+  const commitSeekFromPointer = (e: React.PointerEvent<HTMLInputElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const width = Math.max(1, rect.width);
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / width));
+    const dur = effectiveDuration > 0 ? effectiveDuration : (parseFloat(e.currentTarget.max) || 0);
+    triggerSeek(ratio * dur);
+  };
 
   const triggerSeek = (targetTime: number) => {
+    const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
+    currentTimeRef.current = safePos;
+    setCurrentTime(safePos);
+    setScrubTime(safePos);
+    // Сброс скраба — ВСЕГДА, даже если отправка на сервер затроиллится (иначе timeupdate
+    // игнорируется флагом isScrubbing и строка/время стоят при играющем видео)
+    setIsScrubbing(false);
+
     if (isWatchTogether) {
       const now = Date.now();
       if (now - lastSeekTimeRef.current < 250) return;
       lastSeekTimeRef.current = now;
     }
 
-    const safePos = Math.max(0, Math.min(effectiveDuration, targetTime));
-    currentTimeRef.current = safePos;
-    setCurrentTime(safePos);
-    setScrubTime(safePos);
-    setIsScrubbing(false);
-
     if (isWatchTogether) {
-      onSeekRequest?.(safePos);
+      // Явно пробрасываем shouldPlay, чтобы инициатор и гости получили одинаковый state.
+      // Иначе sendSeek гадает по paused-статусу и SEEK расходится с PLAY (см. логи: SEEK ... -> PLAY ... с зазором).
+      const video = videoRef.current;
+      const shouldPlay = isDesktop ? isPlaying : video ? !video.paused : isPlaying;
+      onSeekRequest?.(safePos, shouldPlay);
     } else {
       doSeek(safePos);
       reportProgress(safePos);
@@ -1186,13 +1227,23 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             max={effectiveDuration || 100}
             step={0.1}
             value={displayTime}
-            onPointerDown={() => setIsScrubbing(true)}
+            onPointerDown={() => {
+              // Новый жест — снимаем защиту от запоздалых тач-событий прошлого коммита.
+              // (ref пишем всегда, поведение одиночки не меняется)
+              if (isWatchTogether) seekCommitGuardRef.current = false;
+              setIsScrubbing(true);
+            }}
             onInput={(e) => {
+              // На таче input/change могут приехать ПОСЛЕ pointerup коммита — такие запоздалые
+              // события игнорим, иначе они заново взводят isScrubbing и строка/время зависают.
+              // Только joint — одиночный слайдер не трогаем.
+              if (isWatchTogether && seekCommitGuardRef.current) return;
               setIsScrubbing(true);
               setScrubTime(parseFloat((e.target as HTMLInputElement).value));
             }}
             onChange={(e) => {
               if (isWatchTogether) {
+                if (seekCommitGuardRef.current) return;
                 setScrubTime(parseFloat(e.target.value));
               } else {
                 triggerSeek(parseFloat(e.target.value));
@@ -1200,11 +1251,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             }}
             onPointerUp={(e) => {
               if (isWatchTogether) {
-                triggerSeek(parseFloat((e.target as HTMLInputElement).value));
+                seekCommitGuardRef.current = true;
+                commitSeekFromPointer(e);
+              }
+            }}
+            onPointerCancel={(e) => {
+              // Прерванный жест (тач, второй палец, увод указателя): без этого isScrubbing
+              // залипает в true, timeupdate игнорируется и строка/время стоят при играющем видео.
+              // Только joint — одиночный слайдер не трогаем.
+              if (isWatchTogether) {
+                seekCommitGuardRef.current = true;
+                commitSeekFromPointer(e);
               }
             }}
             onKeyUp={(e) => {
               if (isWatchTogether && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
+                seekCommitGuardRef.current = true;
                 triggerSeek(parseFloat((e.target as HTMLInputElement).value));
               }
             }}
