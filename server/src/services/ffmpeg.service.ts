@@ -53,13 +53,8 @@ export function buildHlsSessionId(
 // Предикат direct-copy видео. ТВИН логики canCopyVideo из _createContinuousHlsSession
 // и getSegmentDuration — при смене белых списков менять синхронно во всех трёх местах!
 export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: boolean): boolean {
-  const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
-  const is4k = media.resolution === '4K';
-  const is4kVp9 = isVp9OrVp8 && is4k;
-  const isApple4kVp9 = isApple && is4kVp9;
-
   const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-  const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+  const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
   const isSupportedCodec = isApple
     ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
     : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
@@ -71,9 +66,7 @@ export function shouldUseFmp4(media: MediaItem, isApple: boolean): boolean {
   const rawVideoCodec = (media.videoCodec || '').toLowerCase();
   const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
   const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-  const is4k = media.resolution === '4K';
-  const isApple4kVp9 = isApple && isVp9 && is4k;
-  return (!isApple || isHevc || isVp9) && !isApple4kVp9;
+  return !isApple || isHevc || isVp9;
 }
 
 // Сколько сегментов обещать в VOD-плейлисте. Для copy+fmp4 muxer глотает хвостовой partial
@@ -121,13 +114,9 @@ class FFmpegService {
   private detectedEncoder: string | null = null;
 
   public async getSegmentDuration(media: MediaItem, quality: string = 'original', isApple: boolean = false): Promise<number> {
-    const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9OrVp8 && is4k;
-    const isApple4kVp9 = isApple && is4kVp9;
-
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    // 4K VP9 на Apple идёт нативно (как остальной VP9) — исключений больше нет
+    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedCodec = isApple
       ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
       : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
@@ -637,13 +626,9 @@ class FFmpegService {
       args.push('-map', '0:a:0?');
     }
 
-    const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9OrVp8 && is4k;
-    const isApple4kVp9 = isApple && is4kVp9;
-
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    // 4K VP9 на Apple идёт нативно (как остальной VP9) — исключений больше нет
+    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedCodec = isApple
       ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
       : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
@@ -665,16 +650,15 @@ class FFmpegService {
       } catch {}
     }
 
-    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac'];
+    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus'];
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
-    const isOpusIn4kVp9 = is4kVp9 && trackAudioCodec.includes('opus');
-    const canCopyAudio = (isApple ? isAppleNativeAudio : isPcNativeAudio) && !isOpusIn4kVp9;
 
-    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
+    const useFmp4 = shouldUseFmp4(media, isApple);
+    // Opus копируем только во фрагментированный MP4 (в MPEG-TS ему не место)
+    const isOpus = trackAudioCodec.includes('opus');
+    const canCopyAudio = (isApple ? isAppleNativeAudio : isPcNativeAudio) && !(isApple && isOpus && !useFmp4);
 
     const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
     logger.info('HLS', `🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iOS' : 'PC/Android'}): ` +
@@ -859,11 +843,7 @@ class FFmpegService {
     const quality = sessionId.match(/_q([a-zA-Z0-9]+)_/)?.[1] || 'original';
     const totalSegments = countPlaylistSegments(media, quality, isApple, segmentDuration);
 
-    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const is4k = media.resolution === '4K';
-    const isApple4kVp9 = isApple && isVp9 && is4k;
-    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
+    const useFmp4 = shouldUseFmp4(media, isApple);
     const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
