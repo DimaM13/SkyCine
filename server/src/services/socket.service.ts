@@ -445,6 +445,17 @@ class SocketService {
             if (userSet.size === 0) {
               this.userSockets.delete(user.userId);
               this.broadcastPresence(user.userId, 'offline');
+              // Страховка на случай потерянного end-маяка: если через 10с у юзера так и нет
+              // живых сокетов — чистим его соло-HLS сессии. Проверка В МОМЕНТ срабатывания,
+              // а не сразу: StrictMode-ремонт и реконнект сокета (пауза в мс-секунды) успевают
+              // переподключиться и килл отменяется. Обычное закрытие и так чистится маяком
+              // мгновенно — сюда доходит только потерянный маяк. Комнатные сессии не трогаем.
+              const diedUserId = user.userId;
+              setTimeout(() => {
+                if (!this.userSockets.has(diedUserId)) {
+                  ffmpegService.killSoloSessionsForUser(diedUserId);
+                }
+              }, 10000);
             }
           }
           this.users.delete(socket.id);

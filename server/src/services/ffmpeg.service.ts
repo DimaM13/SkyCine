@@ -12,6 +12,7 @@ const execFileAsync = promisify(execFile);
 export interface ContinuousHlsSession {
   sessionId: string;
   mediaId: string;
+  ownerUserId?: string;
   sessionDir: string;
   process: ChildProcess;
   lastAccess: number;
@@ -27,6 +28,26 @@ export interface ContinuousHlsSession {
   _createdAt: number;
   _watcherInterval?: ReturnType<typeof setInterval>;
   _fsWatcher?: fs.FSWatcher;
+}
+
+// Единый конструктор sessionId для HLS. Суффикс _m{mount} привязывает сессию к конкретному
+// маунту плеера: прощальный маяк от старого маунта (StrictMode-ремонт, вторая вкладка) физически
+// не может попасть в чужую живую сессию. Без mount — легаси-id, поведение как раньше.
+export function buildHlsSessionId(
+  mediaId: string,
+  quality: string,
+  audioIndex: number,
+  isApple: boolean,
+  roomId?: string,
+  userId?: string,
+  mount?: string,
+): string {
+  const deviceSuffix = isApple ? 'apple' : 'pc';
+  const roomSuffix = roomId ? `_r${roomId}` : '';
+  const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
+  const cleanMount = (mount || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
+  const mountSuffix = cleanMount ? `_m${cleanMount}` : '';
+  return `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
 }
 
 // Sliding window constants (optimized for 1GB RAM disk)
@@ -373,7 +394,8 @@ class FFmpegService {
     audioIndex: number = 0,
     startTime: number = 0,
     isApple: boolean = false,
-    sessionIdOverride?: string
+    sessionIdOverride?: string,
+    ownerUserId?: string,
   ): Promise<{ sessionId: string }> {
     const segDuration = await this.getSegmentDuration(media, quality, isApple);
     const cleanStartTime = Math.max(0, Math.floor(startTime));
@@ -387,8 +409,15 @@ class FFmpegService {
       return inFlight;
     }
 
-    // 2. Check if an existing session covers this position
-    const existing = this.continuousSessions.get(sessionId);
+    // 2. Check if an existing session covers this position.
+    // Сессия с АВАРИЙНО умершим процессом (не EOF с кодом 0 — такие досчитали файл и раздают
+    // сегменты с диска) никогда не переиспользуется — пересоздаём.
+    let existing = this.continuousSessions.get(sessionId);
+    if (existing && this.isProcessCrashed(existing)) {
+      logger.info('HLS', `Dead session object [${sessionId}] found (process crashed), dropping and recreating`);
+      this.continuousSessions.delete(sessionId);
+      existing = undefined;
+    }
     if (existing && existing.process && !existing.process.killed) {
       existing.lastAccess = Date.now();
       const currentStart = existing.startTime;
@@ -410,7 +439,7 @@ class FFmpegService {
       this.retireSession(sessionId, existing);
     }
 
-    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration);
+    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId);
     this.sessionCreationPromises.set(sessionId, promise);
 
     try {
@@ -470,6 +499,7 @@ class FFmpegService {
     sessionId: string,
     deviceSuffix: string,
     segDuration: number,
+    ownerUserId?: string,
     isRetry: boolean = false
   ): Promise<{ sessionId: string }> {
     await this.warmupFile(media.filePath);
@@ -626,6 +656,7 @@ class FFmpegService {
     const sessionObj: ContinuousHlsSession = {
       sessionId,
       mediaId: media.id,
+      ownerUserId,
       sessionDir,
       process: proc,
       lastAccess: Date.now(),
@@ -701,7 +732,9 @@ class FFmpegService {
 
     if (!sessionObj.isReady) {
       const isDead = proc.killed || proc.exitCode !== null || proc.signalCode !== null;
-      logger.error('HLS', `⚠️ First segment wait failed (${isDead ? `process exited early with code ${proc.exitCode}` : 'timeout >12s'}) for [${sessionId}]. Last stderr:`, {
+      const waitedMs = Date.now() - startWait;
+      // Честно различаем «сессию убили во время старта» и «ffmpeg реально тупил 12с»
+      logger.error('HLS', `⚠️ First segment not ready for [${sessionId}] (waited ${waitedMs}ms, ${isDead ? `process gone with code ${proc.exitCode}` : 'process alive but silent — likely killed mid-startup or stalled input'}). Last stderr:`, {
         lastStderr: lastStderrLines.slice(-10)
       });
 
@@ -709,7 +742,7 @@ class FFmpegService {
       if (isDead && !isRetry) {
         logger.warn('HLS', `🔄 Self-healing: restarting session [${sessionId}] after unexpected process exit`);
         this.retireSession(sessionId, sessionObj);
-        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, true);
+        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, true);
       }
     }
 
@@ -791,6 +824,13 @@ class FFmpegService {
 
     // 2. If session exists, deliver segment or resume
     if (session) {
+      // Процесс аварийно умер — не ждём 6с впустую, сразу 404: плеер перечитает master.m3u8
+      // и сессия пересоздастся. Чистый EOF (код 0) идёт обычным путём — сегменты на диске.
+      if (!isInit && this.isProcessCrashed(session)) {
+        logger.warn('HLS', `Session process crashed [${sessionId}], dropping entry so next request recreates it`);
+        this.continuousSessions.delete(sessionId);
+        return null;
+      }
       if (!isInit) {
         session.lastRequestedSegmentIndex = Math.max(session.lastRequestedSegmentIndex, segmentIndex);
       }
@@ -862,7 +902,7 @@ class FFmpegService {
       const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
 
       logger.info('HLS', `⚡ Seek detected [${sessionId}] to segment #${segmentIndex} (${targetStartTime}s). Active window latest is #${session.latestSegmentIndex}. Re-starting session at ${targetStartTime}s`);
-      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId);
+      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId, session.ownerUserId);
 
       const activeSession = this.continuousSessions.get(sessionId);
       if (activeSession) {
@@ -881,6 +921,18 @@ class FFmpegService {
     }
 
     return null;
+  }
+
+  // Аварийно умерший процесс: вышел с ненулевым кодом (кроме виндового кода ретайра),
+  // убит сигналом или kill(). Чистое завершение в EOF (код 0) — НЕ смерть: файл досчитан,
+  // сегменты на диске и раздаются дальше.
+  private isProcessCrashed(session: ContinuousHlsSession): boolean {
+    const proc = session.process as any;
+    if (!proc) return false;
+    if (proc.killed) return true;
+    if (proc.signalCode !== null && proc.signalCode !== undefined) return true;
+    if (proc.exitCode !== null && proc.exitCode !== undefined && proc.exitCode !== 0 && proc.exitCode !== 4294967295) return true;
+    return false;
   }
 
   public killSession(sessionId: string): void {
@@ -914,6 +966,19 @@ class FFmpegService {
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (session.mediaId === mediaId && !sId.includes('_r')) {
         logger.info('HLS', `🛑 Killing solo session for media ${mediaId}: ${sId}`);
+        this.killSession(sId);
+      }
+    }
+  }
+
+  // Чистка соло-сессий юзера, у которого не осталось живых сокетов (закрытие/креш вкладки —
+  // страховка на случай потерянного end-маяка; вызывается отложенно с перепроверкой).
+  // Комнатные сессии тут не трогаем: их ведёт socket.service.
+  public killSoloSessionsForUser(userId: string): void {
+    if (!userId) return;
+    for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
+      if (!sId.includes('_r') && session.ownerUserId === userId) {
+        logger.info('HLS', `🧹 Cleaning up solo session of disconnected user ${userId}: ${sId}`);
         this.killSession(sId);
       }
     }

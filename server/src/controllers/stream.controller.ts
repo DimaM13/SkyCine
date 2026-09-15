@@ -6,7 +6,7 @@ import path from 'path';
 import mime from 'mime-types';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { ffmpegService, FFmpegService } from '../services/ffmpeg.service';
+import { ffmpegService, FFmpegService, buildHlsSessionId } from '../services/ffmpeg.service';
 import { MediaItem } from '../types';
 import { permissionService } from '../services/permission.service';
 
@@ -361,6 +361,7 @@ export class StreamController {
       const userAgent = req.headers['user-agent'] || '';
       const isApple = req.query.isApple === '1' || /iPad|iPhone|iPod|Macintosh/i.test(userAgent);
       const roomId = req.query.roomId as string || '';
+      const mount = req.query.mount as string || '';
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
@@ -368,13 +369,10 @@ export class StreamController {
         return;
       }
 
-      const deviceSuffix = isApple ? 'apple' : 'pc';
-      const roomSuffix = roomId ? `_r${roomId}` : '';
-      const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
-      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
+      const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount);
 
       // Start / Prewarm continuous session
-      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId).catch(() => {});
 
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
     } catch (err: any) {
@@ -391,15 +389,13 @@ export class StreamController {
       const audioIndex = req.body?.audioIndex !== undefined ? req.body.audioIndex : (req.query.audioIndex !== undefined ? parseInt(req.query.audioIndex as string, 10) : undefined);
       const isApple = req.body?.isApple !== undefined ? req.body.isApple : (req.query.isApple === '1');
       const roomId = req.body?.roomId || (req.query.roomId as string);
+      const mount = req.body?.mount || (req.query.mount as string) || '';
 
       if (roomId) {
         const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(roomId);
         if (room) {
           if (mediaId && quality && audioIndex !== undefined) {
-            const deviceSuffix = isApple ? 'apple' : 'pc';
-            const roomSuffix = `_r${roomId}`;
-            const userSuffix = userId ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
-            const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
+            const sessionId = buildHlsSessionId(mediaId, quality, audioIndex, !!isApple, roomId, userId, mount);
             ffmpegService.killSession(sessionId);
           }
           res.json({ success: true, message: 'User room session ended' });
@@ -409,14 +405,16 @@ export class StreamController {
 
       if (mediaId) {
         if (quality && audioIndex !== undefined) {
-          const deviceSuffix = isApple ? 'apple' : 'pc';
-          const roomSuffix = roomId ? `_r${roomId}` : '';
-          const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
-          const sessionId = `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
+          const sessionId = buildHlsSessionId(mediaId, quality, audioIndex, !!isApple, undefined, userId, mount);
           ffmpegService.killSession(sessionId);
         }
         if (!roomId) {
-          ffmpegService.killSoloSessionsForMedia(mediaId);
+          // Широкий килл по медиа — только для легаси-клиентов без mount (у них id общий).
+          // С mount бьём точечно выше: чужую живую сессию задеть нельзя. Осиротевшие сессии
+          // подбирает чистка по дисконнекту сокета + idle-свипер.
+          if (!mount) {
+            ffmpegService.killSoloSessionsForMedia(mediaId);
+          }
         }
       }
       res.json({ success: true });
@@ -445,6 +443,7 @@ export class StreamController {
       const authHeader = req.headers.authorization;
       const token = (req.query.token as string) || (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '') : '');
       const roomId = req.query.roomId as string || '';
+      const mount = req.query.mount as string || '';
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
@@ -452,13 +451,10 @@ export class StreamController {
         return;
       }
 
-      const deviceSuffix = isApple ? 'apple' : 'pc';
-      const roomSuffix = roomId ? `_r${roomId}` : '';
-      const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
-      const sessionId = `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}`;
+      const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount);
 
       // Start/prewarm session
-      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId).catch(() => {});
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId).catch(() => {});
 
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
       const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple);

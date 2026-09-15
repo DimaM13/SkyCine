@@ -129,7 +129,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const isAppleDevice = useMemo(() => {
     if (typeof navigator === 'undefined') return false;
     const ua = navigator.userAgent;
-    return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    // Десктопный Mac тоже Apple: те же кодеки/ограничения, что у iPad/iPhone,
+    // воспроизведение — через нативный AVPlayer где он есть (Safari),
+    // остальные браузеры сами упадут в hls.js по canPlayType-проверке ниже
+    return /iPad|iPhone|iPod/.test(ua) || /Macintosh/.test(ua);
   }, []);
 
   useEffect(() => {
@@ -477,6 +480,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     streamInfoRef.current = { mediaId: media.id, quality: selectedQuality, audioIndex: selectedAudioTrack, isApple: isAppleDevice, isDirectPlay };
   }, [media.id, selectedQuality, selectedAudioTrack, isAppleDevice, isDirectPlay]);
 
+  // Уникальный id маунта плеера: сервер привязывает HLS-сессию к нему (суффикс _m...).
+  // Прощальный маяк старого маунта (StrictMode-ремонт, вторая вкладка) чужую живую сессию
+  // задеть не может. Стабилен весь маунт, уникален между маунтами/вкладками.
+  const mountIdRef = useRef<string>(Math.random().toString(36).substring(2, 10));
+
   // Clean up Hls and terminate FFmpeg session on unmount or page exit
   useEffect(() => {
     const endSession = () => {
@@ -512,7 +520,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
 
       if (!isDirectPlay && !isWatchTogether) {
-        const payload = JSON.stringify({ mediaId, quality, audioIndex, isApple });
+        const payload = JSON.stringify({ mediaId, quality, audioIndex, isApple, mount: mountIdRef.current });
 
         try {
           if (navigator.sendBeacon) {
@@ -572,7 +580,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     const isAppleParam = isAppleDevice ? '1' : '0';
     const startParam = startPos > 0 ? `startTime=${Math.floor(startPos)}` : '';
-    const params = [`quality=${quality}`, `audioIndex=${audioIndex}`, `isApple=${isAppleParam}`, startParam, tokenParam, roomParam].filter(Boolean).join('&');
+    const mountParam = `mount=${mountIdRef.current}`;
+    const params = [`quality=${quality}`, `audioIndex=${audioIndex}`, `isApple=${isAppleParam}`, startParam, tokenParam, roomParam, mountParam].filter(Boolean).join('&');
     return `/api/stream/${media.id}/master.m3u8?${params}`;
   }, [media.id, isDirectPlay, isAppleDevice, isWatchTogether, room?.id]);
 
