@@ -50,9 +50,47 @@ export function buildHlsSessionId(
   return `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
 }
 
+// Предикат direct-copy видео. ТВИН логики canCopyVideo из _createContinuousHlsSession
+// и getSegmentDuration — при смене белых списков менять синхронно во всех трёх местах!
+export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: boolean): boolean {
+  const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
+  const is4k = media.resolution === '4K';
+  const is4kVp9 = isVp9OrVp8 && is4k;
+  const isApple4kVp9 = isApple && is4kVp9;
+
+  const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+  const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+  const isSupportedCodec = isApple
+    ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
+    : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
+  return quality === 'original' && isSupportedCodec;
+}
+
+// Предикат fmp4-контейнера. Твин строки useFmp4 из _createContinuousHlsSession и generateVodPlaylist.
+export function shouldUseFmp4(media: MediaItem, isApple: boolean): boolean {
+  const rawVideoCodec = (media.videoCodec || '').toLowerCase();
+  const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
+  const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+  const is4k = media.resolution === '4K';
+  const isApple4kVp9 = isApple && isVp9 && is4k;
+  return (!isApple || isHevc || isVp9) && !isApple4kVp9;
+}
+
+// Сколько сегментов обещать в VOD-плейлисте. Для copy+fmp4 muxer глотает хвостовой partial
+// (проверено воспроизведением: обещанный round-хвост не производится никогда) — floor.
+// Остальные режимы (транскод, mpegts) хвост флашат — round как раньше, без изменений.
+export function countPlaylistSegments(media: MediaItem, quality: string, isApple: boolean, segDuration: number): number {
+  const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
+  const seg = segDuration && segDuration > 0 ? segDuration : 4;
+  const raw = duration / seg;
+  const dropTail = isDirectCopyVideo(media, quality, isApple) && shouldUseFmp4(media, isApple);
+  return Math.max(1, dropTail ? Math.floor(raw) : Math.round(raw));
+}
+
 // Sliding window constants (optimized for 1GB RAM disk)
 const WINDOW_AHEAD = 8;    // Max 8 segments ahead (~32 sec of video)
-const WINDOW_BEHIND = 3;   // Keep 3 segments behind for buffer re-read (~12 sec)
+const WINDOW_BEHIND = 10;  // Keep 10 segments behind (~35 sec): плейхед, догоняющий префетч-фронт,
+                           // не должен упираться в затёртую дыру (иначе каждый такой промах = рестарт ffmpeg)
 
 class FFmpegService {
   public static activeDirectPids = new Set<number>();
@@ -757,12 +795,13 @@ class FFmpegService {
   public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0, segDuration: number = 4): string {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
     const segmentDuration = segDuration && segDuration > 0 ? segDuration : 4;
-    const totalSegments = Math.max(1, Math.round(duration / segmentDuration));
+    const isApple = sessionId.includes('_apple');
+    const quality = sessionId.match(/_q([a-zA-Z0-9]+)_/)?.[1] || 'original';
+    const totalSegments = countPlaylistSegments(media, quality, isApple, segmentDuration);
 
     const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
     const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
     const is4k = media.resolution === '4K';
-    const isApple = sessionId.includes('_apple');
     const isApple4kVp9 = isApple && isVp9 && is4k;
     const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
     const ext = useFmp4 ? '.m4s' : '.ts';
@@ -815,8 +854,11 @@ class FFmpegService {
     let session = this.continuousSessions.get(sessionId);
     const segDuration = session?.segmentDuration || 4;
 
+    // Единый подсчёт с плейлистом (floor для copy+fmp4 — хвостового фантома в нём уже нет)
+    const guardQuality = sessionId.match(/_q([a-zA-Z0-9]+)_/)?.[1] || 'original';
+    const guardIsApple = sessionId.includes('_apple');
+    const totalSegments = countPlaylistSegments(media, guardQuality, guardIsApple, segDuration);
     // Reject segments past the end of the media duration immediately (zero timeout)
-    const totalSegments = Math.max(1, Math.round((media.durationSeconds || 7200) / segDuration));
     if (!isInit && segmentIndex >= totalSegments) {
       logger.debug('HLS', `Rejecting segment beyond duration [${sessionId}] seg_${segmentIndex} >= ${totalSegments}`);
       return null;
@@ -830,6 +872,16 @@ class FFmpegService {
         logger.warn('HLS', `Session process crashed [${sessionId}], dropping entry so next request recreates it`);
         this.continuousSessions.delete(sessionId);
         return null;
+      }
+      // Хвостовой фантом (остаточный риск): запрошен ПОСЛЕДНИЙ сегмент плейлиста, а ffmpeg уже
+      // завершён — файл не появится никогда. Короткая пауза на гонку дискового флаша и сразу
+      // 404 вместо 6.5с ступора. Живой процесс ждёт обычным путём ниже.
+      if (!isInit && segmentIndex === totalSegments - 1 && this.isProcessFinished(session)) {
+        const tailFound = await this.waitForSegment(session.sessionDir, segmentName, sessionId, 12);
+        if (!tailFound) {
+          logger.warn('HLS', `Tail phantom [${sessionId}] ${segmentName}: process finished, segment will never appear (fast 404)`);
+          return null;
+        }
       }
       if (!isInit) {
         session.lastRequestedSegmentIndex = Math.max(session.lastRequestedSegmentIndex, segmentIndex);
@@ -864,6 +916,19 @@ class FFmpegService {
         const ahead = session.latestSegmentIndex - segmentIndex;
         if (ahead <= 4) {
           await this.resumeFFmpeg(session);
+        }
+      }
+
+      // Промах чуть позади фронта (догоняющий плейхед / rename-гонка temp_file / бут-лаг
+      // после рестарта): сессию НЕ убиваем — короткое ожидание (0.5с) и перепроверка.
+      // Далёкие прыжки назад падают ниже в обычный seek-restart как раньше.
+      if (segmentIndex >= session.latestSegmentIndex - WINDOW_BEHIND && segmentIndex < session.latestSegmentIndex) {
+        const catchUp = await this.waitForSegment(session.sessionDir, segmentName, sessionId, 5);
+        if (catchUp) {
+          session.lastAccess = Date.now();
+          session.latestSegmentIndex = Math.max(session.latestSegmentIndex, segmentIndex);
+          this.cleanupOldSegments(session, segmentIndex);
+          return catchUp;
         }
       }
 
@@ -984,9 +1049,20 @@ class FFmpegService {
     }
   }
 
-  private async waitForSegment(sessionDir: string, segmentName: string, sessionId?: string): Promise<string | null> {
+  // Процесс завершён (любым кодом), убит или сигнал — производить больше не будет.
+  // Приостановленный (suspend) НЕ считается завершённым: после resume продолжит.
+  private isProcessFinished(session: ContinuousHlsSession): boolean {
+    const proc = session.process as any;
+    if (!proc) return true;
+    if (proc.killed) return true;
+    if (proc.signalCode !== null && proc.signalCode !== undefined) return true;
+    if (proc.exitCode !== null && proc.exitCode !== undefined) return true;
+    return false;
+  }
+
+  private async waitForSegment(sessionDir: string, segmentName: string, sessionId?: string, maxIters: number = 60): Promise<string | null> {
     const segPath = path.join(sessionDir, segmentName);
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < maxIters; i++) {
       if (sessionId && !this.continuousSessions.has(sessionId) && !this.closingSessions.has(sessionId)) {
         return null;
       }
