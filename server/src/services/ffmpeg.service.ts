@@ -91,6 +91,10 @@ export function countPlaylistSegments(media: MediaItem, quality: string, isApple
 const WINDOW_AHEAD = 8;    // Max 8 segments ahead (~32 sec of video)
 const WINDOW_BEHIND = 10;  // Keep 10 segments behind (~35 sec): плейхед, догоняющий префетч-фронт,
                            // не должен упираться в затёртую дыру (иначе каждый такой промах = рестарт ffmpeg)
+// Байт-крышки окна (для жирного контента: 4K-ремукс даёт 20-30МБ на сегмент,
+// и счётное окно в одиночку съедает полгига). Обычный контент их не замечает.
+const WINDOW_BEHIND_BYTES = 96 * 1024 * 1024; // ~96МБ позади
+const WINDOW_AHEAD_BYTES = 96 * 1024 * 1024;  // ~96МБ впереди
 
 class FFmpegService {
   public static activeDirectPids = new Set<number>();
@@ -250,7 +254,8 @@ class FFmpegService {
     const minToKeep = currentSegmentIndex - WINDOW_BEHIND;
     if (minToKeep <= session.startSegmentNumber) return;
 
-    fs.promises.readdir(session.sessionDir).then(files => {
+    fs.promises.readdir(session.sessionDir).then(async (files) => {
+      // 1. Счётное окно как раньше
       let purgedCount = 0;
       for (const file of files) {
         const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
@@ -261,10 +266,56 @@ class FFmpegService {
           purgedCount++;
         }
       }
-      if (purgedCount > 0) {
-        logger.debug('HLS_CLEANUP', `Purged ${purgedCount} segments behind #${minToKeep} for session ${session.sessionId}`);
-      }
+      // 2. Байт-крышка позади current: для жирного контента 10 файлов это полгига —
+      // добираем самые старые, пока вес > CAP. Держим минимум 2 файла,
+      // idx >= current не трогаем никогда. Обычный контент сюда не попадает.
+      try {
+        const behind: { idx: number; size: number; name: string }[] = [];
+        for (const file of files) {
+          const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
+          if (!match) continue;
+          const idx = parseInt(match[1], 10);
+          if (idx < session.startSegmentNumber || idx >= currentSegmentIndex) continue;
+          if (idx < minToKeep) continue; // уже удалены выше
+          try {
+            const st = await fs.promises.stat(path.join(session.sessionDir, file));
+            behind.push({ idx, size: st.size, name: file });
+          } catch {}
+        }
+        behind.sort((a, b) => a.idx - b.idx);
+        let total = behind.reduce((s, f) => s + f.size, 0);
+        let kept = behind.length;
+        let byteTrimmed = 0;
+        for (const f of behind) {
+          if (total <= WINDOW_BEHIND_BYTES) break;
+          if (kept <= 2) break;
+          fs.promises.unlink(path.join(session.sessionDir, f.name)).catch(() => {});
+          total -= f.size;
+          kept--;
+          byteTrimmed++;
+        }
+        if (purgedCount > 0 || byteTrimmed > 0) {
+          logger.debug('HLS_CLEANUP', `Purged ${purgedCount} segments behind #${minToKeep} + ${byteTrimmed} by byte-cap for session ${session.sessionId}`);
+        }
+      } catch {}
     }).catch(() => {});
+  }
+
+  // Суммарный вес seg-файлов в диапазоне индексов (служебные файлы мимо).
+  // Синхронный: рамдиск, ~20 stat'ов — доли миллисекунды.
+  private dirBytesInRange(sessionDir: string, fromIdx: number, toIdx: number): number {
+    let total = 0;
+    try {
+      const files = fs.readdirSync(sessionDir);
+      for (const file of files) {
+        const match = file.match(/^seg_(\d+)\.(ts|m4s)$/);
+        if (!match) continue;
+        const idx = parseInt(match[1], 10);
+        if (idx < fromIdx || idx > toIdx) continue;
+        try { total += fs.statSync(path.join(sessionDir, file)).size; } catch {}
+      }
+    } catch {}
+    return total;
   }
 
   // ── Kernel-level FFmpeg Process Suspend (via NtSuspendProcess) ──
@@ -326,7 +377,12 @@ class FFmpegService {
         session.latestSegmentIndex = Math.max(session.latestSegmentIndex, idx);
 
         const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
-        if (ahead > WINDOW_AHEAD && session.isReady) {
+        // Байт-крышка впереди: для жирного контента 8 штук это ~200МБ — встаём раньше.
+        // Обычный контент идёт счётной веткой как раньше.
+        const aheadBytes = ahead > 2
+          ? this.dirBytesInRange(session.sessionDir, session.lastRequestedSegmentIndex + 1, session.latestSegmentIndex)
+          : 0;
+        if ((ahead > WINDOW_AHEAD || aheadBytes > WINDOW_AHEAD_BYTES) && session.isReady) {
           this.suspendFFmpeg(session);
         }
       });
@@ -352,7 +408,11 @@ class FFmpegService {
         }
         session.latestSegmentIndex = maxIdx;
 
-        if (!session.isSuspended && session.latestSegmentIndex - session.lastRequestedSegmentIndex > WINDOW_AHEAD && session.isReady) {
+        const aheadInt = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
+        const aheadIntBytes = aheadInt > 2
+          ? this.dirBytesInRange(session.sessionDir, session.lastRequestedSegmentIndex + 1, session.latestSegmentIndex)
+          : 0;
+        if (!session.isSuspended && (aheadInt > WINDOW_AHEAD || aheadIntBytes > WINDOW_AHEAD_BYTES) && session.isReady) {
           this.suspendFFmpeg(session);
         }
       } catch {}
@@ -898,7 +958,10 @@ class FFmpegService {
 
         if (!session.isSuspended && !isInit) {
           const ahead = session.latestSegmentIndex - session.lastRequestedSegmentIndex;
-          if (ahead > WINDOW_AHEAD) {
+          const aheadBytes = ahead > 2
+            ? this.dirBytesInRange(session.sessionDir, session.lastRequestedSegmentIndex + 1, session.latestSegmentIndex)
+            : 0;
+          if (ahead > WINDOW_AHEAD || aheadBytes > WINDOW_AHEAD_BYTES) {
             this.suspendFFmpeg(session);
           }
         }
@@ -911,10 +974,15 @@ class FFmpegService {
         return this.waitForSegment(session.sessionDir, segmentName, sessionId);
       }
 
-      // Resume if suspended and buffer is low (ahead <= 4)
+      // Resume if suspended and buffer is low (ahead <= 4). Байтовая половина порога —
+      // гистерезис: иначе на жирном контенте будет дёргаться suspend/resume на каждом запросе.
+      // Обычный контент идёт счётной веткой как раньше.
       if (session.isSuspended) {
         const ahead = session.latestSegmentIndex - segmentIndex;
-        if (ahead <= 4) {
+        const aheadBytes = ahead > 2
+          ? this.dirBytesInRange(session.sessionDir, segmentIndex + 1, session.latestSegmentIndex)
+          : 0;
+        if (ahead <= 4 && aheadBytes <= WINDOW_AHEAD_BYTES / 2) {
           await this.resumeFFmpeg(session);
         }
       }
