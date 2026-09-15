@@ -156,8 +156,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawAudioCodec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
 
+    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+    const is4k = media.resolution === '4K';
+    const is4kVp9 = isVp9 && is4k;
+    if (is4kVp9 && rawAudioCodec.includes('opus')) return false;
+
     if (isAppleDevice) {
-      // 4K VP9 и Opus на Apple идут нативно — исключений больше нет
       const isNativeAppleAudio = ['aac', 'mp3', 'ac3', 'eac3', 'alac', 'opus'].some(c => rawAudioCodec.includes(c));
       const isNativeAppleVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(rawVideoCodec);
       return isNativeAppleAudio && isNativeAppleVideo;
@@ -178,24 +182,27 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
     const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
+    const is4k = media.resolution === '4K';
+    const is4kVp9 = isVp9 && is4k;
+    const isApple4kVp9 = isAppleDevice && is4kVp9;
 
     // Check if video codec is supported by browser for Direct Copy without transcoding
-    // (4K VP9 на Apple — нативно, без исключений)
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedVideo = isAppleDevice
       ? appleSupportedCodecs.includes(rawVideoCodec)
       : pcSupportedCodecs.includes(rawVideoCodec);
 
     const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
-    const useFmp4 = !isAppleDevice || isHevc || isVp9;
+    const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
 
-    const isOpus = rawAudioCodec.includes('OPUS');
-    // Opus копируем только во fMP4 (в MPEG-TS ему не место) — зеркало серверной логики
+    const isOpusIn4kVp9 = is4kVp9 && rawAudioCodec.includes('OPUS');
     const isAudioTrans = !isDirectPlay && (
-      isAppleDevice
-        ? (!['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c)) || (isOpus && !useFmp4))
-        : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
+      isOpusIn4kVp9 || (
+        isAppleDevice
+          ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
+          : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
+      )
     );
 
     let modeText = 'Direct Stream (Оригинал)';
@@ -213,9 +220,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
     } else {
       modeType = 'transcode';
-      const vText = !isSupportedVideo
-        ? `${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
-        : `${selectedQuality}`;
+      const vText = isApple4kVp9
+        ? '4K VP9 → H.264'
+        : !isSupportedVideo
+          ? `${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
+          : `${selectedQuality}`;
       const aText = isAudioTrans
         ? `Звук: ${rawAudioCodec || 'DTS'} → AAC`
         : `Звук: Оригинал (${rawAudioCodec || 'AAC'})`;
@@ -269,9 +278,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
     const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
     const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-    const useFmp4 = !isAppleDevice || isHevc || isVp9;
+    const is4k = media.resolution === '4K';
+    const is4kVp9 = isVp9 && is4k;
+    const isApple4kVp9 = isAppleDevice && is4kVp9;
+    const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
     return useFmp4 ? 'fmp4' : 'apple_ts';
-  }, [isDirectPlay, isAppleDevice, media.videoCodec]);
+  }, [isDirectPlay, isAppleDevice, media.videoCodec, media.resolution]);
 
   useEffect(() => {
     if (isWatchTogether && onStreamModeDetected) {
