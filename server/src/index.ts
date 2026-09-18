@@ -109,12 +109,10 @@ server.listen(PORT, async () => {
   console.log(`🌐 Local Web Interface: http://localhost:3000`);
   console.log(`🛠  Server API: http://localhost:${PORT}/api`);
 
-  // Initialize UPnP automatic port forwarding
+  // Initialize UPnP automatic port forwarding (со сторожем: при обрыве сети
+  // маппинг сам восстановится в течение минуты, без рестарта сервера)
   try {
-    const upnpRes = await UpnpService.init(3000);
-    if (upnpRes.success) {
-      console.log(`🚀 UPnP Direct Public Link: http://${upnpRes.publicIp}:3000`);
-    }
+    await UpnpService.init(3000);
   } catch (e) {}
 
   console.log(`=========================================`);

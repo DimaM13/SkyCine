@@ -116,6 +116,8 @@ export interface Room {
   hostAvatar?: string;
 }
 
+export type MemberHealthStatus = 'ok' | 'warning' | 'lagging' | 'buffering' | 'offline';
+
 export interface RoomMember {
   userId: string;
   username: string;
@@ -128,6 +130,46 @@ export interface RoomMember {
   bufferPercent?: number;
   streamMode?: 'direct' | 'apple_ts' | 'fmp4';
   joinedAt: string;
+  // ── Room Health telemetry (Watch Together diagnostics) ──
+  isBuffering?: boolean;
+  isPlaying?: boolean;
+  bufferedAheadSec?: number;
+  stallCount?: number;
+  stallMs?: number;
+  rttMs?: number;
+  droppedFrames?: number;
+  platform?: 'web' | 'desktop' | 'mobile' | string;
+  hwdec?: string;
+  healthStatus?: MemberHealthStatus;
+  lastHealthUpdate?: number;
+}
+
+export interface RoomHealthEntry {
+  userId: string;
+  username: string;
+  avatarUrl?: string;
+  status: MemberHealthStatus;
+  isBuffering: boolean;
+  bufferedAheadSec: number;
+  stallCount: number;
+  rttMs: number;
+  droppedFrames: number;
+  driftSec: number;
+  platform?: string;
+  streamMode?: string;
+  currentPosition: number;
+  detail: string;
+}
+
+export interface RoomActionFeedEntry {
+  id: string;
+  userId: string;
+  username: string;
+  avatarUrl?: string;
+  action: 'PLAY' | 'PAUSE' | 'SEEK' | 'JOIN' | 'LEAVE' | 'SYNC' | 'BUFFERING' | 'RECOVERED';
+  position?: number;
+  text: string;
+  timestamp: number;
 }
 
 export interface ServerSettings {

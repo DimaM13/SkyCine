@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
-import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState } from '../types';
+import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState, RoomHealthUpdate, RoomHealthEntry, RoomActionFeedEntry, RoomRollbackNotice } from '../types';
 
 interface UseSyncPlayerProps {
   room: Room | null;
@@ -24,7 +24,7 @@ export function useSyncPlayer({
   getCurrentTime,
   getIsPaused,
 }: UseSyncPlayerProps) {
-  const { socket, getSyncedServerTime } = useSocket();
+  const { socket, getSyncedServerTime, getRtt } = useSocket();
   const { user } = useAuth();
 
   const [roomState, setRoomState] = useState<RoomState>(room?.state || 'PAUSED');
@@ -33,16 +33,25 @@ export function useSyncPlayer({
   const [reactions, setReactions] = useState<RoomReaction[]>([]);
   const [syncDiffSec, setSyncDiffSec] = useState<number>(0);
   const [isHost, setIsHost] = useState(false);
-  const [isMicroCorrection, setIsMicroCorrection] = useState(false);
+  // ── Room Health (диагностика "кто тормозит") ──
+  const [health, setHealth] = useState<RoomHealthEntry[]>([]);
+  const [culpritIds, setCulpritIds] = useState<string[]>([]);
+  const [waitingFor, setWaitingFor] = useState<string[]>([]);
+  const [waitingText, setWaitingText] = useState<string | null>(null);
+  const [actionFeed, setActionFeed] = useState<RoomActionFeedEntry[]>([]);
+  const [rollbackNotice, setRollbackNotice] = useState<RoomRollbackNotice | null>(null);
+
+  // Локальная телеметрия воспроизведения
+  const isBufferingRef = useRef<boolean>(false);
+  const stallCountRef = useRef<number>(0);
+  const stallMsRef = useRef<number>(0);
+  const stallStartRef = useRef<number>(0);
+  const droppedFramesRef = useRef<number>(0);
+  const droppedBaseRef = useRef<number>(0);
+  const lastBufferingEmitRef = useRef<number>(0);
 
   const roomStateRef = useRef<RoomState>(room?.state || 'PAUSED');
   const isInternalAction = useRef<boolean>(false);
-  const isMicroCorrectionRef = useRef<boolean>(false);
-  isMicroCorrectionRef.current = isMicroCorrection;
-
-  const [microCorrectionOffset, setMicroCorrectionOffset] = useState<number>(0);
-  const microCorrectionOffsetRef = useRef<number>(0);
-  microCorrectionOffsetRef.current = microCorrectionOffset;
 
   const streamModeRef = useRef<'direct' | 'apple_ts' | 'fmp4'>(streamMode);
   streamModeRef.current = streamMode;
@@ -126,19 +135,6 @@ export function useSyncPlayer({
     }
   }, [videoRef]);
 
-  const adjustMicroCorrection = useCallback((delta: number) => {
-    setMicroCorrectionOffset((prev) => {
-      const next = prev + delta;
-      microCorrectionOffsetRef.current = next;
-      if (isMicroCorrectionRef.current) {
-        const cur = getRealPos();
-        blockSyncFor(2000);
-        executeSeek(Math.max(0, cur + delta), !getRealPaused());
-      }
-      return next;
-    });
-  }, [getRealPos, getRealPaused, executeSeek, blockSyncFor]);
-
   const hasInitializedRef = useRef(false);
 
   const isHostRef = useRef(isHost);
@@ -146,6 +142,136 @@ export function useSyncPlayer({
 
   const getSyncedServerTimeRef = useRef(getSyncedServerTime);
   getSyncedServerTimeRef.current = getSyncedServerTime;
+
+  const getRttRef = useRef(getRtt);
+  getRttRef.current = getRtt;
+
+  const detectPlatform = useCallback((): string => {
+    if (typeof window !== 'undefined' && (window as any).desktopPlayer?.isDesktop) return 'desktop';
+    if (typeof navigator !== 'undefined' && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)) return 'mobile';
+    return 'web';
+  }, []);
+
+  // Снепшот локального здоровья для отправки на сервер.
+  // ВАЖНО: флаг isBufferingRef — только сырьё. Эффективная буферизация считается здесь:
+  // paused-видео НЕ буферизуется (пауза — намеренное состояние, а seek на паузе и есть
+  // главный источник залипшего флага: 'waiting' без последующего 'playing').
+  // readyState>=3 (HAVE_FUTURE_DATA) при играющем видео тоже гасит залипший флаг.
+  // stallCount/stallMs/droppedFrames — значения ЗА ОКНО с прошлой отправки (report-and-clear),
+  // иначе накопительные счётчики со временем пометят лагающими всех.
+  const getHealthSnapshot = useCallback(() => {
+    let bufferedAhead = -1; // -1 = неизвестно; 0 может быть ложью (нет данных)
+    let bufferedEnd: number | undefined;
+    let droppedWindow = 0;
+    let paused = true;
+    let readyState = 0;
+    try {
+      const v = videoRef?.current;
+      if (v) {
+        paused = v.paused;
+        readyState = v.readyState || 0;
+        const cur = typeof getCurrentTimeRef.current === 'function' && (window as any).desktopPlayer?.isDesktop
+          ? getCurrentTimeRef.current!()
+          : (v.currentTime || 0);
+        if (v.buffered && v.buffered.length > 0) {
+          try {
+            bufferedEnd = v.buffered.end(v.buffered.length - 1);
+            bufferedAhead = Math.max(0, bufferedEnd - cur);
+          } catch {}
+        }
+        try {
+          const q = (v as any).getVideoPlaybackQuality ? (v as any).getVideoPlaybackQuality() : null;
+          if (q && typeof q.droppedVideoFrames === 'number') {
+            const abs = q.droppedVideoFrames;
+            droppedWindow = Math.max(0, abs - droppedBaseRef.current);
+            droppedBaseRef.current = abs;
+            droppedFramesRef.current = abs;
+          }
+        } catch {}
+      } else if (typeof getCurrentTimeRef.current === 'function') {
+        // Desktop MPV / YouTube iframe: своего <video> нет — состояние из колбэков
+        try { paused = getRealPaused(); } catch { paused = true; }
+        droppedWindow = Math.max(0, droppedFramesRef.current - droppedBaseRef.current);
+        droppedBaseRef.current = droppedFramesRef.current;
+      } else {
+        try { paused = getRealPaused(); } catch { paused = true; }
+      }
+    } catch {}
+    const rawFlag = isBufferingRef.current;
+    // Самолечение залипшего флага: есть данные и играем — значит не буферизуемся
+    const effectiveBuffering = rawFlag && !paused && (videoRef?.current ? readyState < 3 : true);
+    if (!effectiveBuffering && rawFlag && (!videoRef?.current || paused || readyState >= 3)) {
+      // флаг врёт — гасим, чтобы не слать ложь до следующего события
+      isBufferingRef.current = false;
+      stallStartRef.current = 0;
+    }
+    return {
+      isBuffering: effectiveBuffering,
+      isPlaying: !paused,
+      bufferedAheadSec: bufferedAhead >= 0 ? Math.round(bufferedAhead * 10) / 10 : -1,
+      bufferedEnd,
+      stallCount: stallCountRef.current,
+      stallMs: Math.round(stallMsRef.current),
+      rttMs: Math.round(getRttRef.current ? getRttRef.current() : 0),
+      droppedFrames: droppedWindow,
+      platform: detectPlatform(),
+    };
+  }, [videoRef, detectPlatform, getRealPaused]);
+
+  // Трекинг буферизации/сталов на <video> (веб). Desktop MPV пушит через reportDesktopHealth извне.
+  useEffect(() => {
+    const v = videoRef?.current;
+    if (!v) return;
+    const beginStall = () => {
+      if (!isBufferingRef.current) {
+        isBufferingRef.current = true;
+        stallStartRef.current = Date.now();
+        stallCountRef.current += 1;
+      }
+    };
+    const endStall = () => {
+      if (isBufferingRef.current) {
+        isBufferingRef.current = false;
+        if (stallStartRef.current) {
+          stallMsRef.current += Date.now() - stallStartRef.current;
+          stallStartRef.current = 0;
+        }
+      }
+    };
+    const onWaiting = () => beginStall();
+    const onStalled = () => beginStall();
+    const onPlaying = () => endStall();
+    const onCanPlay = () => endStall();
+    // Пауза — НЕ буферизация: seek на паузе даёт 'waiting' без 'playing',
+    // именно так флаг залипал навсегда. Гасим флаг сразу.
+    const onPause = () => endStall();
+    // Seek завершён: если стоим на паузе или данные уже есть — точно не буферизация
+    const onSeeked = () => {
+      try {
+        if (v.paused || (v.readyState || 0) >= 3) endStall();
+      } catch { endStall(); }
+    };
+    const onError = () => { stallCountRef.current += 1; };
+    v.addEventListener('waiting', onWaiting);
+    v.addEventListener('stalled', onStalled);
+    v.addEventListener('playing', onPlaying);
+    v.addEventListener('canplay', onCanPlay);
+    v.addEventListener('pause', onPause);
+    v.addEventListener('seeked', onSeeked);
+    v.addEventListener('error', onError);
+    // Холодный старт: если элемент уже на паузе — флаг обязан быть сброшен
+    try { if (v.paused) endStall(); } catch {}
+    return () => {
+      v.removeEventListener('waiting', onWaiting);
+      v.removeEventListener('stalled', onStalled);
+      v.removeEventListener('playing', onPlaying);
+      v.removeEventListener('canplay', onCanPlay);
+      v.removeEventListener('pause', onPause);
+      v.removeEventListener('seeked', onSeeked);
+      v.removeEventListener('error', onError);
+      endStall();
+    };
+  }, [videoRef, room?.id]);
 
   // ── Socket Events ──
   useEffect(() => {
@@ -179,7 +305,7 @@ export function useSyncPlayer({
         if (!hasInitializedRef.current) {
           hasInitializedRef.current = true;
           const rawPos = data.livePosition || data.room.currentPosition || 0;
-          const livePos = isMicroCorrectionRef.current ? (rawPos + microCorrectionOffsetRef.current) : rawPos;
+          const livePos = rawPos;
           const shouldPlay = data.room.state === 'PLAYING';
 
           blockSyncFor(2000);
@@ -233,7 +359,7 @@ export function useSyncPlayer({
       if (data.action === 'PAUSE') {
         executePause();
         const cur = getRealPos();
-        const targetPos = isMicroCorrectionRef.current ? (data.currentPosition + microCorrectionOffsetRef.current) : data.currentPosition;
+        const targetPos = data.currentPosition;
         if (!isInitiator && Math.abs(cur - targetPos) > 0.8) {
           executeSeek(Math.max(0, targetPos), false);
         }
@@ -242,7 +368,7 @@ export function useSyncPlayer({
         const serverNow = getSyncedServerTimeRef.current();
         const delay = Math.max(0, data.serverTimestamp - serverNow);
         const cur = getRealPos();
-        const targetPos = isMicroCorrectionRef.current ? (data.currentPosition + microCorrectionOffsetRef.current) : data.currentPosition;
+        const targetPos = data.currentPosition;
 
         if (Math.abs(cur - targetPos) > 1.5) {
           executeSeek(Math.max(0, targetPos), true);
@@ -264,9 +390,7 @@ export function useSyncPlayer({
 
         // Do NOT re-execute seek on the initiator's device (prevents double-seek & range abortion)
         if (!isInitiator) {
-          const targetPos = isMicroCorrectionRef.current
-            ? data.currentPosition + microCorrectionOffsetRef.current
-            : data.currentPosition;
+          const targetPos = data.currentPosition;
           executeSeek(Math.max(0, targetPos), shouldPlay);
         } else {
           lastSentSeekPosRef.current = null;
@@ -286,7 +410,7 @@ export function useSyncPlayer({
       const elapsed = Math.max(0, (now - data.serverTimestamp) / 1000);
       const hostExpectedPos = data.currentPosition + (roomStateRef.current === 'PLAYING' ? elapsed : 0);
       const myPos = getRealPos();
-      const effectivePos = isMicroCorrectionRef.current ? (myPos - microCorrectionOffsetRef.current) : myPos;
+      const effectivePos = myPos;
       const diff = effectivePos - hostExpectedPos;
 
       setSyncDiffSec(Math.round(diff * 10) / 10);
@@ -295,7 +419,7 @@ export function useSyncPlayer({
       if (roomStateRef.current === 'PLAYING' && Math.abs(diff) > 1.5 && Math.abs(diff) < 20.0 && !isInternalAction.current) {
         console.log(`[WatchTogether] 🔄 Auto-aligning drift of ${diff.toFixed(1)}s to host pos: ${hostExpectedPos.toFixed(1)}s`);
         blockSyncFor(2500);
-        const targetPos = isMicroCorrectionRef.current ? (hostExpectedPos + microCorrectionOffsetRef.current) : hostExpectedPos;
+        const targetPos = hostExpectedPos;
         executeSeek(Math.max(0, targetPos), true);
       }
     });
@@ -338,6 +462,30 @@ export function useSyncPlayer({
       ]);
     });
 
+    socket.on('room:health', (data: RoomHealthUpdate) => {
+      if (!data) return;
+      setHealth(data.health || []);
+      setCulpritIds(data.culpritIds || []);
+      setWaitingFor(data.waitingFor || []);
+      setWaitingText(data.waitingText || null);
+    });
+
+    socket.on('room:action_feed', (entry: RoomActionFeedEntry) => {
+      if (!entry) return;
+      setActionFeed((prev) => [...prev.slice(-19), entry]);
+      setTimeout(() => {
+        setActionFeed((prev) => prev.filter((e) => e.id !== entry.id));
+      }, 6000);
+    });
+
+    socket.on('room:rollback_notice', (notice: RoomRollbackNotice) => {
+      if (!notice) return;
+      setRollbackNotice(notice);
+      setTimeout(() => {
+        setRollbackNotice((prev) => (prev && prev.timestamp === notice.timestamp ? null : prev));
+      }, 9000);
+    });
+
     return () => {
       if (scheduledPlayTimer.current) clearTimeout(scheduledPlayTimer.current);
       if (internalActionTimer.current) clearTimeout(internalActionTimer.current);
@@ -352,6 +500,9 @@ export function useSyncPlayer({
       socket.off('room:chat_message');
       socket.off('room:reaction');
       socket.off('room:system_message');
+      socket.off('room:health');
+      socket.off('room:action_feed');
+      socket.off('room:rollback_notice');
     };
   }, [socket, room?.id]);
 
@@ -403,35 +554,83 @@ export function useSyncPlayer({
   // Send streamMode update when it changes
   useEffect(() => {
     if (!socket || !room?.id) return;
-    socket.emit('room:member_status', {
-      roomId: room.id,
-      currentPosition: getRealPos(),
-      streamMode,
-    });
-  }, [socket, room?.id, streamMode, getRealPos]);
+    try {
+      const snap = getHealthSnapshot();
+      socket.emit('room:member_status', {
+        roomId: room.id,
+        currentPosition: getRealPos(),
+        streamMode,
+        isBuffering: snap.isBuffering,
+        isPlaying: snap.isPlaying,
+        bufferedAheadSec: snap.bufferedAheadSec,
+        rttMs: snap.rttMs,
+        platform: snap.platform,
+      });
+    } catch {
+      socket.emit('room:member_status', {
+        roomId: room.id,
+        currentPosition: getRealPos(),
+        streamMode,
+      });
+    }
+  }, [socket, room?.id, streamMode, getRealPos, getHealthSnapshot]);
 
-  // Periodic position report (каждые 3с) — без него room:members всегда с position=0
-  // и кнопка "Выровнять" (syncToHost) молча ничего не делает
+  // Periodic position + health report (каждые 3с) — сервер считает "кто тормозит"
   useEffect(() => {
     if (!socket || !room?.id) return;
-    const interval = setInterval(() => {
+    const sendStatus = (immediate = false) => {
       try {
         const cur = getRealPos();
-        let buffered: number | undefined;
-        const v = videoRef?.current;
-        if (v && v.buffered && v.buffered.length > 0) {
-          try { buffered = v.buffered.end(v.buffered.length - 1); } catch {}
+        const snap = getHealthSnapshot();
+        let buffered: number | undefined = snap.bufferedEnd;
+        if (buffered === undefined) {
+          const v = videoRef?.current;
+          if (v && v.buffered && v.buffered.length > 0) {
+            try { buffered = v.buffered.end(v.buffered.length - 1); } catch {}
+          }
+        }
+        // Мгновенный репорт при смене буферизации — троттлинг 1с чтобы не спамить
+        if (immediate) {
+          const nowMs = Date.now();
+          if (nowMs - lastBufferingEmitRef.current < 1000) return;
+          lastBufferingEmitRef.current = nowMs;
         }
         socket.emit('room:member_status', {
           roomId: room!.id,
           currentPosition: cur,
           bufferedPosition: buffered,
           streamMode: streamModeRef.current,
+          isBuffering: snap.isBuffering,
+          isPlaying: snap.isPlaying,
+          bufferedAheadSec: snap.bufferedAheadSec,
+          stallCount: snap.stallCount,
+          stallMs: snap.stallMs,
+          rttMs: snap.rttMs,
+          droppedFrames: snap.droppedFrames,
+          platform: snap.platform,
         });
+        // Окно сталов закрыто и отправлено — обнуляем, иначе накопительный
+        // счётчик со временем пометит лагающими всех (ложные "тормозит")
+        stallCountRef.current = 0;
+        stallMsRef.current = 0;
       } catch {}
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [socket, room?.id]);
+    };
+    sendStatus();
+    const interval = setInterval(() => sendStatus(), 3000);
+    // Досылаем смену флага между тиками — чтобы "ожидаем X" появлялось сразу.
+    // Шлём только честную буферизацию: флаг + реально играет + данных нет.
+    const fastPoll = setInterval(() => {
+      try {
+        const v = videoRef?.current;
+        const playing = v ? !v.paused : getRealPos() !== undefined && !getRealPaused();
+        const noData = v ? (v.readyState || 0) < 3 : true;
+        if (isBufferingRef.current && playing && noData) {
+          sendStatus(true);
+        }
+      } catch {}
+    }, 2000);
+    return () => { clearInterval(interval); clearInterval(fastPoll); };
+  }, [socket, room?.id, getHealthSnapshot]);
 
   const sendSeek = useCallback((pos: number, shouldPlay?: boolean) => {
     if (!socket || !room?.id) return;
@@ -439,7 +638,7 @@ export function useSyncPlayer({
     blockSyncFor(2500);
     lastSentSeekPosRef.current = pos;
     lastSentSeekTimeRef.current = Date.now();
-    const localTarget = isMicroCorrectionRef.current ? (pos + microCorrectionOffsetRef.current) : pos;
+    const localTarget = pos;
     executeSeek(Math.max(0, localTarget), willPlay);
 
     if (seekDebounceTimer.current) {
@@ -461,27 +660,6 @@ export function useSyncPlayer({
     }, 150);
   }, [socket, room?.id, executeSeek, getRealPaused, blockSyncFor]);
 
-  const toggleMicroCorrection = useCallback(() => {
-    setIsMicroCorrection((prev) => {
-      const next = !prev;
-      isMicroCorrectionRef.current = next;
-      const cur = getRealPos();
-      let offset = microCorrectionOffsetRef.current;
-      if (next && offset === 0) {
-        offset = 1;
-        setMicroCorrectionOffset(1);
-        microCorrectionOffsetRef.current = 1;
-      }
-      if (offset !== 0) {
-        // When turning ON: add offset to video. When turning OFF: subtract offset back
-        const target = next ? (cur + offset) : Math.max(0, cur - offset);
-        blockSyncFor(2000);
-        executeSeek(target, !getRealPaused());
-      }
-      return next;
-    });
-  }, [getRealPos, getRealPaused, executeSeek, blockSyncFor]);
-
   const forceSyncAll = useCallback(() => {
     if (!socket || !room?.id) return;
     const cur = getRealPos();
@@ -497,9 +675,7 @@ export function useSyncPlayer({
     const hostMember = members.find((m) => m.userId === room.hostUserId);
     if (hostMember && hostMember.currentPosition > 0) {
       blockSyncFor(2500);
-      const targetPos = isMicroCorrectionRef.current
-        ? (hostMember.currentPosition + microCorrectionOffsetRef.current)
-        : hostMember.currentPosition;
+      const targetPos = hostMember.currentPosition;
       executeSeek(Math.max(0, targetPos), roomStateRef.current === 'PLAYING');
       setSyncDiffSec(0);
     }
@@ -539,6 +715,58 @@ export function useSyncPlayer({
     });
   }, [socket, room]);
 
+  // Внешний пуш телеметрии (Desktop MPV: paused-for-cache, demuxer-cache, drops, hwdec).
+  // Веб этим не пользуется — у него события <video>.
+  const reportDesktopHealth = useCallback((patch: {
+    isBuffering?: boolean; bufferedAheadSec?: number; stallCount?: number;
+    stallMs?: number; droppedFrames?: number; hwdec?: string;
+  }) => {
+    if (patch.isBuffering !== undefined) {
+      if (patch.isBuffering && !isBufferingRef.current) {
+        isBufferingRef.current = true;
+        stallStartRef.current = Date.now();
+        stallCountRef.current += 1;
+      } else if (!patch.isBuffering && isBufferingRef.current) {
+        isBufferingRef.current = false;
+        if (stallStartRef.current) {
+          stallMsRef.current += Date.now() - stallStartRef.current;
+          stallStartRef.current = 0;
+        }
+      }
+    }
+    if (patch.bufferedAheadSec !== undefined && Number.isFinite(patch.bufferedAheadSec)) {
+      // храним через droppedFramesRef-паттерн: отдельногo ref нет, поэтому шлём сразу.
+      // Честность: paused-MPV не буферизуется, даже если paused-for-cache пришёл.
+      try {
+        if (socket && room?.id) {
+          let paused = true;
+          try { paused = getRealPaused(); } catch {}
+          const effective = isBufferingRef.current && !paused;
+          socket.emit('room:member_status', {
+            roomId: room.id,
+            currentPosition: getRealPos(),
+            streamMode: streamModeRef.current,
+            isBuffering: effective,
+            isPlaying: !paused,
+            bufferedAheadSec: Math.max(0, patch.bufferedAheadSec),
+            stallCount: patch.stallCount ?? stallCountRef.current,
+            stallMs: Math.round(patch.stallMs ?? stallMsRef.current),
+            rttMs: Math.round(getRttRef.current ? getRttRef.current() : 0),
+            droppedFrames: patch.droppedFrames ?? droppedFramesRef.current,
+            platform: 'desktop',
+            hwdec: patch.hwdec,
+          });
+          stallCountRef.current = 0;
+          stallMsRef.current = 0;
+          return;
+        }
+      } catch {}
+    }
+    if (patch.stallCount !== undefined) stallCountRef.current = patch.stallCount;
+    if (patch.stallMs !== undefined) stallMsRef.current = patch.stallMs;
+    if (patch.droppedFrames !== undefined) droppedFramesRef.current = patch.droppedFrames;
+  }, [socket, room?.id, getRealPos, getRealPaused]);
+
   return {
     roomState,
     members,
@@ -546,10 +774,13 @@ export function useSyncPlayer({
     reactions,
     syncDiffSec,
     isHost,
-    isMicroCorrection,
-    microCorrectionOffset,
-    toggleMicroCorrection,
-    adjustMicroCorrection,
+    health,
+    culpritIds,
+    waitingFor,
+    waitingText,
+    actionFeed,
+    rollbackNotice,
+    reportDesktopHealth,
     sendPlay,
     sendPause,
     sendSeek,

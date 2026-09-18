@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Users, MessageSquare, Sparkles, UserPlus, X } from 'lucide-react';
-import { RoomMember, RoomChatMessage } from '../../types';
+import { RoomMember, RoomChatMessage, RoomHealthEntry } from '../../types';
 
 interface RoomSidebarProps {
   members: RoomMember[];
+  health?: RoomHealthEntry[];
   messages: RoomChatMessage[];
   onSendMessage: (text: string) => void;
   onSendReaction: (emoji: string) => void;
@@ -15,6 +16,7 @@ const EMOJI_LIST = ['🍿', '❤️', '😂', '🔥', '😱', '👏', '⚡', '�
 
 export const RoomSidebar: React.FC<RoomSidebarProps> = ({
   members,
+  health = [],
   messages,
   onSendMessage,
   onSendReaction,
@@ -152,7 +154,13 @@ export const RoomSidebar: React.FC<RoomSidebarProps> = ({
               В комнате прямо сейчас
             </span>
 
-            {members.map((member) => (
+            {members.map((member) => {
+              const h = health.find((x) => x.userId === member.userId);
+              const status = h?.status || (member.isBuffering ? 'buffering' : member.isReady ? 'ok' : 'warning');
+              const dot = status === 'ok' ? 'bg-emerald-400' : status === 'warning' ? 'bg-amber-400' : status === 'buffering' ? 'bg-sky-400 animate-pulse' : 'bg-red-400';
+              const sub = h?.detail || (member.isBuffering ? 'Буферизация...' : member.isReady ? 'Синхронизирован' : 'Буферизация...');
+              const meta = h ? `${h.rttMs}мс • буфер ${h.bufferedAheadSec}с` : null;
+              return (
               <div
                 key={member.socketId}
                 className="flex items-center justify-between p-3 rounded-2xl bg-white/5 border border-white/5"
@@ -165,26 +173,30 @@ export const RoomSidebar: React.FC<RoomSidebarProps> = ({
                       className="w-8 h-8 rounded-full bg-cinema-800 object-cover"
                     />
                     <span
-                      className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-cinema-900 ${
-                        member.isReady ? 'bg-emerald-400' : 'bg-amber-400 animate-ping'
-                      }`}
+                      className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-cinema-900 ${dot}`}
                     />
                   </div>
                   <div>
                     <span className="text-xs font-bold text-white block">{member.username}</span>
                     <span className="text-[10px] text-slate-400">
-                      {member.isReady ? 'Синхронизирован' : 'Буферизация...'}
+                      {sub}
                     </span>
+                    {meta && (
+                      <span className="text-[10px] font-mono text-slate-500 block">
+                        {meta}{h?.platform ? ` • ${h.platform}` : ''}{member.streamMode ? ` • ${member.streamMode}` : ''}
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-1.5">
                   <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                    {member.isReady ? 'Готов' : 'Загрузка'}
+                    {status === 'ok' ? 'Готов' : status === 'warning' ? 'Просадки' : status === 'buffering' ? 'Загрузка' : 'Лагает'}
                   </span>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

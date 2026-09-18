@@ -1,8 +1,9 @@
 import { Server, Socket } from 'socket.io';
 import { db } from '../config/db';
-import { RoomMember, RoomState } from '../types';
+import { RoomMember, RoomState, RoomHealthEntry, RoomActionFeedEntry } from '../types';
 import { logger } from './logger.service';
 import { ffmpegService } from './ffmpeg.service';
+import { roomHealthService } from './room-health.service';
 
 interface ConnectedUser {
   userId: string;
@@ -21,6 +22,17 @@ class SocketService {
   private roomMembers: Map<string, Map<string, RoomMember>> = new Map(); // roomId -> (socketId -> RoomMember)
   private lastSeekTimeByRoom: Map<string, number> = new Map(); // roomId -> timestamp of last seek
   private lastMembersEmitByRoom: Map<string, number> = new Map(); // roomId -> timestamp of last room:members emit
+  private lastHealthEmitByRoom: Map<string, number> = new Map(); // roomId -> timestamp of last room:health emit
+  private lastRollbackNoticeByRoom: Map<string, { ts: number; culprit: string }> = new Map(); // roomId -> cooldown
+  // roomId -> (userId -> последний heartbeat). Для детекта РЕАЛЬНОГО отката:
+  // сравниваем сендера только с его же прошлой позицией, а не с чужим якорем.
+  private lastHeartbeatByRoom: Map<string, Map<string, { pos: number; ts: number }>> = new Map();
+  // roomId -> когда якорь последний раз принимали. Если все отстали и якорь протух —
+  // принимаем лучшее из доступного (rebase), иначе комната замирает навсегда.
+  private lastAcceptedAnchorByRoom: Map<string, number> = new Map();
+  // roomId -> последние разосланные time_anchor. Нужны, чтобы отличить настоящую
+  // локальную отмотку от штатной автокоррекции (клиент прыгнул ровно на якорь).
+  private lastAnchorsByRoom: Map<string, { pos: number; ts: number }[]> = new Map();
 
   public init(io: Server) {
     this.io = io;
@@ -98,6 +110,15 @@ class SocketService {
           pingMs: 0,
           streamMode: streamMode || 'direct',
           joinedAt: new Date().toISOString(),
+          isBuffering: false,
+          isPlaying: false,
+          bufferedAheadSec: -1, // -1 = неизвестно (нет данных о буфере)
+          stallCount: 0,
+          stallMs: 0,
+          rttMs: 0,
+          droppedFrames: 0,
+          healthStatus: 'ok',
+          lastHealthUpdate: Date.now(),
         };
 
         roomMap.set(socket.id, member);
@@ -147,7 +168,17 @@ class SocketService {
             type: 'join',
             timestamp: now,
           });
+          this.emitActionFeed(roomId, {
+            id: `feed-${now}-${Math.random().toString(36).slice(2, 7)}`,
+            userId: userId || 'guest',
+            username: username || 'Гость',
+            avatarUrl,
+            action: 'JOIN',
+            text: `${username || 'Гость'} присоединился`,
+            timestamp: now,
+          });
         }
+        this.emitRoomHealth(roomId, true);
       });
 
       socket.on('room:leave', (data: { roomId: string }) => {
@@ -175,6 +206,12 @@ class SocketService {
         const initiatedByUserId = user?.userId || member?.userId || data.userId || '';
 
         logger.info('ROOM_ACTION', `Room ${roomId} action: ${action} pos: ${position.toFixed(1)}s (by: ${initiatedBy})`);
+
+        const feedText = action === 'PAUSE'
+          ? `${initiatedBy} поставил на паузу (${this.formatPos(position)})`
+          : action === 'PLAY'
+            ? `${initiatedBy} продолжил воспроизведение (${this.formatPos(position)})`
+            : `${initiatedBy} перемотал на ${this.formatPos(position)}${shouldPlay ? '' : ' (пауза)'}`;
 
         if (action === 'PAUSE') {
           try {
@@ -231,10 +268,40 @@ class SocketService {
             initiatedByUserId,
           });
         }
+
+        this.emitActionFeed(roomId, {
+          id: `feed-${now}-${Math.random().toString(36).slice(2, 7)}`,
+          userId: initiatedByUserId || 'guest',
+          username: initiatedBy,
+          avatarUrl: user?.avatarUrl || member?.avatarUrl,
+          action,
+          position,
+          text: feedText,
+          timestamp: now,
+        });
+
+        // Любой room action — новая точка отсчёта для всех: иначе пер-сендер
+        // детект примет штатный прыжок по чужому SEEK/PLAY/PAUSE за "отмотку".
+        // (свой SEEK инициатора, чужой исполняемый SEEK, возобновление после паузы)
+        this.resetHeartbeatBaselines(roomId, position, now);
+        this.lastAcceptedAnchorByRoom.set(roomId, now);
       });
 
-      // 5. Periodic Time Anchor from any playing client (раньше только хост + игнор 8с после seek —
-      // при активных экшенах якоря не доходили вообще, дрейф копился)
+      // 5. Periodic Time Anchor от любого играющего клиента.
+      // Правила, чтобы не врать и не ломать комнату:
+      // 1) Откат детектим ТОЛЬКО по таймлайну самого сендера (его позиция прыгнула
+      //    назад относительно его же прошлого heartbeat). Сравнение с чужим якорем
+      //    давало ложные обвинения: десктоп без автокоррекции или клиент, которому
+      //    коррекции заблокированы частыми экшенами, законно едет на 2с позади —
+      //    это не откат, и винить его каждые 8с — баг.
+      // 2) Отставший heartbeat НЕ перезаписывает якорь и НЕ рассылается другим.
+      //    Старый код писал чужую отсталую позицию в DB и слал её всем как
+      //    time_anchor — т.е. сам УСТРАИВАЛ массовый откат, о котором потом рапортовал.
+      //    Якорь теперь монотонный: только вперёд (допуск 1.5с под джиттер — как
+      //    порог автокоррекции у клиентов).
+      // 3) Если якорь протух (>10с никто не прислал свежее — например, шедший
+      //    впереди ушёл), принимаем лучшее из доступного (rebase), иначе комната
+      //    замрёт на старой позиции навсегда.
       socket.on('room:host_heartbeat', (data: { roomId: string; position: number }) => {
         if (!data?.roomId) return;
         const now = Date.now();
@@ -245,14 +312,94 @@ class SocketService {
           return;
         }
 
-        try {
-          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, now, data.roomId);
-        } catch {}
+        const sender = this.users.get(socket.id);
+        const senderMember = this.roomMembers.get(data.roomId)?.get(socket.id);
+        const senderUserId = sender?.userId || senderMember?.userId || socket.id;
+        const senderName = sender?.username || senderMember?.username || 'Участник';
+        const pos = data.position || 0;
 
-        socket.to(data.roomId).emit('room:time_anchor', {
-          currentPosition: data.position,
-          serverTimestamp: now,
-        });
+        try {
+          const cur = db.prepare('SELECT currentPosition, serverTimestamp, state, playbackRate FROM rooms WHERE id = ?').get(data.roomId) as any;
+          if (!cur) return;
+          const rate = cur.playbackRate || 1.0;
+          const playing = cur.state === 'PLAYING';
+          let live = cur.currentPosition || 0;
+          if (playing && cur.serverTimestamp) {
+            live += Math.max(0, (now - cur.serverTimestamp) / 1000) * rate;
+          }
+
+          // — 1) Пер-сендер детект: его собственная позиция прыгнула назад? —
+          let hbMap = this.lastHeartbeatByRoom.get(data.roomId);
+          if (!hbMap) {
+            hbMap = new Map();
+            this.lastHeartbeatByRoom.set(data.roomId, hbMap);
+          }
+          const prev = hbMap.get(senderUserId);
+          if (prev && playing) {
+            const expected = prev.pos + Math.max(0, (now - prev.ts) / 1000) * rate;
+            const jumpedBack = expected - pos;
+            const senderBuffering = Boolean(senderMember?.isBuffering);
+            // Зависший (буферизация) — не откат, его уже ведёт room:health. Только
+            // резкий прыжок назад у играющего клиента считаем локальной отмоткой.
+            // Два гейта против ложных срабатываний:
+            // а) прыжок ровно на недавний якорь — это штатная автокоррекция дрейфа;
+            // б) прыжок на известную позицию другого участника — ручное "Выровнять".
+            if (!senderBuffering && jumpedBack > 2.0 && jumpedBack < 60) {
+              let isSyncCorrection = false;
+              const anchors = this.lastAnchorsByRoom.get(data.roomId) || [];
+              for (const a of anchors) {
+                if (now - a.ts > 8000) continue;
+                const anchorLive = a.pos + Math.max(0, (now - a.ts) / 1000) * rate;
+                if (Math.abs(anchorLive - pos) < 2.0) {
+                  isSyncCorrection = true;
+                  break;
+                }
+              }
+              if (!isSyncCorrection) {
+                const roomMap = this.roomMembers.get(data.roomId);
+                if (roomMap) {
+                  for (const other of roomMap.values()) {
+                    if (other.userId !== senderUserId
+                      && Math.abs((other.currentPosition || 0) - pos) < 4.0) {
+                      isSyncCorrection = true;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (!isSyncCorrection) {
+                this.sendRollbackNotice(data.roomId, {
+                  culpritUserId: sender?.userId || senderMember?.userId || '',
+                  culpritName: senderName,
+                  from: Math.round(expected * 10) / 10,
+                  to: Math.round(pos * 10) / 10,
+                  backwardSec: Math.round(jumpedBack * 10) / 10,
+                  now,
+                });
+              }
+            }
+          }
+          hbMap.set(senderUserId, { pos, ts: now });
+
+          // — 2+3) Политика якоря: вперёд — пишем и рассылаем, назад — игнорим —
+          const lastAccepted = this.lastAcceptedAnchorByRoom.get(data.roomId) || 0;
+          const anchorStale = now - lastAccepted > 10000;
+          if (pos >= live - 1.5 || anchorStale) {
+            try {
+              db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(pos, now, data.roomId);
+            } catch {}
+            this.lastAcceptedAnchorByRoom.set(data.roomId, now);
+            this.rememberAnchor(data.roomId, pos, now);
+            socket.to(data.roomId).emit('room:time_anchor', {
+              currentPosition: pos,
+              serverTimestamp: now,
+              anchorUserId: sender?.userId || senderMember?.userId || '',
+              anchorUsername: senderName,
+            });
+          }
+          // stale heartbeat: якорь не трогаем, другим не шлём — отставший сам
+          // подтянется по чужим time_anchor (автокоррекция) или ручным "Выровнять".
+        } catch {}
       });
 
       // 6. Force Sync All to Host Position
@@ -265,6 +412,8 @@ class SocketService {
         try {
           db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, scheduledPlayAt, data.roomId);
         } catch {}
+        this.resetHeartbeatBaselines(data.roomId, data.position, now);
+        this.lastAcceptedAnchorByRoom.set(data.roomId, now);
 
         io.to(data.roomId).emit('room:force_sync_all', {
           position: data.position,
@@ -277,22 +426,93 @@ class SocketService {
           type: 'sync',
           timestamp: now,
         });
+        this.emitActionFeed(data.roomId, {
+          id: `feed-${now}-${Math.random().toString(36).slice(2, 7)}`,
+          userId: user?.userId || '',
+          username: user?.username || 'Хост',
+          avatarUrl: user?.avatarUrl,
+          action: 'SYNC',
+          position: data.position,
+          text: `${user?.username || 'Хост'} синхронизировал всех на ${this.formatPos(data.position)}`,
+          timestamp: now,
+        });
       });
 
       // 7. Member Status & Position Reporting (позиции нужны для syncToHost — рассылаем троттлингом 2с)
-      socket.on('room:member_status', (data: { roomId: string; currentPosition: number; bufferedPosition?: number; streamMode?: 'direct' | 'apple_ts' | 'fmp4' }) => {
+      // Расширено телеметрией здоровья: buffering/stalls/rtt/drops/platform
+      socket.on('room:member_status', (data: {
+        roomId: string; currentPosition: number; bufferedPosition?: number; streamMode?: 'direct' | 'apple_ts' | 'fmp4';
+        isBuffering?: boolean; isPlaying?: boolean; bufferedAheadSec?: number; stallCount?: number; stallMs?: number;
+        rttMs?: number; pingMs?: number; droppedFrames?: number; platform?: string; hwdec?: string;
+      }) => {
         if (!data?.roomId) return;
         const members = this.roomMembers.get(data.roomId);
         if (members && members.has(socket.id)) {
           const m = members.get(socket.id)!;
+          const wasBuffering = Boolean(m.isBuffering);
           m.currentPosition = data.currentPosition || 0;
           if (data.bufferedPosition !== undefined) m.bufferedPosition = data.bufferedPosition;
+          if (data.isBuffering !== undefined) m.isBuffering = data.isBuffering;
+          if (data.isPlaying !== undefined) m.isPlaying = data.isPlaying;
+          if (data.bufferedAheadSec !== undefined && Number.isFinite(data.bufferedAheadSec)) m.bufferedAheadSec = Math.max(0, data.bufferedAheadSec);
+          else if (data.bufferedPosition !== undefined) m.bufferedAheadSec = Math.max(0, (data.bufferedPosition || 0) - (data.currentPosition || 0));
+          if (data.stallCount !== undefined) m.stallCount = data.stallCount;
+          if (data.stallMs !== undefined) m.stallMs = data.stallMs;
+          if (data.rttMs !== undefined) { m.rttMs = data.rttMs; m.pingMs = data.rttMs; }
+          else if (data.pingMs !== undefined) { m.pingMs = data.pingMs; m.rttMs = data.pingMs; }
+          if (data.droppedFrames !== undefined) m.droppedFrames = data.droppedFrames;
+          if (data.platform) (m as RoomMember).platform = data.platform;
+          if (data.hwdec !== undefined) (m as RoomMember).hwdec = data.hwdec;
+          // isReady для обратной совместимости: готов = не буферизуется
+          m.isReady = !m.isBuffering;
+          if (m.bufferedAheadSec !== undefined && m.bufferedAheadSec >= 0) {
+            m.bufferPercent = Math.max(0, Math.min(100, Math.round((m.bufferedAheadSec / 10) * 100)));
+          } else {
+            m.bufferPercent = undefined;
+          }
+          const now2 = Date.now();
+          m.lastHealthUpdate = now2;
+
+          // Переходы буферизации — в ленту действий, но ТОЛЬКО когда комната играет.
+          // На паузе seek'и дают 'waiting' у всех — это не повод писать "ожидаем".
+          let roomPlaying = false;
+          try {
+            const row = db.prepare('SELECT state FROM rooms WHERE id = ?').get(data.roomId) as any;
+            roomPlaying = row?.state === 'PLAYING';
+          } catch {}
+          const bufferingActive = Boolean(m.isBuffering) && roomPlaying && m.isPlaying !== false;
+          const wasActive = wasBuffering && roomPlaying; // приближённо: прошлое окно тоже при игре
+          if (!wasActive && bufferingActive) {
+            this.emitActionFeed(data.roomId, {
+              id: `feed-${now2}-${Math.random().toString(36).slice(2, 7)}`,
+              userId: m.userId,
+              username: m.username,
+              avatarUrl: m.avatarUrl,
+              action: 'BUFFERING',
+              position: m.currentPosition,
+              text: `${m.username} буферизуется — ожидаем…`,
+              timestamp: now2,
+            });
+          } else if (wasBuffering && !m.isBuffering && roomPlaying) {
+            this.emitActionFeed(data.roomId, {
+              id: `feed-${now2}-${Math.random().toString(36).slice(2, 7)}`,
+              userId: m.userId,
+              username: m.username,
+              avatarUrl: m.avatarUrl,
+              action: 'RECOVERED',
+              position: m.currentPosition,
+              text: `${m.username} догнал комнату ✓`,
+              timestamp: now2,
+            });
+          }
+
           if (data.streamMode && m.streamMode !== data.streamMode) {
             m.streamMode = data.streamMode;
             this.emitRoomMembers(data.roomId, true);
           } else {
             this.emitRoomMembers(data.roomId);
           }
+          this.emitRoomHealth(data.roomId);
         }
       });
 
@@ -401,6 +621,9 @@ class SocketService {
               state = 'PAUSED', currentPosition = 0, serverTimestamp = ? WHERE id = ?
           `).run(ytId, ytUrl, ytTitle, ytThumb, now, data.roomId);
           this.lastSeekTimeByRoom.set(data.roomId, now);
+          // Новое видео с нуля — старые базлайны/якоря недействительны
+          this.resetHeartbeatBaselines(data.roomId, 0, now);
+          this.lastAcceptedAnchorByRoom.set(data.roomId, now);
 
           io.to(data.roomId).emit('room:youtube_changed', {
             youtubeId: ytId,
@@ -479,6 +702,15 @@ class SocketService {
           type: 'leave',
           timestamp: Date.now(),
         });
+        this.emitActionFeed(roomId, {
+          id: `feed-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          userId: member.userId,
+          username: member.username,
+          avatarUrl: member.avatarUrl,
+          action: 'LEAVE',
+          text: `${member.username} покинул комнату`,
+          timestamp: Date.now(),
+        });
       }
 
       logger.info('ROOM_LEAVE', `User ${member?.username || socket.id} left room ${roomId}. Remaining: ${members.size}`);
@@ -486,6 +718,11 @@ class SocketService {
       if (members.size === 0) {
         this.roomMembers.delete(roomId);
         this.lastSeekTimeByRoom.delete(roomId);
+        this.lastHealthEmitByRoom.delete(roomId);
+        this.lastRollbackNoticeByRoom.delete(roomId);
+        this.lastHeartbeatByRoom.delete(roomId);
+        this.lastAcceptedAnchorByRoom.delete(roomId);
+        this.lastAnchorsByRoom.delete(roomId);
         // Clean up FFmpeg session for empty room with 4s grace period (handles React remount / page reload)
         setTimeout(() => {
           const currentMembers = this.roomMembers.get(roomId);
@@ -494,8 +731,10 @@ class SocketService {
           }
         }, 4000);
       } else {
-        this.emitRoomMembers(roomId);
+        this.emitRoomMembers(roomId, true);
+        this.emitRoomHealth(roomId, true);
         if (member?.userId && !hasOtherConnections) {
+          this.lastHeartbeatByRoom.get(roomId)?.delete(member.userId);
           ffmpegService.killUserSessionInRoom(roomId, member.userId);
         }
       }
@@ -521,6 +760,123 @@ class SocketService {
       }
       this.io.to(roomId).emit('room:members', Array.from(unique.values()));
     }
+  }
+
+  private emitRoomHealth(roomId: string, force: boolean = false) {
+    if (!this.io) return;
+    const now = Date.now();
+    if (!force) {
+      const last = this.lastHealthEmitByRoom.get(roomId) || 0;
+      if (now - last < 2000) return;
+    }
+    this.lastHealthEmitByRoom.set(roomId, now);
+    const membersMap = this.roomMembers.get(roomId);
+    if (!membersMap) return;
+    const unique = new Map<string, RoomMember>();
+    for (const m of membersMap.values()) unique.set(m.userId, m);
+    const memberList = Array.from(unique.values());
+
+    let anchor: { position: number; serverTimestamp: number; state: string; playbackRate?: number } | null = null;
+    try {
+      const row = db.prepare('SELECT currentPosition, serverTimestamp, state, playbackRate FROM rooms WHERE id = ?').get(roomId) as any;
+      if (!row) return; // комната удалена через API, а сокеты ещё висят — не считаем
+      anchor = { position: row.currentPosition || 0, serverTimestamp: row.serverTimestamp || now, state: row.state || 'PAUSED', playbackRate: row.playbackRate || 1.0 };
+    } catch {
+      return;
+    }
+
+    const { health, culpritIds, waitingFor, waitingText } = roomHealthService.analyze(memberList, anchor, now);
+    this.io.to(roomId).emit('room:health', {
+      health,
+      culpritIds,
+      waitingFor,
+      waitingText,
+      serverTimestamp: now,
+    });
+  }
+
+  private emitActionFeed(roomId: string, entry: RoomActionFeedEntry) {
+    if (!this.io) return;
+    this.io.to(roomId).emit('room:action_feed', entry);
+  }
+
+  /**
+   * Сброс пер-сендер базлайнов heartbeat на новую точку отсчёта.
+   * Вызывать при любом room-wide прыжке (PLAY/PAUSE/SEEK/force_sync/смена видео),
+   * иначе детект отката примет штатный прыжок за локальную отмотку.
+   */
+  private resetHeartbeatBaselines(roomId: string, pos: number, ts: number) {
+    const roomMap = this.roomMembers.get(roomId);
+    const hb = new Map<string, { pos: number; ts: number }>();
+    if (roomMap) {
+      for (const m of roomMap.values()) {
+        hb.set(m.userId, { pos, ts });
+      }
+    }
+    this.lastHeartbeatByRoom.set(roomId, hb);
+  }
+
+  /** Запомнить разосланный якорь для гейта автокоррекций (храним ~10с). */
+  private rememberAnchor(roomId: string, pos: number, ts: number) {
+    let arr = this.lastAnchorsByRoom.get(roomId);
+    if (!arr) {
+      arr = [];
+      this.lastAnchorsByRoom.set(roomId, arr);
+    }
+    arr.push({ pos, ts });
+    while (arr.length > 10) arr.shift();
+    while (arr.length > 0 && ts - arr[0].ts > 10000) arr.shift();
+  }
+
+  /**
+   * Уведомление о локальной отмотке участника.
+   * Кулдаун: тот же виновник — не чаще раза в минуту (иначе получаем "20 минут
+   * подряд одно и то же"), новый виновник — не чаще раза в 8с.
+   */
+  private sendRollbackNotice(roomId: string, n: {
+    culpritUserId: string; culpritName: string;
+    from: number; to: number; backwardSec: number; now: number;
+  }) {
+    if (!this.io) return;
+    const last = this.lastRollbackNoticeByRoom.get(roomId);
+    if (last) {
+      if (last.culprit === n.culpritUserId && n.now - last.ts < 60000) return;
+      if (last.culprit !== n.culpritUserId && n.now - last.ts < 8000) return;
+    }
+    this.lastRollbackNoticeByRoom.set(roomId, { ts: n.now, culprit: n.culpritUserId });
+    this.io.to(roomId).emit('room:rollback_notice', {
+      culpritUserId: n.culpritUserId,
+      culpritName: n.culpritName,
+      from: n.from,
+      to: n.to,
+      backwardSec: n.backwardSec,
+      waitingFor: [] as string[],
+      text: `${n.culpritName} отмотал назад на ${n.backwardSec.toFixed(1)}с — выравниваем…`,
+      timestamp: n.now,
+    });
+    const member = this.roomMembers.get(roomId)
+      ? Array.from(this.roomMembers.get(roomId)!.values()).find((m) => m.userId === n.culpritUserId)
+      : undefined;
+    this.emitActionFeed(roomId, {
+      id: `feed-${n.now}-${Math.random().toString(36).slice(2, 7)}`,
+      userId: n.culpritUserId || 'guest',
+      username: n.culpritName,
+      avatarUrl: member?.avatarUrl,
+      action: 'SYNC',
+      position: n.to,
+      text: `${n.culpritName} отмотал назад на ${n.backwardSec.toFixed(1)}с — выравниваем`,
+      timestamp: n.now,
+    });
+  }
+
+  private formatPos(pos: number): string {
+    const s = Math.max(0, Math.floor(pos || 0));
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    if (h > 0) return `${h}:${String(mm).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+    return `${mm}:${String(sec).padStart(2, '0')}`;
   }
 
   private broadcastPresence(userId: string, status: string, activity?: string) {

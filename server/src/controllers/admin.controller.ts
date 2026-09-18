@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { systemService } from '../services/system.service';
+import { UpnpService } from '../services/upnp.service';
 
 export class AdminController {
   public static async getSystemStatus(req: AuthRequest, res: Response): Promise<void> {
@@ -12,6 +13,7 @@ export class AdminController {
       res.json({
         ...stats,
         activeSessions,
+        upnp: UpnpService.getStatus(),
       });
     } catch (err) {
       res.status(500).json({ error: 'Ошибка получения статуса системы' });

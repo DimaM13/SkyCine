@@ -37,11 +37,8 @@ interface CustomPlayerProps {
   onAttachGetIsPaused?: (fn: () => boolean) => void;
   initialPosition?: number;
   videoRef?: React.RefObject<HTMLVideoElement>;
-  isMicroCorrection?: boolean;
-  microCorrectionOffset?: number;
-  onToggleMicroCorrection?: () => void;
-  onAdjustMicroCorrection?: (delta: number) => void;
   onStreamModeDetected?: (mode: 'direct' | 'apple_ts' | 'fmp4') => void;
+  onControlsVisibilityChange?: (visible: boolean) => void;
 }
 
 export const CustomPlayer: React.FC<CustomPlayerProps> = ({
@@ -54,10 +51,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   members = [],
   reactions = [],
   initialPosition = 0,
-  isMicroCorrection = false,
-  microCorrectionOffset = 0,
-  onToggleMicroCorrection,
-  onAdjustMicroCorrection,
   onStreamModeDetected,
   onPlayRequest,
   onPauseRequest,
@@ -74,6 +67,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   onAttachGetCurrentTime,
   onAttachGetIsPaused,
   videoRef: externalVideoRef,
+  onControlsVisibilityChange,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const internalVideoRef = useRef<HTMLVideoElement>(null);
@@ -140,6 +134,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [defaultAudioTrackIndex]);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Сообщаем наружу видимость интерфейса (топ-бар здоровья прячется вместе с ним)
+  const onControlsVisibilityChangeRef = useRef(onControlsVisibilityChange);
+  onControlsVisibilityChangeRef.current = onControlsVisibilityChange;
+  useEffect(() => {
+    onControlsVisibilityChangeRef.current?.(showControls);
+  }, [showControls]);
 
   // Direct Play eligibility check
   const isDirectPlay = useMemo(() => {
@@ -1345,44 +1346,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 </button>
               )}
 
-              {isWatchTogether && onToggleMicroCorrection && (
-                <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-white/15">
-                  <button
-                    onClick={onToggleMicroCorrection}
-                    className={`px-2 py-0.5 rounded-md border text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer select-none ${
-                      isMicroCorrection
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-sm'
-                        : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10 hover:text-slate-300'
-                    }`}
-                    title={isMicroCorrection ? 'Выключить микрокоррекцию' : 'Включить ручную микрокоррекцию времени'}
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full ${isMicroCorrection ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-                    <span>Микрокоррекция</span>
-                  </button>
-
-                  {isMicroCorrection && onAdjustMicroCorrection && (
-                    <div className="flex items-center gap-1 bg-black/50 border border-emerald-500/40 rounded-md px-1 py-0.5 shadow-sm">
-                      <button
-                        onClick={() => onAdjustMicroCorrection(-1)}
-                        className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
-                        title="Сдвинуть видео на 1 секунду назад (-1с)"
-                      >
-                        -1с
-                      </button>
-                      <span className="text-[10px] font-mono font-bold text-emerald-300 px-1 min-w-[32px] text-center">
-                        {microCorrectionOffset > 0 ? `+${microCorrectionOffset}с` : `${microCorrectionOffset}с`}
-                      </span>
-                      <button
-                        onClick={() => onAdjustMicroCorrection(1)}
-                        className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white transition-all cursor-pointer active:scale-95"
-                        title="Сдвинуть видео на 1 секунду вперед (+1с)"
-                      >
-                        +1с
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           </div>
 

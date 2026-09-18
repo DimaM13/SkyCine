@@ -4,6 +4,9 @@ import { apiClient } from '../api/client';
 import { CustomPlayer } from '../components/player/CustomPlayer';
 import { YouTubeSyncPlayer } from '../components/player/YouTubeSyncPlayer';
 import { RoomSidebar } from '../components/rooms/RoomSidebar';
+import { RoomHealthBar } from '../components/rooms/RoomHealthBar';
+import { RoomActionToasts } from '../components/rooms/RoomActionToasts';
+import { RoomRollbackBanner } from '../components/rooms/RoomRollbackBanner';
 import { InviteFriendsModal } from '../components/rooms/InviteFriendsModal';
 import { useSyncPlayer } from '../hooks/useSyncPlayer';
 import { useAuth } from '../context/AuthContext';
@@ -19,6 +22,7 @@ export const RoomPage: React.FC = () => {
     typeof window !== 'undefined' ? window.innerWidth >= 768 : true
   );
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -76,10 +80,10 @@ export const RoomPage: React.FC = () => {
     reactions,
     syncDiffSec,
     isHost,
-    isMicroCorrection,
-    microCorrectionOffset,
-    toggleMicroCorrection,
-    adjustMicroCorrection,
+    health,
+    waitingText,
+    actionFeed,
+    rollbackNotice,
     sendPlay,
     sendPause,
     sendSeek,
@@ -143,6 +147,9 @@ export const RoomPage: React.FC = () => {
   return (
     <div className={`w-full h-full flex flex-col md:flex-row overflow-hidden ${isDesktop ? 'bg-transparent' : 'bg-black'} relative select-none touch-none`}>
       <div className={`flex-1 flex flex-col h-full relative overflow-hidden ${isDesktop ? 'bg-transparent' : 'bg-black'}`}>
+        <RoomHealthBar health={health} waitingText={waitingText} currentUserId={user?.id} controlsVisible={controlsVisible} />
+        <RoomRollbackBanner notice={rollbackNotice} />
+        <RoomActionToasts feed={actionFeed} />
         <div className="flex-1 w-full h-full">
           {isYouTubeRoom ? (
             <YouTubeSyncPlayer
@@ -162,6 +169,7 @@ export const RoomPage: React.FC = () => {
               isSidebarOpen={isSidebarOpen}
               onBack={() => navigate('/rooms')}
               onInvite={() => setIsInviteModalOpen(true)}
+              onControlsVisibilityChange={setControlsVisible}
               onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
               onAttachPlayHandler={(fn) => { doPlayRef.current = fn; }}
               onAttachPauseHandler={(fn) => { doPauseRef.current = fn; }}
@@ -185,15 +193,12 @@ export const RoomPage: React.FC = () => {
               onSeekRequest={sendSeek}
               onSyncToHost={syncToHost}
               onForceSyncAll={forceSyncAll}
-              isMicroCorrection={isMicroCorrection}
-              microCorrectionOffset={microCorrectionOffset}
-              onToggleMicroCorrection={toggleMicroCorrection}
-              onAdjustMicroCorrection={adjustMicroCorrection}
               onStreamModeDetected={(mode) => setCurrentStreamMode(mode)}
               onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
               isSidebarOpen={isSidebarOpen}
               onBack={() => navigate('/rooms')}
               onInvite={() => setIsInviteModalOpen(true)}
+              onControlsVisibilityChange={setControlsVisible}
               onAttachSeekHandler={(fn) => { doSeekRef.current = fn; }}
               onAttachPlayHandler={(fn) => { doPlayRef.current = fn; }}
               onAttachPauseHandler={(fn) => { doPauseRef.current = fn; }}
@@ -208,6 +213,7 @@ export const RoomPage: React.FC = () => {
       {isSidebarOpen && (
         <RoomSidebar
           members={members}
+          health={health}
           messages={messages}
           onSendMessage={sendMessage}
           onSendReaction={sendReaction}

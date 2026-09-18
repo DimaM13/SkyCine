@@ -32,6 +32,7 @@ interface YouTubeSyncPlayerProps {
   onAttachPauseHandler?: (fn: () => void) => void;
   onAttachGetCurrentTime?: (fn: () => number) => void;
   onAttachGetIsPaused?: (fn: () => boolean) => void;
+  onControlsVisibilityChange?: (visible: boolean) => void;
 }
 
 export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
@@ -52,6 +53,7 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   onAttachPauseHandler,
   onAttachGetCurrentTime,
   onAttachGetIsPaused,
+  onControlsVisibilityChange,
 }) => {
   const { socket } = useSocket();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -95,6 +97,12 @@ export const YouTubeSyncPlayer: React.FC<YouTubeSyncPlayerProps> = ({
   const [changeError, setChangeError] = useState('');
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const onControlsVisibilityChangeRef = useRef(onControlsVisibilityChange);
+  onControlsVisibilityChangeRef.current = onControlsVisibilityChange;
+  useEffect(() => {
+    onControlsVisibilityChangeRef.current?.(showControls);
+  }, [showControls]);
 
   const resetControlsTimeout = () => {
     setShowControls(true);
