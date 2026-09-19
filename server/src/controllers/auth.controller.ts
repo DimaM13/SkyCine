@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
-import { JWT_SECRET, AuthRequest } from '../middleware/auth.middleware';
+import { getJwtSecret, AuthRequest } from '../middleware/auth.middleware';
 import { User } from '../types';
 
 export class AuthController {
@@ -59,7 +59,7 @@ export class AuthController {
         updatedAt: new Date().toISOString(),
       };
 
-      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, {
+      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, getJwtSecret(), {
         expiresIn: '30d',
       });
 
@@ -103,7 +103,7 @@ export class AuthController {
         return;
       }
 
-      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, {
+      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, getJwtSecret(), {
         expiresIn: '30d',
       });
 

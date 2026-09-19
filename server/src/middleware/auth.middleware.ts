@@ -3,7 +3,11 @@ import jwt from 'jsonwebtoken';
 import { db } from '../config/db';
 import { User } from '../types';
 
-export const JWT_SECRET = process.env.JWT_SECRET || 'myplex_super_secret_jwt_key_2026_cinema';
+export function getJwtSecret(): string {
+  // Ленивое чтение env: секрет подсовывается при старте (см. ensureJwtSecret
+  // в index.ts) уже ПОСЛЕ загрузки модулей — константа на это опоздала бы.
+  return process.env.JWT_SECRET || 'myplex_super_secret_jwt_key_2026_cinema';
+}
 
 export interface AuthRequest extends Request {
   user?: User;
@@ -19,7 +23,7 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
   }
 
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { id: string; username: string };
+    const payload = jwt.verify(token, getJwtSecret()) as { id: string; username: string };
     const user = db.prepare('SELECT id, username, email, avatarUrl, role, createdAt, updatedAt FROM users WHERE id = ?').get(payload.id) as User | undefined;
 
     if (!user) {
@@ -53,7 +57,7 @@ export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction
   }
 
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { id: string };
+    const payload = jwt.verify(token, getJwtSecret()) as { id: string };
     const user = db.prepare('SELECT id, username, email, avatarUrl, role, createdAt, updatedAt FROM users WHERE id = ?').get(payload.id) as User | undefined;
     if (user) {
       req.user = user;

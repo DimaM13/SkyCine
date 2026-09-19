@@ -9,12 +9,13 @@ import { YouTubeController } from '../controllers/youtube.controller';
 import { RoomsController } from '../controllers/rooms.controller';
 import { AdminController } from '../controllers/admin.controller';
 import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/auth.middleware';
+import { authRateLimit, debugRateLimit } from '../middleware/rate-limit.middleware';
 
 const router = Router();
 
-// --- Auth Routes ---
-router.post('/auth/register', AuthController.register);
-router.post('/auth/login', AuthController.login);
+// --- Auth Routes (рейт-лимит: душит перебор паролей) ---
+router.post('/auth/register', authRateLimit, AuthController.register);
+router.post('/auth/login', authRateLimit, AuthController.login);
 router.get('/auth/me', authenticateToken, AuthController.me);
 router.put('/auth/profile', authenticateToken, AuthController.updateProfile);
 
@@ -102,8 +103,8 @@ router.delete('/admin/logs', requireAdmin, AdminController.clearLogs);
 router.get('/admin/fs/browse', requireAdmin, AdminController.browseFilesystem);
 router.post('/admin/restart', requireAdmin, AdminController.restartServer);
 
-// --- TV Remote Logging Routes (Tizen & WebOS) ---
-router.post('/debug/tizen-log', (req, res) => {
+// --- TV Remote Logging Routes (Tizen & WebOS, публичные — с рейт-лимитом от флуда) ---
+router.post('/debug/tizen-log', debugRateLimit, (req, res) => {
   const { level = 'info', tag = 'TIZEN', message = '', data } = req.body;
   const detail = data !== undefined ? ` | ${typeof data === 'object' ? JSON.stringify(data) : data}` : '';
   const fullMsg = `${message}${detail}`;
@@ -117,7 +118,7 @@ router.post('/debug/tizen-log', (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/debug/webos-log', (req, res) => {
+router.post('/debug/webos-log', debugRateLimit, (req, res) => {
   const { level = 'info', tag = 'WEBOS_APP', message = '', data } = req.body;
   const detail = data !== undefined ? ` | ${typeof data === 'object' ? JSON.stringify(data) : data}` : '';
   const fullMsg = `${message}${detail}`;

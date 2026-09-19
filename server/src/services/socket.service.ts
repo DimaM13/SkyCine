@@ -1,9 +1,22 @@
 import { Server, Socket } from 'socket.io';
+import jwt from 'jsonwebtoken';
 import { db } from '../config/db';
 import { RoomMember, RoomState, RoomHealthEntry, RoomActionFeedEntry } from '../types';
 import { logger } from './logger.service';
 import { ffmpegService } from './ffmpeg.service';
 import { roomHealthService } from './room-health.service';
+import { getJwtSecret } from '../middleware/auth.middleware';
+
+interface ConnectedUser {
+  userId: string;
+  username: string;
+  avatarUrl?: string;
+  socketId: string;
+  currentRoomId?: string;
+  status: string;
+  activity?: string;
+  verified: boolean; // true = userId подтверждён JWT, подделать нельзя
+}
 
 interface ConnectedUser {
   userId: string;
@@ -48,25 +61,69 @@ class SocketService {
         });
       });
 
-      // 2. User Presence
-      socket.on('user:connect', (userData: { userId: string; username: string; avatarUrl?: string }) => {
-        if (!userData?.userId) return;
+      // 2. User Presence (с проверкой личности: токен → доверенный id,
+      // без токена → гость; чужой реальный userId взять нельзя)
+      socket.on('user:connect', (userData: { userId: string; username: string; avatarUrl?: string; token?: string }) => {
+        if (!userData) return;
+
+        let finalId = '';
+        let finalName = 'Гость';
+        let finalAvatar: string | undefined = userData?.avatarUrl;
+        let verified = false;
+
+        // A. Пробуем JWT: валидный токен = доказанная личность
+        const token = (userData as any)?.token;
+        if (typeof token === 'string' && token.length > 10) {
+          try {
+            const payload = jwt.verify(token, getJwtSecret()) as { id: string };
+            const dbUser = db.prepare('SELECT id, username, avatarUrl FROM users WHERE id = ?').get(payload.id) as
+              { id: string; username: string; avatarUrl?: string } | undefined;
+            if (dbUser) {
+              finalId = dbUser.id;
+              finalName = dbUser.username;
+              finalAvatar = dbUser.avatarUrl || finalAvatar;
+              verified = true;
+            }
+          } catch {
+            // протухший/левый токен — падаем в гостевой путь ниже
+          }
+        }
+
+        // B. Гость: свой id можно, ЧУЖОЙ реальный — нельзя
+        if (!verified) {
+          const supplied = String(userData?.userId || '').trim();
+          let collides = false;
+          if (supplied) {
+            try {
+              collides = !!db.prepare('SELECT id FROM users WHERE id = ?').get(supplied);
+            } catch {}
+          }
+          if (collides) {
+            finalId = `guest:${socket.id.slice(0, 8)}`;
+            logger.warn('SECURITY', `Сокет ${socket.id} пытался занять чужой userId — выдан гостевой ${finalId}`);
+          } else {
+            finalId = supplied || `guest:${socket.id.slice(0, 8)}`;
+          }
+          finalName = String(userData?.username || 'Гость').slice(0, 32) || 'Гость';
+        }
+
         const user: ConnectedUser = {
-          userId: userData.userId,
-          username: userData.username || 'User',
-          avatarUrl: userData.avatarUrl,
+          userId: finalId,
+          username: finalName,
+          avatarUrl: finalAvatar,
           socketId: socket.id,
           status: 'online',
+          verified,
         };
 
         this.users.set(socket.id, user);
 
-        if (!this.userSockets.has(userData.userId)) {
-          this.userSockets.set(userData.userId, new Set());
+        if (!this.userSockets.has(finalId)) {
+          this.userSockets.set(finalId, new Set());
         }
-        this.userSockets.get(userData.userId)!.add(socket.id);
+        this.userSockets.get(finalId)!.add(socket.id);
 
-        this.broadcastPresence(userData.userId, 'online');
+        this.broadcastPresence(finalId, 'online');
       });
 
       socket.on('user:activity', (data: { activity?: string; status?: string }) => {
@@ -80,8 +137,16 @@ class SocketService {
 
       // 3. Room Join / Leave
       socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string; streamMode?: 'direct' | 'apple_ts' | 'fmp4' }) => {
-        const { roomId, userId, username, avatarUrl, streamMode } = data;
+        const { roomId } = data;
         if (!roomId) return;
+
+        // SECURITY: личность берём из проверенного сокета (user:connect),
+        // а не из полей джоина — их можно подделать
+        const connUser = this.users.get(socket.id);
+        const userId = connUser?.userId || data.userId;
+        const username = connUser?.username || data.username;
+        const avatarUrl = connUser?.avatarUrl || data.avatarUrl;
+        const streamMode = data.streamMode;
 
         socket.join(roomId);
 

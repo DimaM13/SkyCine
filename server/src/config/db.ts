@@ -238,10 +238,15 @@ export function initDatabase() {
   `);
 
   insertSetting.run('serverName', 'SkyCine Server');
-  insertSetting.run('tmdbApiKey', 'af51bdc93df8ab4cf422aaba091d83d1');
+  // SECURITY: без дефолтного TMDB-ключа (старый засвечен в публичном git).
+  // Вставить свой можно в админке сервера. Существующие базы не трогаем.
+  insertSetting.run('tmdbApiKey', '');
   insertSetting.run('transcodeHardware', 'auto');
   insertSetting.run('maxTranscodeBitrate', '20000'); // 20 Mbps
-  insertSetting.run('allowPublicRegistration', 'true');
+  // Новые установки: регистрация закрыта по умолчанию (первый юзер всё равно
+  // станет админом — см. AuthController.register; открыть можно в настройках).
+  // Существующие базы не трогаем (INSERT OR IGNORE ниже по файлу).
+  insertSetting.run('allowPublicRegistration', 'false');
   // RAM disk: always force transcodeTempDir to R:\Temp for HLS chunk storage
   db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('transcodeTempDir', 'R:\\Temp');
 
