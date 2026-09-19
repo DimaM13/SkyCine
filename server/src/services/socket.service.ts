@@ -738,10 +738,12 @@ class SocketService {
               // а не сразу: StrictMode-ремонт и реконнект сокета (пауза в мс-секунды) успевают
               // переподключиться и килл отменяется. Обычное закрытие и так чистится маяком
               // мгновенно — сюда доходит только потерянный маяк. Комнатные сессии не трогаем.
+              // Убиваем только IDLE-сессии (без запросов >60с): живой плеер на медленной сети
+              // качает сегменты по HTTP и переживает обрывы сокета — его трогать нельзя.
               const diedUserId = user.userId;
               setTimeout(() => {
                 if (!this.userSockets.has(diedUserId)) {
-                  ffmpegService.killSoloSessionsForUser(diedUserId);
+                  ffmpegService.killSoloSessionsForUser(diedUserId, 60000);
                 }
               }, 10000);
             }

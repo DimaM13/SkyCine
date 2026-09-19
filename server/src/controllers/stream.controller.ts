@@ -528,7 +528,10 @@ export class StreamController {
 
       res.setHeader('Content-Type', contentType);
       res.setHeader('Content-Length', stat.size);
-      res.setHeader('Cache-Control', 'public, max-age=3600');
+      // Сегменты и init привязаны к сессии (mount): после seek-рестарта тот же URL
+      // отдаёт ДРУГИЕ байты. Кэш на час тут врёт (особенно Safari при перемотке
+      // назад) — отдаём всегда свежее. Сик назад докачает с сервера, это дёшево.
+      res.setHeader('Cache-Control', 'no-store');
 
       const fileStream = fs.createReadStream(segmentPath);
       fileStream.pipe(res);

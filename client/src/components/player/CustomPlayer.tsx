@@ -293,6 +293,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [isWatchTogether, calculatedStreamMode, onStreamModeDetected]);
 
   const hlsRef = useRef<Hls | null>(null);
+  // Актуальный мастер-URL для hls (обновляется при каждом loadSource:
+  // качество/дорожка могут смениться, а ERROR-хендлер живёт в замыкании)
+  const hlsUrlRef = useRef<string>('');
   const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
 
@@ -427,8 +430,39 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
           hls.attachMedia(video);
 
+          // Счётчики мёртвой сессии: 404 по фрагменту = сессии на сервере уже нет
+          // (убили при выходе / протухла). Лечится перезапросом мастера — сервер
+          // пересоздаст сессию. После 2 перезапросов стопаемся, чтобы не спамить
+          // мёртвую сессию (антигостинг-флуд в логах). Успешный фраг сбрасывает streak.
+          let frag404Streak = 0;
+          let masterReloads = 0;
+          hls.on(Hls.Events.FRAG_BUFFERED, () => {
+            frag404Streak = 0;
+          });
+
           hls.on(Hls.Events.ERROR, (_event: any, data: any) => {
             if (data.fatal) {
+              const status = (data?.networkDetails as any)?.status ?? (data?.response as any)?.code;
+              const isFrag404 =
+                data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+                (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR ||
+                  data.details === Hls.ErrorDetails.KEY_LOAD_ERROR) &&
+                status === 404;
+              if (isFrag404) {
+                frag404Streak++;
+                if (masterReloads < 2 && hlsUrlRef.current) {
+                  masterReloads++;
+                  frag404Streak = 0;
+                  try {
+                    hls?.loadSource(hlsUrlRef.current);
+                    hls?.startLoad();
+                  } catch {}
+                } else if (frag404Streak >= 3) {
+                  // Сессия не воскресает — останавливаем загрузчик вместо вечного шторма
+                  try { hls?.stopLoad(); } catch {}
+                }
+                return;
+              }
               switch (data.type) {
                 case Hls.ErrorTypes.NETWORK_ERROR:
                   hls?.startLoad();
@@ -461,6 +495,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         if (startPos > 0) {
           try { video.currentTime = startPos; } catch (e) {}
         }
+        hlsUrlRef.current = url;
         hls.loadSource(url);
         hls.startLoad(startPos);
       } else {

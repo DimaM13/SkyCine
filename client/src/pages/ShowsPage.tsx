@@ -11,12 +11,13 @@ import { MediaItem } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { ShowAccessModal } from '../components/admin/ShowAccessModal';
 import { EpisodeModal } from '../components/library/EpisodeModal';
+import { useScrollRestore, usePersistentVisibleCount } from '../hooks/useScrollRestore';
 
 export const ShowsPage: React.FC = () => {
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const [shows, setShows] = useState<any[]>([]);
-  const [visibleCount, setVisibleCount] = useState(50);
+  const [visibleCount, setVisibleCount] = usePersistentVisibleCount('skycine_shows_visible', 50);
   const [selectedShow, setSelectedShow] = useState<any | null>(() => {
     try {
       const saved = localStorage.getItem('skycine_selectedShow');
@@ -60,6 +61,9 @@ export const ShowsPage: React.FC = () => {
   useEffect(() => {
     fetchShows();
   }, []);
+
+  // Возврат скролла после ухода в плеер (App сбрасывает в 0 при навигации)
+  useScrollRestore('skycine_shows_scroll', !loading && shows.length > 0);
 
   // Persist selected show and season to localStorage
   useEffect(() => {

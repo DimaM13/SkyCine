@@ -6,6 +6,7 @@ import { MediaCard } from '../components/library/MediaCard';
 import { MediaModal } from '../components/library/MediaModal';
 import { MediaItem } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { useScrollRestore, usePersistentVisibleCount } from '../hooks/useScrollRestore';
 
 export const MoviesPage: React.FC = () => {
   const navigate = useNavigate();
@@ -16,12 +17,17 @@ export const MoviesPage: React.FC = () => {
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [visibleCount, setVisibleCount] = useState(36);
+  const [visibleCount, setVisibleCount] = usePersistentVisibleCount('skycine_movies_visible', 36);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
-  const fetchMovies = () => {
+  const firstFetchRef = useRef(true);
+
+  const fetchMovies = (resetCount = false) => {
     setLoading(true);
-    setVisibleCount(36);
+    if (resetCount) {
+      setVisibleCount(36);
+      try { window.scrollTo(0, 0); } catch {}
+    }
     apiClient.get('/media/movies', {
       params: { search: search.trim() || undefined, sortBy },
     })
@@ -31,8 +37,17 @@ export const MoviesPage: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchMovies();
+    // Первый маунт (в т.ч. возврат из плеера): счётчик из хранилища не трогаем
+    if (firstFetchRef.current) {
+      firstFetchRef.current = false;
+      fetchMovies(false);
+    } else {
+      fetchMovies(true);
+    }
   }, [sortBy]);
+
+  // Возврат скролла после ухода в плеер (App сбрасывает в 0 при навигации)
+  useScrollRestore('skycine_movies_scroll', !loading && movies.length > 0);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -51,7 +66,7 @@ export const MoviesPage: React.FC = () => {
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    fetchMovies();
+    fetchMovies(true);
   };
 
   const handlePlayDirect = (media: MediaItem, startPos?: number) => {

@@ -10,6 +10,7 @@ import { MediaCard } from '../components/library/MediaCard';
 import { MediaModal } from '../components/library/MediaModal';
 import { EpisodeModal } from '../components/library/EpisodeModal';
 import { ShowAccessModal } from '../components/admin/ShowAccessModal';
+import { useScrollRestore, usePersistentVisibleCount, saveScroll } from '../hooks/useScrollRestore';
 import { MediaItem, Library } from '../types';
 import { useAuth } from '../context/AuthContext';
 
@@ -21,8 +22,18 @@ export const LibraryPage: React.FC = () => {
   const [library, setLibrary] = useState<Library | null>(null);
   const [loading, setLoading] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(36);
+  const scrollKey = `skycine_lib_${libraryId || 'none'}_scroll`;
+  const visibleKey = `skycine_lib_${libraryId || 'none'}_visible`;
+  const [visibleCount, setVisibleCount] = usePersistentVisibleCount(visibleKey, 36);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  // Предыдущая библиотека: отличаем "вернулся из плеера" от "перешёл в другую"
+  const prevLibraryIdRef = useRef<string | undefined>(undefined);
+  // Первый маунт (в т.ч. возврат из плеера): сбросы ниже не применяем,
+  // иначе скроллу некуда возвращаться (см. useEffect [sortBy])
+  const firstSortRef = useRef(true);
+
+  // Возврат скролла после загрузки данных (App сбрасывает в 0 при навигации)
+  useScrollRestore(scrollKey, !loading && !!library);
 
   // Movies state
   const [movies, setMovies] = useState<MediaItem[]>([]);
@@ -94,7 +105,7 @@ export const LibraryPage: React.FC = () => {
         sortBy
       },
     })
-      .then((res) => { setMovies(res.data.movies || []); setVisibleCount(50); })
+      .then((res) => { setMovies(res.data.movies || []); setVisibleCount((prev) => Math.max(prev, 50)); })
       .catch(() => {})
       .finally(() => setLoading(false));
   };
@@ -140,6 +151,26 @@ export const LibraryPage: React.FC = () => {
   }, [selectedShow?.showTitle]);
 
   useEffect(() => {
+    const isSwitch = prevLibraryIdRef.current !== undefined && prevLibraryIdRef.current !== libraryId;
+    prevLibraryIdRef.current = libraryId;
+
+    if (isSwitch) {
+      // Переход в ДРУГУЮ библиотеку: чужой открытый сериал/поиск/скролл
+      // сюда тащить нельзя — сбрасываем всё под новую библиотеку
+      setSelectedShow(null);
+      setEpisodes([]);
+      setSelectedSeason('all');
+      setSearch('');
+      setVisibleCount(36);
+      try {
+        localStorage.removeItem('skycine_library_selectedShow');
+        localStorage.removeItem('skycine_library_selectedSeason');
+      } catch {}
+      fetchLibraryInfoAndData();
+      return;
+    }
+
+    // Та же библиотека (первый маунт / возврат из плеера): восстанавливаем сериал
     // Don't wipe selectedShow if we have a saved one for this library — keep user on same show after Back
     const saved = libraryId ? localStorage.getItem(`skycine_lib_${libraryId}_selectedShow`) : null;
     const generic = localStorage.getItem('skycine_library_selectedShow');
@@ -163,12 +194,24 @@ export const LibraryPage: React.FC = () => {
       setSelectedShow(null);
     }
     setSearch('');
-    setVisibleCount(36);
+    // visibleCount НЕ трогаем: он восстановлен из хранилища, иначе
+    // скроллу некуда будет возвращаться (контент ужмётся до 36)
     fetchLibraryInfoAndData();
   }, [libraryId]);
 
   useEffect(() => {
+    // Первый маунт (в т.ч. возврат из плеера): счётчик восстановлен из хранилища,
+    // не сбрасываем — иначе контент ужмётся и скролл упрётся в начало
+    if (firstSortRef.current) {
+      firstSortRef.current = false;
+      if (library && library.type === 'MOVIES') {
+        fetchMovies(library.id);
+      }
+      return;
+    }
     setVisibleCount(36);
+    // Новый порядок — старая позиция бессмысленна
+    try { window.scrollTo(0, 0); } catch {}
     if (library && library.type === 'MOVIES') {
       fetchMovies(library.id);
     }
@@ -192,6 +235,8 @@ export const LibraryPage: React.FC = () => {
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setVisibleCount(36);
+    try { window.scrollTo(0, 0); } catch {}
     if (library?.type === 'MOVIES') {
       fetchMovies();
     }

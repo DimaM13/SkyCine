@@ -1107,10 +1107,18 @@ class FFmpegService {
   // Чистка соло-сессий юзера, у которого не осталось живых сокетов (закрытие/креш вкладки —
   // страховка на случай потерянного end-маяка; вызывается отложенно с перепроверкой).
   // Комнатные сессии тут не трогаем: их ведёт socket.service.
-  public killSoloSessionsForUser(userId: string): void {
+  // onlyIdleMs: убивать только сессии без запросов дольше N мс. Живой плеер качает
+  // сегменты по HTTP независимо от сокета (обрыв/реконнект на медленной сети), и его
+  // сессию убивать нельзя — иначе вечный 404 и ступор до полного перезахода.
+  public killSoloSessionsForUser(userId: string, onlyIdleMs: number = 0): void {
     if (!userId) return;
+    const now = Date.now();
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (!sId.includes('_r') && session.ownerUserId === userId) {
+        if (onlyIdleMs > 0 && now - session.lastAccess < onlyIdleMs) {
+          logger.debug('HLS', `⏭️ Skipping kill of active session ${sId} (last access ${((now - session.lastAccess) / 1000).toFixed(1)}s ago, socket flap?)`);
+          continue;
+        }
         logger.info('HLS', `🧹 Cleaning up solo session of disconnected user ${userId}: ${sId}`);
         this.killSession(sId);
       }
