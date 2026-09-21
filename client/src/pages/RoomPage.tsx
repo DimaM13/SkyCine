@@ -71,7 +71,7 @@ export const RoomPage: React.FC = () => {
 
   const { user } = useAuth();
 
-  const [currentStreamMode, setCurrentStreamMode] = useState<'direct' | 'apple_ts' | 'fmp4'>('direct');
+  const [currentStreamMode, setCurrentStreamMode] = useState<'direct' | 'fmp4'>('direct');
 
   const {
     roomState,

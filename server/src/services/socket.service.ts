@@ -136,7 +136,7 @@ class SocketService {
       });
 
       // 3. Room Join / Leave
-      socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string; streamMode?: 'direct' | 'apple_ts' | 'fmp4' }) => {
+      socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string; streamMode?: 'direct' | 'fmp4' }) => {
         const { roomId } = data;
         if (!roomId) return;
 
@@ -506,7 +506,7 @@ class SocketService {
       // 7. Member Status & Position Reporting (позиции нужны для syncToHost — рассылаем троттлингом 2с)
       // Расширено телеметрией здоровья: buffering/stalls/rtt/drops/platform
       socket.on('room:member_status', (data: {
-        roomId: string; currentPosition: number; bufferedPosition?: number; streamMode?: 'direct' | 'apple_ts' | 'fmp4';
+        roomId: string; currentPosition: number; bufferedPosition?: number; streamMode?: 'direct' | 'fmp4';
         isBuffering?: boolean; isPlaying?: boolean; bufferedAheadSec?: number; stallCount?: number; stallMs?: number;
         rttMs?: number; pingMs?: number; droppedFrames?: number; platform?: string; hwdec?: string;
       }) => {

@@ -137,7 +137,7 @@ export interface RoomMember {
   currentPosition: number;
   pingMs: number;
   bufferPercent?: number;
-  streamMode?: 'direct' | 'apple_ts' | 'fmp4';
+  streamMode?: 'direct' | 'fmp4';
   joinedAt: string;
   isBuffering?: boolean;
   isPlaying?: boolean;

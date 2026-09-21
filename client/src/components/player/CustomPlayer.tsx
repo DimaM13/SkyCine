@@ -46,7 +46,7 @@ interface CustomPlayerProps {
   onAttachGetIsPaused?: (fn: () => boolean) => void;
   initialPosition?: number;
   videoRef?: React.RefObject<HTMLVideoElement>;
-  onStreamModeDetected?: (mode: 'direct' | 'apple_ts' | 'fmp4') => void;
+  onStreamModeDetected?: (mode: 'direct' | 'fmp4') => void;
   onControlsVisibilityChange?: (visible: boolean) => void;
 }
 
@@ -206,25 +206,32 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
     const rawAudioCodec = (currentAudioTrack?.codec || media.audioCodec || '').toUpperCase();
 
-    const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
-    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-
     // Check if video codec is supported by browser for Direct Copy without transcoding
     // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 идёт напрямую, без исключений.
-    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+    // PC без vp8 (твин серверного isDirectCopyVideo): Chrome MSE в MP4 VP8 не
+    // принимает — сервер такие транскодирует, бейдж обязан показать транскод.
+    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp9', 'av1'];
     const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedVideo = isAppleDevice
       ? appleSupportedCodecs.includes(rawVideoCodec)
       : pcSupportedCodecs.includes(rawVideoCodec);
 
     const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
-    const useFmp4 = !isAppleDevice || isHevc || isVp9;
+    // Контейнер HLS всегда fMP4 (MPEG-TS удалён на сервере для всех).
 
     const isAudioTrans = !isDirectPlay && (
       isAppleDevice
-        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
+        // Твин серверного appleAudio: FLAC на Apple копируется (passthrough).
+        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
         : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
     );
+
+    // Куда реально перекодируется звук (твин серверного _create): Apple 5.1+ при
+    // не-копии идёт в AC3 640k, всё остальное не-копи — в AAC. Бейдж обязан
+    // показать правду, а не всегда "→ AAC".
+    const transAudioLabel = (isAppleDevice && ((currentAudioTrack?.channels || 0) >= 6))
+      ? `Звук: ${rawAudioCodec || 'DTS'} → AC3 5.1`
+      : `Звук: ${rawAudioCodec || 'DTS'} → AAC`;
 
     let modeText = 'Direct Stream (Оригинал)';
     let modeType: 'direct' | 'stream' | 'transcode' = 'stream';
@@ -235,7 +242,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     } else if (isVideoDirectCopy) {
       modeType = 'stream';
       if (isAudioTrans) {
-        modeText = `Direct Stream • Звук: ${rawAudioCodec || 'DTS'} → AAC`;
+        modeText = `Direct Stream • ${transAudioLabel}`;
       } else {
         modeText = 'Direct Stream (Оригинал)';
       }
@@ -245,7 +252,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         ? `${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
         : qualityLabel(selectedQuality);
       const aText = isAudioTrans
-        ? `Звук: ${rawAudioCodec || 'DTS'} → AAC`
+        ? transAudioLabel
         : `Звук: Оригинал (${rawAudioCodec || 'AAC'})`;
 
       modeText = `Транскодирование (Видео: ${vText} • ${aText})`;
@@ -264,13 +271,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     const isDesktopApp = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
 
+    // Контейнер HLS всегда fMP4 (MPEG-TS удалён на сервере для всех).
     const containerLabel = isDesktopApp
       ? 'Native MKV / Direct Stream'
       : isDirectPlay
         ? 'Direct MP4'
-        : useFmp4
-          ? (isAppleDevice ? 'fMP4 CMAF (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)')
-          : 'MPEG-TS (Apple HLS)';
+        : (isAppleDevice ? 'fMP4 CMAF (Apple HLS)' : 'fMP4 CMAF (Chunked MP4)');
     const engineLabel = isDesktopApp
       ? 'MPV Native Engine (Direct3D11 / GPU NVDEC)'
       : isDirectPlay ? 'HTML5 Native Player' : isAppleDevice ? 'Apple Native AVPlayer' : 'Hls.js Engine (MSE)';
@@ -292,15 +298,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     };
   }, [isDirectPlay, selectedQuality, media, currentAudioTrack, isAppleDevice]);
 
-  const calculatedStreamMode = useMemo((): 'direct' | 'apple_ts' | 'fmp4' => {
+  // Режим HLS всегда fMP4 (MPEG-TS удалён на сервере): 'apple_ts' больше не бывает.
+  const calculatedStreamMode = useMemo((): 'direct' | 'fmp4' => {
     if (isDirectPlay) return 'direct';
-    const rawVideoCodec = (media.videoCodec || '').toLowerCase();
-    const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
-    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-    // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 идёт напрямую, без исключений.
-    const useFmp4 = !isAppleDevice || isHevc || isVp9;
-    return useFmp4 ? 'fmp4' : 'apple_ts';
-  }, [isDirectPlay, isAppleDevice, media.videoCodec, media.resolution]);
+    return 'fmp4';
+  }, [isDirectPlay]);
 
   useEffect(() => {
     if (isWatchTogether && onStreamModeDetected) {

@@ -128,7 +128,7 @@ export interface RoomMember {
   currentPosition: number;
   pingMs: number;
   bufferPercent?: number;
-  streamMode?: 'direct' | 'apple_ts' | 'fmp4';
+  streamMode?: 'direct' | 'fmp4';
   joinedAt: string;
   // ── Room Health telemetry (Watch Together diagnostics) ──
   isBuffering?: boolean;

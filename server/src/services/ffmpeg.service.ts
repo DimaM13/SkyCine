@@ -82,7 +82,9 @@ export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: bo
   if (quality !== 'original') return false;
   const vc = media.videoCodec?.toLowerCase() || '';
   if (isTv) return TV_COPY_VIDEO.includes(vc);
-  const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
+  // PC: без vp8 — Chrome MSE в MP4-контейнере VP8 не принимает (только WebM),
+  // copy давал гарантированный BUFFER_APPEND_ERROR. VP8 идёт в транскод H.264.
+  const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp9', 'av1'];
   const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
   const isSupportedCodec = isApple
     ? appleSupportedCodecs.includes(vc)
@@ -90,25 +92,22 @@ export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: bo
   return isSupportedCodec;
 }
 
-// Предикат fmp4-контейнера. Твин строки useFmp4 из _createContinuousHlsSession и generateVodPlaylist.
-// ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 на Apple — fMP4 напрямую.
-// isTv=true: всегда fMP4 (Tizen 3.0+, webOS HLS v7; MPEG-TS для ТВ не отдаём).
-export function shouldUseFmp4(media: MediaItem, isApple: boolean, isTv: boolean = false): boolean {
-  if (isTv) return true;
-  const rawVideoCodec = (media.videoCodec || '').toLowerCase();
-  const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
-  const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-  return !isApple || isHevc || isVp9;
+// Контейнер HLS — всегда fMP4 для всех (PC, Apple, TV). MPEG-TS удалён полностью:
+// Apple AVPlayer ест fMP4 с 2016 года, hls.js и TV-прошивки — тем более.
+// Единый путь: меньше веток — меньше рассинхронов плейлиста и движка.
+// (История: раньше Apple h264 шёл в TS, fMP4 был только для HEVC/VP9/TV/ALAC/FLAC.)
+export function shouldUseFmp4(_media: MediaItem, _isApple: boolean, _isTv: boolean = false): boolean {
+  return true;
 }
 
 // Сколько сегментов обещать в VOD-плейлисте. Для copy+fmp4 muxer глотает хвостовой partial
 // (проверено воспроизведением: обещанный round-хвост не производится никогда) — floor.
-// Остальные режимы (транскод, mpegts) хвост флашат — round как раньше, без изменений.
+// Режим транскода хвост флашит — round как раньше, без изменений.
 export function countPlaylistSegments(media: MediaItem, quality: string, isApple: boolean, segDuration: number, isTv: boolean = false): number {
   const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
   const seg = segDuration && segDuration > 0 ? segDuration : 4;
   const raw = duration / seg;
-  const dropTail = isDirectCopyVideo(media, quality, isApple, isTv) && shouldUseFmp4(media, isApple, isTv);
+  const dropTail = isDirectCopyVideo(media, quality, isApple, isTv);
   return Math.max(1, dropTail ? Math.floor(raw) : Math.round(raw));
 }
 
@@ -803,23 +802,24 @@ class FFmpegService {
 
     // Аудио: ТВ копирует AAC/AC3/EAC3/MP3 (декодеры DD/DD+ есть в 100% TV).
     // DTS/TrueHD/FLAC/Vorbis — в AAC-транскод внутри сегментов (ремукс удалён).
-    // PC/Apple-ветки не тронуты.
-    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus'];
+    // Apple: +FLAC passthrough (Safari ест FLAC; контейнер форсится в fMP4 выше).
+    // PC/Apple-ветки иначе не тронуты.
+    const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus', 'flac'];
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
     const isTvNativeAudio = TV_COPY_AUDIO.some(c => trackAudioCodec.includes(c));
     const canCopyAudio = isTv ? isTvNativeAudio : (isApple ? isAppleNativeAudio : isPcNativeAudio);
 
-    // Контейнер: ТВ всегда fMP4 (Tizen 3.0+, webOS HLS v7). Остальные — как раньше.
-    const useFmp4 = shouldUseFmp4(media, isApple, isTv);
-
+    // Контейнер всегда fMP4 (shouldUseFmp4() === true для всех): MPEG-TS удалён,
+    // отдельной ветки больше нет — единый путь для PC/Apple/TV.
     const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
+    const transAudioLabel = !isTv && isApple && trackChannels >= 6 ? 'AC3 640k' : `AAC ${audioBitrate}`;
     logger.info('HLS', `🎬 Starting session [${sessionId}] (${isTv ? tvLabel : (isApple ? 'Apple/iOS' : 'PC/Android')}): ` +
       `File="${path.basename(media.filePath)}" (DB Dur=${media.durationSeconds || 0}s), ` +
       `Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), ` +
-      `Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), ` +
-      `StartPos=${cleanStartTime}s (seg #${startNumber}, ${alignedStartTime}s), segDuration=${segDuration}s, Container=${useFmp4 ? 'fMP4' : 'MPEG-TS'}`);
+      `Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : transAudioLabel}), ` +
+      `StartPos=${cleanStartTime}s (seg #${startNumber}, ${alignedStartTime}s), segDuration=${segDuration}s, Container=fMP4`);
 
     if (canCopyVideo) {
       args.push('-c:v', 'copy');
@@ -866,21 +866,12 @@ class FFmpegService {
       '-start_number', startNumber.toString()
     );
 
-    if (useFmp4) {
-      args.push(
-        '-hls_segment_type', 'fmp4',
-        '-hls_fmp4_init_filename', 'init.mp4',
-        '-hls_segment_filename', `${ffmpegSessionDir}/seg_%04d.m4s`
-      );
-    } else {
-      if (canCopyVideo && media.videoCodec === 'h264') {
-        args.push('-bsf:v', 'h264_mp4toannexb');
-      }
-      args.push(
-        '-hls_segment_type', 'mpegts',
-        '-hls_segment_filename', `${ffmpegSessionDir}/seg_%04d.ts`
-      );
-    }
+    // fMP4 для всех (MPEG-TS удалён): init + сегменты .m4s.
+    args.push(
+      '-hls_segment_type', 'fmp4',
+      '-hls_fmp4_init_filename', 'init.mp4',
+      '-hls_segment_filename', `${ffmpegSessionDir}/seg_%04d.m4s`
+    );
 
     args.push(`${ffmpegSessionDir}/playlist.m3u8`);
 
@@ -941,11 +932,9 @@ class FFmpegService {
       }
     });
 
-    // Wait until first segment is ready
+    // Wait until first segment is ready (всегда fMP4: seg_*.m4s + init.mp4).
     const startNumStr = startNumber.toString().padStart(4, '0');
-    const firstSegPath = useFmp4
-      ? path.join(sessionDir, `seg_${startNumStr}.m4s`)
-      : path.join(sessionDir, `seg_${startNumStr}.ts`);
+    const firstSegPath = path.join(sessionDir, `seg_${startNumStr}.m4s`);
 
     const maxWaitMs = 12000;
     const startWait = Date.now();
@@ -999,14 +988,13 @@ class FFmpegService {
     const quality = sessionId.match(/_q([a-zA-Z0-9]+)_/)?.[1] || 'original';
     const totalSegments = countPlaylistSegments(media, quality, isApple, segmentDuration, isTv);
 
-    // Единый предикат с _createContinuousHlsSession (ТВИН убран). ТВ всегда fMP4.
-    const useFmp4 = shouldUseFmp4(media, isApple, isTv);
-    const ext = useFmp4 ? '.m4s' : '.ts';
+    // Всегда fMP4 (MPEG-TS удалён): VERSION 7 + MAP + сегменты .m4s для всех.
+    const ext = '.m4s';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
 
     let m3u8 = `#EXTM3U\n`;
-    m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
+    m3u8 += `#EXT-X-VERSION:7\n`;
     // ТВ-прошивки: EXT-X-INDEPENDENT-SEGMENTS в списке "Not supported" у LG webOS
     // (строгий парсер может отвергнуть плейлист) — для ТВ-сессий не эмитим.
     // Сегменты при этом реально независимые (ffmpeg -hls_flags independent_segments,
@@ -1025,9 +1013,7 @@ class FFmpegService {
       m3u8 += `#EXT-X-START:TIME-OFFSET=${startTime.toFixed(3)},PRECISE=YES\n`;
     }
 
-    if (useFmp4) {
-      m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
-    }
+    m3u8 += `#EXT-X-MAP:URI="/api/stream/hls/session/${sessionId}/init.mp4${tokenParam}"\n`;
 
     for (let i = 0; i < totalSegments; i++) {
       const numStr = i.toString().padStart(4, '0');

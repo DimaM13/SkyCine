@@ -6,7 +6,7 @@ import { Room, RoomMember, RoomChatMessage, RoomReaction, RoomState, RoomHealthU
 interface UseSyncPlayerProps {
   room: Room | null;
   videoRef?: React.RefObject<HTMLVideoElement | null>;
-  streamMode?: 'direct' | 'apple_ts' | 'fmp4';
+  streamMode?: 'direct' | 'fmp4';
   onSeekTo?: (pos: number, shouldPlay?: boolean) => void;
   onPlay?: () => void;
   onPause?: () => void;
@@ -53,7 +53,7 @@ export function useSyncPlayer({
   const roomStateRef = useRef<RoomState>(room?.state || 'PAUSED');
   const isInternalAction = useRef<boolean>(false);
 
-  const streamModeRef = useRef<'direct' | 'apple_ts' | 'fmp4'>(streamMode);
+  const streamModeRef = useRef<'direct' | 'fmp4'>(streamMode);
   streamModeRef.current = streamMode;
 
   const lastSentSeekPosRef = useRef<number | null>(null);
