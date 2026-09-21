@@ -798,6 +798,36 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   // задеть не может. Стабилен весь маунт, уникален между маунтами/вкладками.
   const mountIdRef = useRef<string>(Math.random().toString(36).substring(2, 10));
 
+  // Точечное завершение HLS-сессии сервера для ЯВНО указанной комбинации.
+  // Бьёт только exact sessionId (media+quality+audio+device+mount): серверный
+  // широкий kill по медиа срабатывает лишь для легаси-клиентов без mount,
+  // а у веба mount всегда есть — чужие и комнатные сессии задеть нельзя.
+  // Для несуществующей сессии — no-op. Используется и при размонтировании,
+  // и при смене quality/audio (см. эффект ниже).
+  const sendHlsSessionEnd = useCallback((mediaId: string, quality: string, audioIndex: number, isApple: boolean) => {
+    try {
+      const token = localStorage.getItem('myplex_token');
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+      const payload = JSON.stringify({ mediaId, quality, audioIndex, isApple, mount: mountIdRef.current });
+
+      try {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(`/api/stream/hls/session/end${tokenParam}`, new Blob([payload], { type: 'application/json' }));
+        }
+      } catch (e) {}
+
+      fetch(`/api/stream/hls/session/end${tokenParam}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: payload,
+        keepalive: true
+      }).catch(() => {});
+    } catch {}
+  }, []);
+
   // Clean up Hls and terminate FFmpeg session on unmount or page exit
   useEffect(() => {
     const endSession = () => {
@@ -833,23 +863,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
 
       if (!isDirectPlay && !isWatchTogether) {
-        const payload = JSON.stringify({ mediaId, quality, audioIndex, isApple, mount: mountIdRef.current });
-
-        try {
-          if (navigator.sendBeacon) {
-            navigator.sendBeacon(`/api/stream/hls/session/end${tokenParam}`, new Blob([payload], { type: 'application/json' }));
-          }
-        } catch (e) {}
-
-        fetch(`/api/stream/hls/session/end${tokenParam}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {})
-          },
-          body: payload,
-          keepalive: true
-        }).catch(() => {});
+        sendHlsSessionEnd(mediaId, quality, audioIndex, isApple);
       }
     };
 
@@ -1027,6 +1041,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     // Авто-переключение помечено флагом и счётчик ступеней не трогает.
     // Смена только аудиодорожки автомат не касается.
     const qualityChanged = prevQualityRef.current !== selectedQuality;
+    const audioChanged = prevAudioTrackRef.current !== selectedAudioTrack;
+    // Снапшот СТАРОЙ комбинации ДО перезаписи: только она могла оставить
+    // HLS-сессию (новая direct сессий не создаёт, новая HLS приберёт старую
+    // и серверным stale-киллом — двойной kill идемпотентен).
+    const oldQuality = prevQualityRef.current;
+    const oldAudioTrack = prevAudioTrackRef.current;
     prevQualityRef.current = selectedQuality;
     prevAudioTrackRef.current = selectedAudioTrack;
 
@@ -1046,6 +1066,20 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       return;
     }
 
+    // Гасим брошенную HLS-сессию СТАРОЙ комбинации — иначе она висит до
+    // idle-свипера: возврат на Direct не стартует новую сессию, и серверному
+    // stale-киллу не за что зацепиться (это и была дыра HLS→Direct).
+    // Безопасно: exact sessionId (с mount), для несуществующей — no-op;
+    // HLS→HLS продублирует серверный stale-kill (идемпотентно);
+    // Direct→HLS бьёт в пустоту. Desktop/TV сюда не доходят (return выше),
+    // комнаты — их сессии ведёт socket.service, mount-суффикса комнаты
+    // в payload нет, чужое не задеваем.
+    if (qualityChanged || audioChanged) {
+      try {
+        sendHlsSessionEnd(media.id, oldQuality, oldAudioTrack, isAppleDevice);
+      } catch {}
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -1053,7 +1087,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const wasPlaying = !video.paused;
     const url = buildStreamUrl(selectedQuality, selectedAudioTrack, currentPos);
     loadStreamSource(url, isDirectPlay, wasPlaying, currentPos);
-  }, [selectedQuality, selectedAudioTrack, isDirectPlay, isDesktop, buildStreamUrl, loadStreamSource, videoRef]);
+  }, [selectedQuality, selectedAudioTrack, isDirectPlay, isDesktop, buildStreamUrl, loadStreamSource, videoRef, isAppleDevice, media.id, sendHlsSessionEnd]);
 
   // Video Time Update
   const handleTimeUpdate = () => {
