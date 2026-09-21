@@ -49,6 +49,34 @@ export function useScrollRestore(storageKey: string, ready: boolean) {
       saveScroll(storageKey);
     };
   }, [storageKey]);
+
+  // Непрерывное сохранение (троттлинг): размонтирование вообще может не
+  // случиться (полный релоад вкладки, jetsam Safari, краш) — тогда сработает
+  // последнее сохранённое значение, а не позавчерашнее.
+  useEffect(() => {
+    let last = 0;
+    let timer: any = null;
+    const onScroll = () => {
+      const now = Date.now();
+      if (now - last < 500) {
+        if (!timer) {
+          timer = setTimeout(() => {
+            timer = null;
+            last = Date.now();
+            saveScroll(storageKey);
+          }, 550);
+        }
+        return;
+      }
+      last = now;
+      saveScroll(storageKey);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      if (timer) clearTimeout(timer);
+    };
+  }, [storageKey]);
 }
 
 /** visibleCount, переживающий размонтирование (иначе скролл некуда возвращать). */

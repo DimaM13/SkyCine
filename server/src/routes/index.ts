@@ -132,4 +132,25 @@ router.post('/debug/webos-log', debugRateLimit, (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Player Telemetry (браузерный плеер шлёт сюда ошибки video/hls + сводку) ---
+router.post('/debug/player-log', debugRateLimit, (req, res) => {
+  const body = (req.body || {}) as Record<string, any>;
+  const level = body.level === 'error' ? 'error' : body.level === 'warn' ? 'warn' : 'info';
+  // Режем размер: клиент может слать UA и buffered-строки
+  const safe = (v: any, n: number) => String(v ?? '').slice(0, n);
+  const fullMsg =
+    `[${safe(body.event, 24)}] media=${safe(body.mediaId, 40)} mount=${safe(body.mount, 12)} ` +
+    `t=${safe(body.currentTime, 12)} buf=${safe(body.buffered, 64)} ` +
+    `err=${safe(body.errorCode, 8)}/${safe(body.errorMessage, 160)} ` +
+    `detail=${safe(body.detail, 200)} ua=${safe(body.ua, 120)}`;
+  if (level === 'error') {
+    logger.error('PLAYER', fullMsg);
+  } else if (level === 'warn') {
+    logger.warn('PLAYER', fullMsg);
+  } else {
+    logger.info('PLAYER', fullMsg);
+  }
+  res.json({ ok: true });
+});
+
 export default router;

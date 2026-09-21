@@ -30,9 +30,31 @@ export interface ContinuousHlsSession {
   _fsWatcher?: fs.FSWatcher;
 }
 
+// Маркер ТВ-клиента в sessionId. ТВ-движок включается ТОЛЬКО по нему:
+// PC/Apple-сессии (без маркера) идут ровно как раньше, побайтово тот же код.
+export type TvClient = 'tizen' | 'webos';
+
+export function parseTvClient(sessionId: string): TvClient | null {
+  if (sessionId.includes('_tvtizen')) return 'tizen';
+  if (sessionId.includes('_tvwebos')) return 'webos';
+  return null;
+}
+
+// ТВ-движок (tizen/webos, спеки Samsung 2024/2025 + LG webOS 25/26):
+//  - video-copy ТОЛЬКО H.264/HEVC. VP9/AV1/MPEG-2/VC-1 в HLS-контейнере на
+//    прошивках негарантированы (у Samsung VP9 — только WebM-direct, у LG VP9/AV1 —
+//    только mkv/mp4/ts-direct) — поэтому транскод в H.264, а не copy;
+//  - audio-copy AAC/AC3/EAC3/MP3 (декодеры DD/DD+ есть в 100% TV обеих платформ).
+//    DTS/TrueHD/FLAC/Vorbis — в AAC-транскод внутри сегментов;
+//  - контейнер ВСЕГДА fMP4 (Tizen 3.0+, webOS HLS v7). MPEG-TS для ТВ не отдаём.
+export const TV_COPY_VIDEO: readonly string[] = ['h264', 'hevc', 'h265'];
+export const TV_COPY_AUDIO: readonly string[] = ['aac', 'ac3', 'eac3', 'mp3'];
+
 // Единый конструктор sessionId для HLS. Суффикс _m{mount} привязывает сессию к конкретному
 // маунту плеера: прощальный маяк от старого маунта (StrictMode-ремонт, вторая вкладка) физически
 // не может попасть в чужую живую сессию. Без mount — легаси-id, поведение как раньше.
+// tvClient вшивается маркером _tvtizen/_tvwebos ПЕРЕД room/user/mount-суффиксами,
+// чтобы _m{LAT} оставался в конце (на него завязаны killStaleQualityVariants и endHlsSession).
 export function buildHlsSessionId(
   mediaId: string,
   quality: string,
@@ -41,49 +63,52 @@ export function buildHlsSessionId(
   roomId?: string,
   userId?: string,
   mount?: string,
+  tvClient?: TvClient | null,
 ): string {
   const deviceSuffix = isApple ? 'apple' : 'pc';
+  const tvSuffix = tvClient === 'tizen' ? '_tvtizen' : tvClient === 'webos' ? '_tvwebos' : '';
   const roomSuffix = roomId ? `_r${roomId}` : '';
   const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
   const cleanMount = (mount || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
   const mountSuffix = cleanMount ? `_m${cleanMount}` : '';
-  return `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
+  return `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${tvSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
 }
 
 // Предикат direct-copy видео. ТВИН логики canCopyVideo из _createContinuousHlsSession
 // и getSegmentDuration — при смене белых списков менять синхронно во всех трёх местах!
-export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: boolean): boolean {
-  const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
-  const is4k = media.resolution === '4K';
-  const is4kVp9 = isVp9OrVp8 && is4k;
-  const isApple4kVp9 = isApple && is4kVp9;
-
+// ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 на Apple идёт напрямую (исключение убрано).
+// isTv=true: только H.264/HEVC (TV_COPY_VIDEO), остальное — транскод в H.264.
+export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: boolean, isTv: boolean = false): boolean {
+  if (quality !== 'original') return false;
+  const vc = media.videoCodec?.toLowerCase() || '';
+  if (isTv) return TV_COPY_VIDEO.includes(vc);
   const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-  const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+  const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
   const isSupportedCodec = isApple
-    ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
-    : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
-  return quality === 'original' && isSupportedCodec;
+    ? appleSupportedCodecs.includes(vc)
+    : pcSupportedCodecs.includes(vc);
+  return isSupportedCodec;
 }
 
 // Предикат fmp4-контейнера. Твин строки useFmp4 из _createContinuousHlsSession и generateVodPlaylist.
-export function shouldUseFmp4(media: MediaItem, isApple: boolean): boolean {
+// ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 на Apple — fMP4 напрямую.
+// isTv=true: всегда fMP4 (Tizen 3.0+, webOS HLS v7; MPEG-TS для ТВ не отдаём).
+export function shouldUseFmp4(media: MediaItem, isApple: boolean, isTv: boolean = false): boolean {
+  if (isTv) return true;
   const rawVideoCodec = (media.videoCodec || '').toLowerCase();
   const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
   const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-  const is4k = media.resolution === '4K';
-  const isApple4kVp9 = isApple && isVp9 && is4k;
-  return (!isApple || isHevc || isVp9) && !isApple4kVp9;
+  return !isApple || isHevc || isVp9;
 }
 
 // Сколько сегментов обещать в VOD-плейлисте. Для copy+fmp4 muxer глотает хвостовой partial
 // (проверено воспроизведением: обещанный round-хвост не производится никогда) — floor.
 // Остальные режимы (транскод, mpegts) хвост флашат — round как раньше, без изменений.
-export function countPlaylistSegments(media: MediaItem, quality: string, isApple: boolean, segDuration: number): number {
+export function countPlaylistSegments(media: MediaItem, quality: string, isApple: boolean, segDuration: number, isTv: boolean = false): number {
   const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
   const seg = segDuration && segDuration > 0 ? segDuration : 4;
   const raw = duration / seg;
-  const dropTail = isDirectCopyVideo(media, quality, isApple) && shouldUseFmp4(media, isApple);
+  const dropTail = isDirectCopyVideo(media, quality, isApple, isTv) && shouldUseFmp4(media, isApple, isTv);
   return Math.max(1, dropTail ? Math.floor(raw) : Math.round(raw));
 }
 
@@ -120,18 +145,10 @@ class FFmpegService {
   private segmentDurationCache: Map<string, number> = new Map();
   private detectedEncoder: string | null = null;
 
-  public async getSegmentDuration(media: MediaItem, quality: string = 'original', isApple: boolean = false): Promise<number> {
-    const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9OrVp8 && is4k;
-    const isApple4kVp9 = isApple && is4kVp9;
-
-    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
-    const isSupportedCodec = isApple
-      ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
-      : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
-    const canCopyVideo = quality === 'original' && isSupportedCodec;
+  public async getSegmentDuration(media: MediaItem, quality: string = 'original', isApple: boolean = false, isTv: boolean = false): Promise<number> {
+    // Единый предикат с _createContinuousHlsSession (ТВИН убран: было два списка).
+    // isTv=true: copy только H.264/HEVC, остальное — транскод с seg=4.0.
+    const canCopyVideo = isDirectCopyVideo(media, quality, isApple, isTv);
 
     if (!canCopyVideo) {
       return 4.0;
@@ -430,6 +447,42 @@ class FFmpegService {
     }
   }
 
+  private getFreeBytes(dir: string): number {
+    try {
+      const st = fs.statfsSync(dir);
+      return (st.bfree || 0) * (st.bsize || 4096);
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  // Защита RAM-диска перед стартом сессии: мало места (<256МБ) — выгоняем самые
+  // старые idle-сессии (>30с без запросов); если всё равно <128МБ — громко жалуемся
+  // (тихие обрезанные сегменты хуже честной ошибки: плеер на них виснет навсегда).
+  private async ensureRamDiskSpace(newSessionId: string): Promise<void> {
+    const LOW_WATER = 256 * 1024 * 1024;
+    const CRITICAL = 128 * 1024 * 1024;
+    const IDLE_MS = 30000;
+    try {
+      let free = this.getFreeBytes(this.getBaseTempDir());
+      if (free >= LOW_WATER) return;
+      logger.warn('HLS', `💾 RAM disk low (${(free / 1048576).toFixed(0)}MB free), evicting oldest idle sessions before starting ${newSessionId}`);
+      const now = Date.now();
+      const idle = Array.from(this.continuousSessions.entries())
+        .filter(([, s]) => now - s.lastAccess > IDLE_MS)
+        .sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+      for (const [sId, session] of idle) {
+        if (sId === newSessionId) continue;
+        await this.retireSession(sId, session);
+        free = this.getFreeBytes(this.getBaseTempDir());
+        if (free >= LOW_WATER) break;
+      }
+      if (free < CRITICAL) {
+        logger.error('HLS', `💾 RAM disk CRITICALLY low (${(free / 1048576).toFixed(0)}MB free)! Segments may truncate — playback will stall. Free up R:\\Temp!`);
+      }
+    } catch {}
+  }
+
   private cleanupOrphanedTranscodes(): void {
     try {
       const baseTempDir = this.getBaseTempDir();
@@ -494,11 +547,19 @@ class FFmpegService {
     isApple: boolean = false,
     sessionIdOverride?: string,
     ownerUserId?: string,
+    tvClient?: TvClient | null,
   ): Promise<{ sessionId: string }> {
-    const segDuration = await this.getSegmentDuration(media, quality, isApple);
+    const isTv = tvClient === 'tizen' || tvClient === 'webos';
+    const segDuration = await this.getSegmentDuration(media, quality, isApple, isTv);
     const cleanStartTime = Math.max(0, Math.floor(startTime));
     const deviceSuffix = isApple ? 'apple' : 'pc';
     const sessionId = sessionIdOverride || `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
+
+    // 0. Смена качества (original <-> transcode, ручная или авто-фолбэк) даёт ДРУГОЙ
+    // sessionId — старая сессия того же плеера (тот же mount) сама не умрёт и будет
+    // висеть жирным грузом до idle-таймаута. Убиваем такие stale-варианты ЖЁСТКО
+    // (процесс + папка + проверка) ДО старта новой сессии.
+    await this.killStaleQualityVariants(media.id, sessionId);
 
     // 1. Check if session creation is already in flight
     const inFlight = this.sessionCreationPromises.get(sessionId);
@@ -532,12 +593,24 @@ class FFmpegService {
         return { sessionId };
       }
 
-      // Position changed (seek backward or far forward): gracefully retire existing session
+      // Position changed (seek backward or far forward): HARD retire existing session
+      // and only then create a new one — the old dir must be gone from disk first,
+      // иначе жирные сессии копятся и забивают 1ГБ RAM-диск. Concurrent requests
+      // ждут тот же промис (без дублей ffmpeg).
       logger.info('HLS', `🔄 Restarting session ${sessionId} for seek to ${cleanStartTime}s (prev start: ${currentStart}s, latest produced: ${currentLatestTime}s)`);
-      this.retireSession(sessionId, existing);
+      const restartPromise = (async () => {
+        await this.retireSession(sessionId, existing);
+        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, false, tvClient);
+      })();
+      this.sessionCreationPromises.set(sessionId, restartPromise);
+      try {
+        return await restartPromise;
+      } finally {
+        this.sessionCreationPromises.delete(sessionId);
+      }
     }
 
-    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId);
+    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, false, tvClient);
     this.sessionCreationPromises.set(sessionId, promise);
 
     try {
@@ -547,29 +620,91 @@ class FFmpegService {
     }
   }
 
-  private async retireSession(sessionId: string, session: ContinuousHlsSession): Promise<void> {
-    this.stopSegmentWatcher(session);
-    if (session.isSuspended) {
-      session.isSuspended = false;
-      this.resumeFFmpeg(session).catch(() => {});
+  // Ждём реального завершения процесса (иначе Windows держит хендлы файлов
+  // и удаление папки молча падает, оставляя сотни мегабайт мусора).
+  private waitForExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      try {
+        const p = proc as any;
+        const done = () => !proc || !proc.pid || p.killed || p.exitCode !== null || p.signalCode !== null;
+        if (done()) return resolve();
+        const t0 = Date.now();
+        const iv = setInterval(() => {
+          if (done() || Date.now() - t0 > timeoutMs) {
+            clearInterval(iv);
+            resolve();
+          }
+        }, 50);
+      } catch {
+        resolve();
+      }
+    });
+  }
+
+  private dirSizeBytes(dir: string): number {
+    try {
+      let total = 0;
+      const files = fs.readdirSync(dir);
+      for (const file of files) {
+        try { total += fs.statSync(path.join(dir, file)).size; } catch {}
+      }
+      return total;
+    } catch {
+      return 0;
     }
+  }
 
-    const closingId = `${sessionId}_closing_${Date.now()}`;
-    const dirToDelete = session.sessionDir;
-    this.closingSessions.set(closingId, session);
-    this.continuousSessions.delete(sessionId);
+  // Stale-варианты качества одного плеера: тот же mediaId + тот же mount-суффикс,
+  // но другой sessionId (другое quality/audio/device). Убиваются жёстко перед
+  // стартом новой сессии, иначе переживают её и забивают RAM-диск.
+  // Без mount (легаси) не трогаем: там id общий на вкладки.
+  private async killStaleQualityVariants(mediaId: string, keepSessionId: string): Promise<void> {
+    try {
+      const mountMatch = keepSessionId.match(/_m([A-Za-z0-9]{1,8})$/);
+      if (!mountMatch) return;
+      const mountSuffix = `_m${mountMatch[1]}`;
+      const kills: Promise<void>[] = [];
+      for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
+        if (sId === keepSessionId) continue;
+        if (session.mediaId !== mediaId) continue;
+        if (!sId.endsWith(mountSuffix)) continue;
+        logger.info('HLS', `🔄 Quality switch: retiring stale variant ${sId} before starting ${keepSessionId}`);
+        kills.push(this.retireSession(sId, session));
+      }
+      await Promise.all(kills);
+    } catch {}
+  }
 
-    logger.info('HLS', `Retiring session ${sessionId}, terminating process PID ${session.process?.pid}`);
-    await this.terminateProcess(session.process);
+  private async retireSession(sessionId: string, session: ContinuousHlsSession): Promise<void> {
+    try {
+      this.stopSegmentWatcher(session);
+      if (session.isSuspended) {
+        session.isSuspended = false;
+        this.resumeFFmpeg(session).catch(() => {});
+      }
 
-    // Give process 100ms to release file handles before purging and deleting folder
-    setTimeout(async () => {
+      const closingId = `${sessionId}_closing_${Date.now()}`;
+      const dirToDelete = session.sessionDir;
+      this.closingSessions.set(closingId, session);
+      this.continuousSessions.delete(sessionId);
+
+      logger.info('HLS', `Retiring session ${sessionId}, terminating process PID ${session.process?.pid}`);
+      await this.terminateProcess(session.process);
+      // Жёстко: процесс мёртв + папка удалена + место проверено — только потом дальше.
+      await this.waitForExit(session.process, 3000);
+
       this.closingSessions.delete(closingId);
       this.purgeSessionDir(dirToDelete);
       try {
-        await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 5 });
+        await fs.promises.rm(dirToDelete, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
       } catch {}
-    }, 100);
+      try {
+        const leftover = this.dirSizeBytes(dirToDelete);
+        if (leftover > 0) {
+          logger.error('HLS', `⚠️ Session dir NOT fully deleted: ${dirToDelete} (${(leftover / 1048576).toFixed(1)}MB left, likely locked handles)`);
+        }
+      } catch {}
+    } catch {}
   }
 
   public async warmupFile(filePath: string): Promise<void> {
@@ -598,8 +733,11 @@ class FFmpegService {
     deviceSuffix: string,
     segDuration: number,
     ownerUserId?: string,
-    isRetry: boolean = false
+    isRetry: boolean = false,
+    tvClient?: TvClient | null,
   ): Promise<{ sessionId: string }> {
+    const isTv = tvClient === 'tizen' || tvClient === 'webos';
+    const tvLabel = tvClient === 'tizen' ? 'Tizen TV' : tvClient === 'webos' ? 'webOS TV' : '';
     await this.warmupFile(media.filePath);
 
     const baseTempDir = this.getBaseTempDir();
@@ -609,6 +747,11 @@ class FFmpegService {
     if (!fs.existsSync(sessionDir)) {
       fs.mkdirSync(sessionDir, { recursive: true });
     }
+
+    // RAM-диск 1ГБ: 4 жирные сессии (по ~170МБ) забивают его целиком, и новым
+    // (особенно транскоду, который пишет непрерывно) некуда писаться.
+    // Проверяем место ДО старта и выгоняем старые idle-сессии.
+    await this.ensureRamDiskSpace(sessionId);
 
     const ffmpegSessionDir = sessionDir.replace(/\\/g, '/');
     const encoder = await this.detectHardwareEncoder();
@@ -637,17 +780,10 @@ class FFmpegService {
       args.push('-map', '0:a:0?');
     }
 
-    const isVp9OrVp8 = media.videoCodec?.toLowerCase() === 'vp9' || media.videoCodec?.toLowerCase() === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9OrVp8 && is4k;
-    const isApple4kVp9 = isApple && is4kVp9;
-
-    const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
-    const isSupportedCodec = isApple
-      ? appleSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '')
-      : pcSupportedCodecs.includes(media.videoCodec?.toLowerCase() || '');
-    const canCopyVideo = quality === 'original' && isSupportedCodec;
+    // Видео: единый предикат (ТВИН убран). ТВ: copy только H.264/HEVC,
+    // VP9/AV1/MPEG-2/VC-1 — в HLS-контейнере на прошивках негарантированы,
+    // поэтому транскод в H.264 (PC/Apple-ветки не тронуты).
+    const canCopyVideo = isDirectCopyVideo(media, quality, isApple, isTv);
 
     let trackAudioCodec = media.audioCodec?.toLowerCase() || '';
     let trackChannels = 2;
@@ -665,19 +801,21 @@ class FFmpegService {
       } catch {}
     }
 
+    // Аудио: ТВ копирует AAC/AC3/EAC3/MP3 (декодеры DD/DD+ есть в 100% TV).
+    // DTS/TrueHD/FLAC/Vorbis — в AAC-транскод внутри сегментов (ремукс удалён).
+    // PC/Apple-ветки не тронуты.
     const appleAudio = ['aac', 'ac3', 'eac3', 'mp3', 'alac', 'opus'];
     const pcAudio = ['aac', 'mp3', 'opus', 'vorbis', 'flac', 'wav'];
     const isAppleNativeAudio = appleAudio.some(c => trackAudioCodec.includes(c));
     const isPcNativeAudio = pcAudio.some(c => trackAudioCodec.includes(c));
-    const isOpusIn4kVp9 = is4kVp9 && trackAudioCodec.includes('opus');
-    const canCopyAudio = (isApple ? isAppleNativeAudio : isPcNativeAudio) && !isOpusIn4kVp9;
+    const isTvNativeAudio = TV_COPY_AUDIO.some(c => trackAudioCodec.includes(c));
+    const canCopyAudio = isTv ? isTvNativeAudio : (isApple ? isAppleNativeAudio : isPcNativeAudio);
 
-    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
+    // Контейнер: ТВ всегда fMP4 (Tizen 3.0+, webOS HLS v7). Остальные — как раньше.
+    const useFmp4 = shouldUseFmp4(media, isApple, isTv);
 
     const audioBitrate = trackChannels >= 6 ? '512k' : '320k';
-    logger.info('HLS', `🎬 Starting session [${sessionId}] (${isApple ? 'Apple/iOS' : 'PC/Android'}): ` +
+    logger.info('HLS', `🎬 Starting session [${sessionId}] (${isTv ? tvLabel : (isApple ? 'Apple/iOS' : 'PC/Android')}): ` +
       `File="${path.basename(media.filePath)}" (DB Dur=${media.durationSeconds || 0}s), ` +
       `Video=${media.videoCodec} (${canCopyVideo ? 'DIRECT COPY' : `TRANSCODE ${encoder}`}), ` +
       `Audio=${trackAudioCodec || 'default'} [${trackChannels}ch] (${canCopyAudio ? 'DIRECT COPY' : `AAC ${audioBitrate}`}), ` +
@@ -780,7 +918,7 @@ class FFmpegService {
       for (const line of lines) {
         lastStderrLines.push(line);
         if (lastStderrLines.length > 40) lastStderrLines.shift();
-        if (/error|failed|invalid|corrupt|cannot|non-monotonous/i.test(line)) {
+        if (/error|failed|invalid|corrupt|cannot|non-monotonous|no space left|enospace|enospc|disk full|No space/i.test(line)) {
           logger.warn('FFMPEG_STDERR', `[${sessionId}] ${line}`);
         }
       }
@@ -839,8 +977,8 @@ class FFmpegService {
       // Self-healing: if process unexpectedly died and this is not already a retry, restart once immediately
       if (isDead && !isRetry) {
         logger.warn('HLS', `🔄 Self-healing: restarting session [${sessionId}] after unexpected process exit`);
-        this.retireSession(sessionId, sessionObj);
-        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, true);
+        await this.retireSession(sessionId, sessionObj);
+        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, true, tvClient);
       }
     }
 
@@ -856,22 +994,30 @@ class FFmpegService {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
     const segmentDuration = segDuration && segDuration > 0 ? segDuration : 4;
     const isApple = sessionId.includes('_apple');
+    const tvClient = parseTvClient(sessionId);
+    const isTv = tvClient !== null;
     const quality = sessionId.match(/_q([a-zA-Z0-9]+)_/)?.[1] || 'original';
-    const totalSegments = countPlaylistSegments(media, quality, isApple, segmentDuration);
+    const totalSegments = countPlaylistSegments(media, quality, isApple, segmentDuration, isTv);
 
-    const isHevc = media.videoCodec === 'hevc' || media.videoCodec === 'h265';
-    const isVp9 = media.videoCodec === 'vp9' || media.videoCodec === 'vp8';
-    const is4k = media.resolution === '4K';
-    const isApple4kVp9 = isApple && isVp9 && is4k;
-    const useFmp4 = (!isApple || isHevc || isVp9) && !isApple4kVp9;
+    // Единый предикат с _createContinuousHlsSession (ТВИН убран). ТВ всегда fMP4.
+    const useFmp4 = shouldUseFmp4(media, isApple, isTv);
     const ext = useFmp4 ? '.m4s' : '.ts';
 
     const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
 
     let m3u8 = `#EXTM3U\n`;
     m3u8 += `#EXT-X-VERSION:${useFmp4 ? '7' : '3'}\n`;
-    m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
+    // ТВ-прошивки: EXT-X-INDEPENDENT-SEGMENTS в списке "Not supported" у LG webOS
+    // (строгий парсер может отвергнуть плейлист) — для ТВ-сессий не эмитим.
+    // Сегменты при этом реально независимые (ffmpeg -hls_flags independent_segments,
+    // GOP 48, keyint_min 48). PC/Apple (hls.js/AVPlayer) — как раньше.
+    if (!isTv) {
+      m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
+    }
     m3u8 += `#EXT-X-TARGETDURATION:${Math.ceil(segmentDuration)}\n`;
+    // MEDIA-SEQUENCE константа 0 + single rendition (без STREAM-INF/MEDIA):
+    // требование webOS "sequence совпадает по rendition" выполнено тривиально,
+    // отдельный CODECS не нужен (нет multivariant).
     m3u8 += `#EXT-X-MEDIA-SEQUENCE:0\n`;
     m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
 
@@ -891,7 +1037,7 @@ class FFmpegService {
 
     m3u8 += `#EXT-X-ENDLIST\n`;
 
-    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, segDuration=${segmentDuration}s, startOffset=${startTime}s, type=${ext}`);
+    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, segDuration=${segmentDuration}s, startOffset=${startTime}s, type=${ext}${isTv ? `, tv=${tvClient}` : ''}`);
     return m3u8;
   }
 
@@ -914,10 +1060,13 @@ class FFmpegService {
     let session = this.continuousSessions.get(sessionId);
     const segDuration = session?.segmentDuration || 4;
 
-    // Единый подсчёт с плейлистом (floor для copy+fmp4 — хвостового фантома в нём уже нет)
+    // Единый подсчёт с плейлистом (floor для copy+fmp4 — хвостового фантома в нём уже нет).
+    // ТВ-маркер тянем из sessionId, иначе seek-рестарт ТВ-сессии потерял бы ТВ-движок
+    // (segDuration/длина плейлиста разъехались бы: PC-copy vs TV-transcode).
     const guardQuality = sessionId.match(/_q([a-zA-Z0-9]+)_/)?.[1] || 'original';
     const guardIsApple = sessionId.includes('_apple');
-    const totalSegments = countPlaylistSegments(media, guardQuality, guardIsApple, segDuration);
+    const guardIsTv = parseTvClient(sessionId) !== null;
+    const totalSegments = countPlaylistSegments(media, guardQuality, guardIsApple, segDuration, guardIsTv);
     // Reject segments past the end of the media duration immediately (zero timeout)
     if (!isInit && segmentIndex >= totalSegments) {
       logger.debug('HLS', `Rejecting segment beyond duration [${sessionId}] seg_${segmentIndex} >= ${totalSegments}`);
@@ -1027,15 +1176,17 @@ class FFmpegService {
 
       // Handle seeking (backward or far forward): The requested segment is outside the active session's window.
       // Immediately start a fresh session at the requested segment's timestamp!
+      // ТВ-маркер пробрасываем, иначе рестарт сбросит ТВ-движок на PC-правила.
       const targetStartTime = segmentIndex * segDuration;
       const isApple = sessionId.includes('_apple');
+      const tvClient = parseTvClient(sessionId);
       const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
       const audioMatch = sessionId.match(/_a(\d+)_/);
       const quality = qualityMatch ? qualityMatch[1] : 'original';
       const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
 
       logger.info('HLS', `⚡ Seek detected [${sessionId}] to segment #${segmentIndex} (${targetStartTime}s). Active window latest is #${session.latestSegmentIndex}. Re-starting session at ${targetStartTime}s`);
-      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId, session.ownerUserId);
+      await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId, session.ownerUserId, tvClient);
 
       const activeSession = this.continuousSessions.get(sessionId);
       if (activeSession) {
@@ -1068,40 +1219,46 @@ class FFmpegService {
     return false;
   }
 
-  public killSession(sessionId: string): void {
+  public async killSession(sessionId: string): Promise<void> {
     const session = this.continuousSessions.get(sessionId);
     if (session) {
       logger.info('HLS', `🛑 Kill requested for session: ${sessionId}`);
-      this.retireSession(sessionId, session);
+      await this.retireSession(sessionId, session);
     }
   }
 
-  public killSessionsForRoom(roomId: string): void {
+  public async killSessionsForRoom(roomId: string): Promise<void> {
+    const kills: Promise<void>[] = [];
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (sId.includes(`_r${roomId}`)) {
         logger.info('HLS', `🧹 Cleaning up session for empty room ${roomId}: ${sId}`);
-        this.killSession(sId);
+        kills.push(this.retireSession(sId, session));
       }
     }
+    await Promise.all(kills);
   }
 
-  public killUserSessionInRoom(roomId: string, userId: string): void {
+  public async killUserSessionInRoom(roomId: string, userId: string): Promise<void> {
     const userClean = userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
+    const kills: Promise<void>[] = [];
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (sId.includes(`_r${roomId}`) && sId.includes(`_u${userClean}`)) {
         logger.info('HLS', `🛑 Killing room session for departed user ${userId}: ${sId}`);
-        this.killSession(sId);
+        kills.push(this.retireSession(sId, session));
       }
     }
+    await Promise.all(kills);
   }
 
-  public killSoloSessionsForMedia(mediaId: string): void {
+  public async killSoloSessionsForMedia(mediaId: string): Promise<void> {
+    const kills: Promise<void>[] = [];
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (session.mediaId === mediaId && !sId.includes('_r')) {
         logger.info('HLS', `🛑 Killing solo session for media ${mediaId}: ${sId}`);
-        this.killSession(sId);
+        kills.push(this.retireSession(sId, session));
       }
     }
+    await Promise.all(kills);
   }
 
   // Чистка соло-сессий юзера, у которого не осталось живых сокетов (закрытие/креш вкладки —
@@ -1110,9 +1267,10 @@ class FFmpegService {
   // onlyIdleMs: убивать только сессии без запросов дольше N мс. Живой плеер качает
   // сегменты по HTTP независимо от сокета (обрыв/реконнект на медленной сети), и его
   // сессию убивать нельзя — иначе вечный 404 и ступор до полного перезахода.
-  public killSoloSessionsForUser(userId: string, onlyIdleMs: number = 0): void {
+  public async killSoloSessionsForUser(userId: string, onlyIdleMs: number = 0): Promise<void> {
     if (!userId) return;
     const now = Date.now();
+    const kills: Promise<void>[] = [];
     for (const [sId, session] of Array.from(this.continuousSessions.entries())) {
       if (!sId.includes('_r') && session.ownerUserId === userId) {
         if (onlyIdleMs > 0 && now - session.lastAccess < onlyIdleMs) {
@@ -1120,9 +1278,10 @@ class FFmpegService {
           continue;
         }
         logger.info('HLS', `🧹 Cleaning up solo session of disconnected user ${userId}: ${sId}`);
-        this.killSession(sId);
+        kills.push(this.retireSession(sId, session));
       }
     }
+    await Promise.all(kills);
   }
 
   // Процесс завершён (любым кодом), убит или сигнал — производить больше не будет.

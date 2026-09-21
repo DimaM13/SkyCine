@@ -11,6 +11,15 @@ import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
 import { apiClient } from '../../api/client';
 
+// Подпись качества в меню/бейджах: 'transcode' = транскод без смены разрешения
+// (сервер: тот же else-бранч ffmpeg — H264 + исходный размер, без -b:v; в sessionId
+// парсится тем же регексом _q([a-zA-Z0-9]+)_, отдельных правок сервера не надо).
+export function qualityLabel(q: string): string {
+  if (q === 'original') return 'Оригинал';
+  if (q === 'transcode') return 'Оригинал (транскод)';
+  return q;
+}
+
 interface CustomPlayerProps {
   media: MediaItem;
   room?: any;
@@ -129,6 +138,26 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     return /iPad|iPhone|iPod/.test(ua) || /Macintosh/.test(ua);
   }, []);
 
+  // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ (MMS): мобильный Apple — это iPad/iPhone, либо iPadOS,
+  // прикидывающийся Macintosh (отличаем по тачу — у маков его нет).
+  const isMobileApple = useMemo(() => {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent;
+    if (/iPad|iPhone|iPod/.test(ua)) return true;
+    return /Macintosh/.test(ua) && (navigator as any).maxTouchPoints > 1;
+  }, []);
+
+  // Managed Media Source (iPadOS 17+): hls.js через него вместо нативного AVPlayer.
+  // Свой толерантный парсер, видимые ошибки, рабочие ретраи. Нет MMS — как раньше.
+  const canUseManagedMse = useMemo(() => {
+    if (typeof window === 'undefined' || !isMobileApple) return false;
+    try {
+      return !!(window as any).ManagedMediaSource && Hls.isSupported();
+    } catch {
+      return false;
+    }
+  }, [isMobileApple]);
+
   useEffect(() => {
     setSelectedAudioTrack(defaultAudioTrackIndex);
   }, [defaultAudioTrackIndex]);
@@ -157,11 +186,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawAudioCodec = (selectedTrack?.codec || media.audioCodec || '').toLowerCase();
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
 
-    const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9 && is4k;
-    if (is4kVp9 && rawAudioCodec.includes('opus')) return false;
-
+    // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 идёт напрямую, без исключений.
     if (isAppleDevice) {
       const isNativeAppleAudio = ['aac', 'mp3', 'ac3', 'eac3', 'alac', 'opus'].some(c => rawAudioCodec.includes(c));
       const isNativeAppleVideo = ['h264', 'hevc', 'h265', 'vp8', 'vp9'].includes(rawVideoCodec);
@@ -183,27 +208,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
     const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9 && is4k;
-    const isApple4kVp9 = isAppleDevice && is4kVp9;
 
     // Check if video codec is supported by browser for Direct Copy without transcoding
+    // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 идёт напрямую, без исключений.
     const pcSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1'];
-    const appleSupportedCodecs = isApple4kVp9 ? ['h264', 'hevc', 'h265'] : ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
+    const appleSupportedCodecs = ['h264', 'hevc', 'h265', 'vp8', 'vp9'];
     const isSupportedVideo = isAppleDevice
       ? appleSupportedCodecs.includes(rawVideoCodec)
       : pcSupportedCodecs.includes(rawVideoCodec);
 
     const isVideoDirectCopy = isDirectPlay || (selectedQuality === 'original' && isSupportedVideo);
-    const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
+    const useFmp4 = !isAppleDevice || isHevc || isVp9;
 
-    const isOpusIn4kVp9 = is4kVp9 && rawAudioCodec.includes('OPUS');
     const isAudioTrans = !isDirectPlay && (
-      isOpusIn4kVp9 || (
-        isAppleDevice
-          ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
-          : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
-      )
+      isAppleDevice
+        ? !['AAC', 'MP3', 'AC3', 'EAC3', 'ALAC', 'OPUS'].some(c => rawAudioCodec.includes(c))
+        : !['AAC', 'MP3', 'OPUS', 'FLAC'].some(c => rawAudioCodec.includes(c))
     );
 
     let modeText = 'Direct Stream (Оригинал)';
@@ -221,11 +241,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       }
     } else {
       modeType = 'transcode';
-      const vText = isApple4kVp9
-        ? '4K VP9 → H.264'
-        : !isSupportedVideo
-          ? `${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
-          : `${selectedQuality}`;
+      const vText = !isSupportedVideo
+        ? `${(rawVideoCodec || 'VC-1').toUpperCase()} → H.264`
+        : qualityLabel(selectedQuality);
       const aText = isAudioTrans
         ? `Звук: ${rawAudioCodec || 'DTS'} → AAC`
         : `Звук: Оригинал (${rawAudioCodec || 'AAC'})`;
@@ -279,10 +297,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const rawVideoCodec = (media.videoCodec || '').toLowerCase();
     const isHevc = rawVideoCodec === 'hevc' || rawVideoCodec === 'h265';
     const isVp9 = rawVideoCodec === 'vp9' || rawVideoCodec === 'vp8';
-    const is4k = media.resolution === '4K';
-    const is4kVp9 = isVp9 && is4k;
-    const isApple4kVp9 = isAppleDevice && is4kVp9;
-    const useFmp4 = (!isAppleDevice || isHevc || isVp9) && !isApple4kVp9;
+    // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 идёт напрямую, без исключений.
+    const useFmp4 = !isAppleDevice || isHevc || isVp9;
     return useFmp4 ? 'fmp4' : 'apple_ts';
   }, [isDirectPlay, isAppleDevice, media.videoCodec, media.resolution]);
 
@@ -296,12 +312,153 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   // Актуальный мастер-URL для hls (обновляется при каждом loadSource:
   // качество/дорожка могут смениться, а ERROR-хендлер живёт в замыкании)
   const hlsUrlRef = useRef<string>('');
+
+  // Телеметрия плеера: ошибки video/hls + сводка уходят в /api/debug/player-log (лог PLAYER).
+  // Нужна чтобы видеть ПРИЧИНУ отказа со стороны плеера (сервер видит только HTTP).
+  const playerStatsRef = useRef({ waiting: 0, stalled: 0, emptied: 0, abortEv: 0, suspendEv: 0, fragErr: 0, mediaErr: 0, parsingErr: 0, bufferFlushed: 0 });
+  const telemetryParsingSentRef = useRef(0);
+  // Авто-фолбэк ступенями: 0 — нет, 1 — ушли на 'transcode' (оригинал-размер),
+  // 2 — ушли на '720p' (лёгкий вес). Ручной выбор юзера гасит автомат.
+  const fallbackStageRef = useRef(0);
+  // Метка авто-переключения: эффект смены качества по ней отличает авто от ручного.
+  const autoSwitchingRef = useRef(false);
+  // Журнал вытеснений для детекта шёрна (время + позиция).
+  const evictLogRef = useRef<{ at: number; pos: number }[]>([]);
+  // Журнал аппендов по sn: один и тот же фрагмент лёг в буфер N раз,
+  // а позиция стоит — значит его тут же вытесняют (девайс не тянет вес).
+  const bufLogRef = useRef<{ at: number; sn: number; pos: number }[]>([]);
+  // Ошибки парсинга по sn: transmux не может разобрать один и тот же фрагмент.
+  const parseStreakRef = useRef<{ sn: number; count: number }>({ sn: -2, count: 0 });
+  const sendPlayerLog = useCallback((event: string, level: 'info' | 'warn' | 'error' = 'info', extra: Record<string, any> = {}) => {
+    try {
+      const video = videoRef.current;
+      let buffered = '';
+      try {
+        const b = video?.buffered;
+        if (b) {
+          const parts: string[] = [];
+          for (let i = 0; i < b.length && i < 5; i++) {
+            parts.push(`${b.start(i).toFixed(1)}-${b.end(i).toFixed(1)}`);
+          }
+          buffered = parts.join(',');
+        }
+      } catch {}
+      let cur = -1;
+      try {
+        const dt = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
+        cur = dt ? currentTimeRef.current : (video?.currentTime ?? -1);
+        cur = Math.round(cur * 100) / 100;
+      } catch {}
+      const payload = {
+        event, level,
+        mediaId: media.id,
+        mount: mountIdRef.current,
+        currentTime: cur,
+        buffered,
+        errorCode: extra.errorCode ?? '',
+        errorMessage: extra.errorMessage ?? '',
+        detail: extra.detail ?? '',
+        ua: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+        stats: playerStatsRef.current,
+      };
+      const token = localStorage.getItem('myplex_token');
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+      const body = JSON.stringify(payload);
+      if (navigator.sendBeacon) {
+        try {
+          navigator.sendBeacon(`/api/debug/player-log${tokenParam}`, new Blob([body], { type: 'application/json' }));
+          return;
+        } catch {}
+      }
+      fetch(`/api/debug/player-log${tokenParam}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    } catch {}
+  }, [media.id, videoRef]);
+
+  useEffect(() => {
+    fallbackStageRef.current = 0;
+    autoSwitchingRef.current = false;
+    telemetryParsingSentRef.current = 0;
+    evictLogRef.current = [];
+    bufLogRef.current = [];
+    parseStreakRef.current = { sn: -2, count: 0 };
+  }, [media.id]);
+  // Единый авто-фолбэк: первая ступень — 'transcode' (то же разрешение, чистая
+  // упаковка с ключевыми кадрами), вторая — '720p' (если вес всё равно не лезет).
+  // Возвращает true если переключили. Ручной выбор качества гасит автомат.
+  const attemptFallback = useCallback((reason: string, detail: string = ''): boolean => {
+    try {
+      const curQ = streamInfoRef.current?.quality || 'original';
+      const stage = fallbackStageRef.current;
+      let next: string | null = null;
+      if (stage === 0 && curQ === 'original') next = 'transcode';
+      else if (stage <= 1 && curQ !== '720p' && curQ !== 'transcode') next = 'transcode';
+      else if (stage <= 1) next = '720p';
+      if (!next || next === curQ) return false;
+      fallbackStageRef.current = next === 'transcode' ? 1 : 2;
+      autoSwitchingRef.current = true;
+      sendPlayerLog('auto-fallback', 'warn', { detail: `${reason} -> ${next} ${detail}`.slice(0, 200) });
+      try { setSelectedQuality(next); } catch {}
+      evictLogRef.current = [];
+      bufLogRef.current = [];
+      return true;
+    } catch {
+      return false;
+    }
+  }, [sendPlayerLog]);
   const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
 
   useEffect(() => {
     setHasVideoFrame(false);
   }, [media.id]);
+
+  // Телеметрия video-элемента: фатальная ошибка + счётчики stalls (см. лог PLAYER).
+  // Сводка улетает при размонтировании всегда (один маяк — зато видно буфер и время).
+  useEffect(() => {
+    if (isDesktop) return;
+    const video = videoRef.current;
+    if (!video) return;
+    const st = playerStatsRef.current;
+    const onWaiting = () => { st.waiting++; };
+    const onStalled = () => { st.stalled++; };
+    const onEmptied = () => { st.emptied++; };
+    const onAbortEv = () => { st.abortEv++; };
+    const onSuspendEv = () => { st.suspendEv++; };
+    const onError = () => {
+      const e: any = video.error;
+      sendPlayerLog('video-error', 'error', {
+        errorCode: e?.code ?? '',
+        errorMessage: e?.message ?? '',
+        detail: `readyState=${video.readyState} networkState=${video.networkState} src=${(video.currentSrc || '').slice(-80)}`,
+      });
+    };
+    video.addEventListener('waiting', onWaiting);
+    video.addEventListener('stalled', onStalled);
+    video.addEventListener('emptied', onEmptied);
+    video.addEventListener('abort', onAbortEv);
+    video.addEventListener('suspend', onSuspendEv);
+    video.addEventListener('error', onError);
+    return () => {
+      video.removeEventListener('waiting', onWaiting);
+      video.removeEventListener('stalled', onStalled);
+      video.removeEventListener('emptied', onEmptied);
+      video.removeEventListener('abort', onAbortEv);
+      video.removeEventListener('suspend', onSuspendEv);
+      video.removeEventListener('error', onError);
+      const s = playerStatsRef.current;
+      const noisy = s.waiting + s.stalled + s.emptied + s.abortEv + s.fragErr + s.mediaErr + s.parsingErr + s.bufferFlushed;
+      sendPlayerLog('video-summary', noisy > 0 ? 'warn' : 'info', { detail: JSON.stringify(s) });
+      playerStatsRef.current = { waiting: 0, stalled: 0, emptied: 0, abortEv: 0, suspendEv: 0, fragErr: 0, mediaErr: 0, parsingErr: 0, bufferFlushed: 0 };
+    };
+  }, [media.id, isDesktop, videoRef, sendPlayerLog]);
 
   useEffect(() => {
     if (!isDesktop) return;
@@ -382,8 +539,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         });
       }
     } else {
-      if (isAppleDevice && video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native Apple Safari / iPad HLS Pipeline
+      // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ (MMS): мобильный Apple с ManagedMediaSource идёт
+      // через hls.js (он сам выберет MMS), а не через нативный AVPlayer.
+      // Остальные — как раньше (натив где он есть, иначе hls.js).
+      const useNativeHls = isAppleDevice && !canUseManagedMse && video.canPlayType('application/vnd.apple.mpegurl');
+      if (useNativeHls) {
+        // Native Apple Safari / Mac HLS Pipeline
         if (hlsRef.current) {
           hlsRef.current.destroy();
           hlsRef.current = null;
@@ -410,19 +571,29 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           });
         }
       } else if (Hls.isSupported()) {
-        // PC / Android Hls.js MediaSource Pipeline
+        // Hls.js Pipeline: PC / Android (MSE) + мобильный Apple (ManagedMediaSource).
+        // hls.js сам выбирает ManagedMediaSource где он есть.
         let hls = hlsRef.current;
         if (!hls) {
+          // Буферы как в v10 (ужатия под память убраны: давали спиннеры недокачки
+          // вместо спиннеров переполнения — шило на мыло; троттлит server-side окно).
+          // Воркер transmux ВЫКЛЮЧЕН на мобильных: в нём 44МБ-фрагменты дохнут молча
+          // (ни append'ов, ни ошибок — фолбэку не на что сработать), а без него всё
+          // либо идёт, либо падает громко. Цена — возможные микрофризы интерфейса.
           hls = new Hls({
-            enableWorker: true,
+            enableWorker: !isMobileApple,
             lowLatencyMode: false,
             backBufferLength: 30,
             maxBufferLength: 30,
             maxMaxBufferLength: 60,
             autoStartLoad: false,
-            maxBufferHole: 0.1,
-            nudgeOffset: 0,
-            nudgeMaxRetry: 0,
+            // Nudge ВКЛЮЧЁН (дефолты hls.js): прайминг AAC (~44мс) и стартовые
+            // сдвиги дают дырки ~0.1с — без наudge плеер падает в фатал
+            // bufferSeekOverHole и крутится вечно вместо шага через дырку.
+            // Нули тут стояли зря и давали бесконечные петли с первого фрагмента.
+            maxBufferHole: 0.5,
+            nudgeOffset: 0.1,
+            nudgeMaxRetry: 3,
             fragLoadingTimeOut: 25000,
             fragLoadingMaxRetry: 5,
             fragLoadingRetryDelay: 500,
@@ -430,18 +601,122 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
           hls.attachMedia(video);
 
+          // Видимые вытеснения буфера (единый счётчик — он и есть вывод ошибок
+          // по памяти: растёт — значит фрагменты выкидываются быстрее, чем играются).
+          // Дауншифт при шёрне: ≥4 вытеснения, а время почти не двинулось (<2с) —
+          // значит девайс не тянет текущий вес (жирный 4K): уходим на 720p-транскод.
+          // При здоровом просмотре время идёт вперёд — ложных срабатываний нет.
+          // Пауза безопасна: без аппендов нет и вытеснений.
+          hls.on(Hls.Events.BUFFER_FLUSHED, (_e: any, data: any) => {
+            try {
+              playerStatsRef.current.bufferFlushed++;
+              if (playerStatsRef.current.bufferFlushed <= 5) {
+                sendPlayerLog('buffer-flushed', 'warn', { detail: `type=${data?.type ?? '?'} buffered-ahead-evicted` });
+              }
+              const now = Date.now();
+              let cur = -1;
+              try { cur = videoRef.current?.currentTime ?? -1; } catch {}
+              evictLogRef.current.push({ at: now, pos: cur });
+              while (evictLogRef.current.length > 0 && now - evictLogRef.current[0].at > 60000) {
+                evictLogRef.current.shift();
+              }
+              const log = evictLogRef.current;
+              if (log.length >= 4) {
+                const dt = log[log.length - 1].at - log[0].at;
+                const dp = log[log.length - 1].pos - log[0].pos;
+                if (dt > 5000 && dp >= 0 && dp < 2) {
+                  if (!attemptFallback('eviction-churn', `flushes=${log.length} posAdvance=${dp.toFixed(2)}s`)) {
+                    try { hls?.stopLoad(); } catch {}
+                  }
+                }
+              }
+            } catch {}
+          });
+
           // Счётчики мёртвой сессии: 404 по фрагменту = сессии на сервере уже нет
           // (убили при выходе / протухла). Лечится перезапросом мастера — сервер
           // пересоздаст сессию. После 2 перезапросов стопаемся, чтобы не спамить
           // мёртвую сессию (антигостинг-флуд в логах). Успешный фраг сбрасывает streak.
           let frag404Streak = 0;
           let masterReloads = 0;
-          hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          hls.on(Hls.Events.FRAG_BUFFERED, (_e: any, data: any) => {
             frag404Streak = 0;
+            parseStreakRef.current = { sn: -2, count: 0 };
+            // Шёрн аппендов: один sn лёг ≥4 раз, а позиция почти не двинулась —
+            // девайс вытесняет быстрее, чем играет (жирный 4K + тесная память).
+            // Уходим на 720p-транскод (лёгкие куски влезают). Один раз, только original.
+            try {
+              const sn = (data as any)?.frag?.sn;
+              let cur = -1;
+              try { cur = videoRef.current?.currentTime ?? -1; } catch {}
+              if (typeof sn === 'number' && cur >= 0) {
+                const now = Date.now();
+                bufLogRef.current.push({ at: now, sn, pos: cur });
+                while (bufLogRef.current.length > 0 && now - bufLogRef.current[0].at > 90000) {
+                  bufLogRef.current.shift();
+                }
+                const same = bufLogRef.current.filter((e) => e.sn === sn && e.pos >= 0);
+                if (same.length >= 4) {
+                  const dp = same[same.length - 1].pos - same[0].pos;
+                  if (dp >= 0 && dp < 3) {
+                    if (!attemptFallback('append-churn', `sn=${sn} buffered=${same.length}x posAdvance=${dp.toFixed(2)}s`)) {
+                      try { hls?.stopLoad(); } catch {}
+                    }
+                  }
+                }
+              }
+            } catch {}
           });
 
           hls.on(Hls.Events.ERROR, (_event: any, data: any) => {
+            // Телеметрия в лог PLAYER (троттлинг парсинга — он сыпется пачками)
+            try {
+              const st = playerStatsRef.current;
+              if (data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR) {
+                st.parsingErr++;
+                if (telemetryParsingSentRef.current < 3) {
+                  telemetryParsingSentRef.current++;
+                  sendPlayerLog('hls-frag-parsing', 'warn', { detail: String(data?.reason ?? data?.details ?? '') });
+                }
+                // Шёрн парсинга: один и тот же фрагмент не разбирается раз за разом —
+                // упаковка не по зубам (или воркер молча умирал — теперь он выключен
+                // на мобильных, так что это честные ошибки). Уходим в фолбэк.
+                try {
+                  const psn = (data as any)?.frag?.sn;
+                  const ps = parseStreakRef.current;
+                  if (typeof psn === 'number' && psn === ps.sn) ps.count++;
+                  else { ps.sn = typeof psn === 'number' ? psn : -1; ps.count = 1; }
+                  bufLogRef.current = [];
+                  if (ps.count >= 4) {
+                    ps.count = 0;
+                    attemptFallback('parse-churn', `sn=${ps.sn}`);
+                  }
+                } catch {}
+              } else if (data.details === Hls.ErrorDetails.BUFFER_APPEND_ERROR) {
+                st.mediaErr++;
+                sendPlayerLog('hls-buffer-append', 'error', { detail: String(data?.error?.message ?? data?.details ?? '') });
+              } else if (data.fatal && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                st.mediaErr++;
+                if (st.mediaErr <= 3) {
+                  sendPlayerLog('hls-media-fatal', 'error', { detail: String(data?.details ?? '') });
+                }
+              } else if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                st.fragErr++;
+              }
+            } catch {}
+            // Авто-фолбэк: фатал уровня кодека (MMS закрылся, кодек не встал) —
+            // сами не починим: сначала 'transcode' (то же разрешение), потом '720p'.
+            // Некуда дальше — стопаем шторм.
             if (data.fatal) {
+              const isCodecFatal =
+                data.details === Hls.ErrorDetails.MEDIA_SOURCE_REQUIRES_RESET ||
+                data.details === Hls.ErrorDetails.BUFFER_ADD_CODEC_ERROR;
+              if (isCodecFatal) {
+                if (!attemptFallback('codec-fatal', String(data?.details ?? ''))) {
+                  try { hls?.stopLoad(); } catch {}
+                }
+                return;
+              }
               const status = (data?.networkDetails as any)?.status ?? (data?.response as any)?.code;
               const isFrag404 =
                 data.type === Hls.ErrorTypes.NETWORK_ERROR &&
@@ -509,7 +784,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         }
       }
     }
-  }, [videoRef, isAppleDevice]);
+  }, [videoRef, isAppleDevice, canUseManagedMse]);
 
   const streamInfoRef = useRef({ mediaId: media.id, quality: selectedQuality, audioIndex: selectedAudioTrack, isApple: isAppleDevice, isDirectPlay });
   useEffect(() => {
@@ -746,8 +1021,20 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       return;
     }
 
+    // Ручная смена КАЧЕСТВА гасит авто-фолбэк (юзер сам рулит).
+    // Авто-переключение помечено флагом и счётчик ступеней не трогает.
+    // Смена только аудиодорожки автомат не касается.
+    const qualityChanged = prevQualityRef.current !== selectedQuality;
     prevQualityRef.current = selectedQuality;
     prevAudioTrackRef.current = selectedAudioTrack;
+
+    if (qualityChanged) {
+      if (autoSwitchingRef.current) {
+        autoSwitchingRef.current = false;
+      } else {
+        fallbackStageRef.current = 2;
+      }
+    }
 
     if (isDesktop) {
       const dp = (window as any).desktopPlayer;
@@ -1402,7 +1689,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                       <div className="text-[11px] font-semibold text-slate-400 px-2 py-1 uppercase">Настройки потока</div>
                       <button onClick={() => setActiveMenuTab('quality')} className="flex items-center justify-between p-2 rounded-lg hover:bg-white/10">
                         <span className="flex items-center gap-2"><Radio className="w-4 h-4 text-cinema-gold" /> Качество</span>
-                        <span className="text-slate-400 capitalize">{selectedQuality}</span>
+                        <span className="text-slate-400 capitalize">{qualityLabel(selectedQuality)}</span>
                       </button>
                       <button onClick={() => setActiveMenuTab('audio')} className="flex items-center justify-between p-2 rounded-lg hover:bg-white/10">
                         <span className="flex items-center gap-2"><Disc3 className="w-4 h-4 text-cinema-gold" /> Аудиодорожка</span>
@@ -1418,13 +1705,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                   {activeMenuTab === 'quality' && (
                     <div className="flex flex-col gap-1">
                       <button onClick={() => setActiveMenuTab('root')} className="text-left text-[11px] text-cinema-gold font-semibold mb-1">← Назад</button>
-                      {['original', '1080p', '720p', '480p'].map((q) => (
+                      {['original', 'transcode', '1080p', '720p', '480p'].map((q) => (
                         <button
                           key={q}
                           onClick={() => { setSelectedQuality(q); setShowSettingsMenu(false); }}
                           className={`p-2 rounded-lg text-left capitalize flex justify-between ${selectedQuality === q ? 'bg-cinema-gold/20 text-cinema-gold font-bold' : 'hover:bg-white/10'}`}
                         >
-                          <span>{q === 'original' ? 'Оригинал' : q}</span>
+                          <span>{qualityLabel(q)}</span>
                           {selectedQuality === q && <span>✓</span>}
                         </button>
                       ))}

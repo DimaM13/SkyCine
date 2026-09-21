@@ -6,9 +6,16 @@ import path from 'path';
 import mime from 'mime-types';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { ffmpegService, FFmpegService, buildHlsSessionId } from '../services/ffmpeg.service';
+import { ffmpegService, FFmpegService, buildHlsSessionId, parseTvClient, TvClient } from '../services/ffmpeg.service';
 import { MediaItem } from '../types';
 import { permissionService } from '../services/permission.service';
+
+// ?client=tizen|webos включает ТВ-движок HLS (DD-passthrough, всегда fMP4,
+// ТВ-плейлист без запрещённых прошивками тегов). Остальные клиенты — как раньше.
+// ТВ-ограничение: маркер вшит в sessionId, PC/Apple-сессии его не получают.
+function parseClientParam(v: unknown): TvClient | null {
+  return v === 'tizen' ? 'tizen' : v === 'webos' ? 'webos' : null;
+}
 
 export class StreamController {
   public static async remuxStream(req: AuthRequest, res: Response): Promise<void> {
@@ -362,6 +369,7 @@ export class StreamController {
       const isApple = req.query.isApple === '1' || /iPad|iPhone|iPod|Macintosh/i.test(userAgent);
       const roomId = req.query.roomId as string || '';
       const mount = req.query.mount as string || '';
+      const tvClient = parseClientParam(req.query.client);
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
@@ -369,10 +377,10 @@ export class StreamController {
         return;
       }
 
-      const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount);
+      const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount, tvClient);
 
       // Start / Prewarm continuous session
-      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId).catch(() => {});
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch(() => {});
 
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
     } catch (err: any) {
@@ -390,13 +398,16 @@ export class StreamController {
       const isApple = req.body?.isApple !== undefined ? req.body.isApple : (req.query.isApple === '1');
       const roomId = req.body?.roomId || (req.query.roomId as string);
       const mount = req.body?.mount || (req.query.mount as string) || '';
+      // client обязателен для ТВ: без маркера _tvtizen/_tvwebos sessionId не совпадёт
+      // с живой ТВ-сессией и kill промахнётся (сессия уйдёт только по idle-таймауту).
+      const tvClient = parseClientParam(req.body?.client ?? req.query.client);
 
       if (roomId) {
         const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(roomId);
         if (room) {
           if (mediaId && quality && audioIndex !== undefined) {
-            const sessionId = buildHlsSessionId(mediaId, quality, audioIndex, !!isApple, roomId, userId, mount);
-            ffmpegService.killSession(sessionId);
+            const sessionId = buildHlsSessionId(mediaId, quality, audioIndex, !!isApple, roomId, userId, mount, tvClient);
+            await ffmpegService.killSession(sessionId);
           }
           res.json({ success: true, message: 'User room session ended' });
           return;
@@ -405,15 +416,15 @@ export class StreamController {
 
       if (mediaId) {
         if (quality && audioIndex !== undefined) {
-          const sessionId = buildHlsSessionId(mediaId, quality, audioIndex, !!isApple, undefined, userId, mount);
-          ffmpegService.killSession(sessionId);
+          const sessionId = buildHlsSessionId(mediaId, quality, audioIndex, !!isApple, undefined, userId, mount, tvClient);
+          await ffmpegService.killSession(sessionId);
         }
         if (!roomId) {
           // Широкий килл по медиа — только для легаси-клиентов без mount (у них id общий).
           // С mount бьём точечно выше: чужую живую сессию задеть нельзя. Осиротевшие сессии
           // подбирает чистка по дисконнекту сокета + idle-свипер.
           if (!mount) {
-            ffmpegService.killSoloSessionsForMedia(mediaId);
+            await ffmpegService.killSoloSessionsForMedia(mediaId);
           }
         }
       }
@@ -444,6 +455,7 @@ export class StreamController {
       const token = (req.query.token as string) || (typeof authHeader === 'string' ? authHeader.replace(/^Bearer\s+/i, '') : '');
       const roomId = req.query.roomId as string || '';
       const mount = req.query.mount as string || '';
+      const tvClient = parseClientParam(req.query.client);
 
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(id) as MediaItem | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
@@ -451,13 +463,13 @@ export class StreamController {
         return;
       }
 
-      const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount);
+      const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount, tvClient);
 
       // Start/prewarm session
-      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId).catch(() => {});
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch(() => {});
 
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
-      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple);
+      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple, tvClient !== null);
       const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, segDuration);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -488,8 +500,9 @@ export class StreamController {
       const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
       const quality = qualityMatch ? qualityMatch[1] : 'original';
       const isApple = sessionId.includes('_apple');
+      const isTv = parseTvClient(sessionId) !== null;
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
-      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple);
+      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple, isTv);
       const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, segDuration);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');

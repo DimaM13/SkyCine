@@ -741,9 +741,9 @@ class SocketService {
               // Убиваем только IDLE-сессии (без запросов >60с): живой плеер на медленной сети
               // качает сегменты по HTTP и переживает обрывы сокета — его трогать нельзя.
               const diedUserId = user.userId;
-              setTimeout(() => {
+              setTimeout(async () => {
                 if (!this.userSockets.has(diedUserId)) {
-                  ffmpegService.killSoloSessionsForUser(diedUserId, 60000);
+                  await ffmpegService.killSoloSessionsForUser(diedUserId, 60000);
                 }
               }, 10000);
             }
@@ -754,7 +754,7 @@ class SocketService {
     });
   }
 
-  private handleLeaveRoom(socket: Socket, roomId: string) {
+  private async handleLeaveRoom(socket: Socket, roomId: string) {
     socket.leave(roomId);
     const members = this.roomMembers.get(roomId);
     if (members) {
@@ -791,10 +791,10 @@ class SocketService {
         this.lastAcceptedAnchorByRoom.delete(roomId);
         this.lastAnchorsByRoom.delete(roomId);
         // Clean up FFmpeg session for empty room with 4s grace period (handles React remount / page reload)
-        setTimeout(() => {
+        setTimeout(async () => {
           const currentMembers = this.roomMembers.get(roomId);
           if (!currentMembers || currentMembers.size === 0) {
-            ffmpegService.killSessionsForRoom(roomId);
+            await ffmpegService.killSessionsForRoom(roomId);
           }
         }, 4000);
       } else {
@@ -802,7 +802,7 @@ class SocketService {
         this.emitRoomHealth(roomId, true);
         if (member?.userId && !hasOtherConnections) {
           this.lastHeartbeatByRoom.get(roomId)?.delete(member.userId);
-          ffmpegService.killUserSessionInRoom(roomId, member.userId);
+          await ffmpegService.killUserSessionInRoom(roomId, member.userId);
         }
       }
     }

@@ -245,7 +245,7 @@ export class RoomsController {
           YouTubeController.deleteCache(room.youtubeId);
         }
       } else {
-        ffmpegService.killSessionsForRoom(roomId);
+        await ffmpegService.killSessionsForRoom(roomId);
       }
 
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
