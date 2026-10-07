@@ -57,38 +57,38 @@ export const PlayerTopBar: React.FC<PlayerTopBarProps> = ({
             <ArrowLeft className="w-5 h-5" />
           </button>
         )}
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h1 className="text-sm sm:text-base font-bold text-white truncate max-w-[40vw] sm:max-w-md md:max-w-xl">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <h1 className="text-sm sm:text-base font-bold text-white truncate min-w-0 flex-1">
               {title}
             </h1>
             {mediaType === 'EPISODE' && seasonNumber && episodeNumber && (
-              <span className="text-[11px] text-cinema-gold font-bold px-1.5 py-0.5 rounded bg-cinema-gold/10 border border-cinema-gold/20">
-                Сезон {seasonNumber} • Серия {episodeNumber}
+              <span className="shrink-0 text-[11px] text-cinema-gold font-bold px-1.5 py-0.5 rounded bg-cinema-gold/10 border border-cinema-gold/20 whitespace-nowrap">
+                <span className="hidden sm:inline">Сезон {seasonNumber} • Серия {episodeNumber}</span>
+                <span className="sm:hidden">С{seasonNumber} • Е{episodeNumber}</span>
               </span>
             )}
+            <span
+              title={badges.modeText}
+              className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase border flex items-center gap-1.5 backdrop-blur-md whitespace-nowrap ${
+                badges.modeType === 'transcode'
+                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/30'
+                  : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${badges.modeType === 'transcode' ? 'bg-sky-400' : 'bg-emerald-400 animate-pulse'}`} />
+              {badges.modeType === 'direct' ? 'Direct' : badges.modeType === 'stream' ? 'Stream' : 'Транскод'}
+            </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-            {badges.modeType === 'direct' || badges.modeType === 'stream' ? (
-              <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5 shadow-sm backdrop-blur-md">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                {badges.modeText}
-              </span>
-            ) : (
-              <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1.5 shadow-sm backdrop-blur-md">
-                <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                {badges.modeText}
-              </span>
-            )}
-
-            {isWatchTogether && (
+          {isWatchTogether && (
+            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
               <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1 shadow-sm backdrop-blur-md">
                 <Users className="w-3 h-3 text-purple-400" />
                 Комната ({membersCount})
               </span>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 

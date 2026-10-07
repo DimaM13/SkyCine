@@ -3,7 +3,7 @@ import Hls from 'hls.js';
 import {
   Play, Pause, Volume2, VolumeX, Volume1,
   RotateCcw, RotateCw, Settings,
-  Maximize, Minimize, Gauge, PictureInPicture2
+  Maximize, Minimize
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
@@ -116,7 +116,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const [centerFlash, setCenterFlash] = useState<CenterFlashData | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const flashKeyRef = useRef(0);
-  const [techStats, setTechStats] = useState({ droppedFrames: 0, totalFrames: 0, hlsLevel: -1, hlsBitrate: 0, fallbackStage: 0, bufferedAhead: 0 });
+  const [techStats, setTechStats] = useState({ droppedFrames: 0, totalFrames: 0, hlsBitrate: 0, fallbackStage: 0, bufferedAhead: 0 });
 
   const audioTracks = useMemo(() => media.tracks?.filter((t: MediaTrack) => t.type === 'AUDIO') || [], [media.tracks]);
   const subtitleTracks = useMemo(() => media.tracks?.filter((t: MediaTrack) => t.type === 'SUBTITLE') || [], [media.tracks]);
@@ -1270,6 +1270,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     currentTimeRef.current = safePos;
     setCurrentTime(safePos);
     setScrubTime(safePos);
+    // Тултип тут НЕ гасим: во время ведения по строке seek'и идут на каждом шаге,
+    // а превью должно жить пока палец/мышь на строке. Гасится в onPointerUp/Cancel (тач)
+    // и onMouseLeave (мышь).
     // Сброс скраба — ВСЕГДА, даже если отправка на сервер затроиллится (иначе timeupdate
     // игнорируется флагом isScrubbing и строка/время стоят при играющем видео)
     setIsScrubbing(false);
@@ -1420,13 +1423,57 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setIsFullscreen(!isFullscreen);
       return;
     }
-    if (!containerRef.current) return;
+    const video = videoRef.current as any;
+    const container = containerRef.current as any;
+    // iPhone Safari не умеет Fullscreen API для произвольных блоков:
+    // container.requestFullscreen там undefined, вызов кидал TypeError
+    // и кнопка молча «не работала». Зато у <video> есть webkitEnterFullscreen.
+    // iPad/десктоп идут обычной веткой — поэтому там всё работало.
     if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
-    } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      if (container?.requestFullscreen) {
+        try {
+          const p = container.requestFullscreen();
+          if (p && typeof p.then === 'function') {
+            p.then(() => setIsFullscreen(true)).catch(() => {
+              try { video?.webkitEnterFullscreen?.(); } catch {}
+            });
+          } else {
+            setIsFullscreen(true);
+          }
+        } catch {
+          try { video?.webkitEnterFullscreen?.(); } catch {}
+        }
+      } else {
+        try { video?.webkitEnterFullscreen?.(); } catch {}
+      }
+    } else if (document.exitFullscreen) {
+      try {
+        document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      } catch {}
     }
   };
+
+  // Синхрон иконки фулскрина: обычный fullscreenchange + iOS webkit-события <video>
+  useEffect(() => {
+    const onFsChange = () => {
+      try { setIsFullscreen(!!document.fullscreenElement); } catch {}
+    };
+    const onBegin = () => setIsFullscreen(true);
+    const onEnd = () => setIsFullscreen(false);
+    document.addEventListener('fullscreenchange', onFsChange);
+    const video = videoRef.current as any;
+    try {
+      video?.addEventListener?.('webkitbeginfullscreen', onBegin);
+      video?.addEventListener?.('webkitendfullscreen', onEnd);
+    } catch {}
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      try {
+        video?.removeEventListener?.('webkitbeginfullscreen', onBegin);
+        video?.removeEventListener?.('webkitendfullscreen', onEnd);
+      } catch {}
+    };
+  }, [videoRef]);
 
   // Хоткеи: Space/K — play/pause, ←/→/J/L — ±10с (Shift — ±30с), ↑/↓ — громкость,
   // F — fullscreen, M — mute, P — PiP, 0-9 — % длительности, +/- — скорость.
@@ -1515,12 +1562,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             total = q.totalVideoFrames || 0;
           }
         } catch {}
-        let lvl = -1;
         let br = 0;
         try {
           const hls: any = hlsRef.current;
           if (hls) {
-            lvl = typeof hls.currentLevel === 'number' ? hls.currentLevel : -1;
+            const lvl = typeof hls.currentLevel === 'number' ? hls.currentLevel : -1;
             const lv = lvl >= 0 ? hls.levels?.[lvl] : null;
             br = lv?.bitrate || 0;
           }
@@ -1531,7 +1577,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           const b = video?.buffered;
           if (b && b.length > 0) ahead = Math.max(0, b.end(b.length - 1) - cur);
         } catch {}
-        setTechStats((s) => ({ ...s, droppedFrames: dropped, totalFrames: total, hlsLevel: lvl, hlsBitrate: br, bufferedAhead: ahead, fallbackStage: fallbackStageRef.current }));
+        setTechStats((s) => ({ ...s, droppedFrames: dropped, totalFrames: total, hlsBitrate: br, bufferedAhead: ahead, fallbackStage: fallbackStageRef.current }));
       } catch {}
     }, 500);
     return () => window.clearInterval(id);
@@ -1702,21 +1748,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         open={showStatsModal}
         onClose={() => setShowStatsModal(false)}
         modeText={streamBadges.modeText}
-        videoLabel={streamBadges.videoLabel}
-        qualityText={streamBadges.isVideoDirectCopy ? 'Оригинал (Direct Copy)' : `Транскод (${selectedQuality === 'original' ? (media.videoCodec || '').toUpperCase() + ' → H.264' : selectedQuality})`}
-        audioLabel={streamBadges.audioLabel}
-        audioProcessing={streamBadges.isAudioTrans ? `Транскод в AAC (${streamBadges.aCodec} → AAC)` : `Оригинал (${streamBadges.aCodec} Direct Copy)`}
-        containerLabel={streamBadges.containerLabel}
-        engineLabel={streamBadges.engineLabel}
-        bufferedTime={bufferedTime}
-        effectiveDuration={effectiveDuration}
+        videoLine={`${streamBadges.videoLabel || 'Оригинал'} • ${streamBadges.isVideoDirectCopy ? 'Direct Copy' : `Транскод ${selectedQuality === 'original' ? `${(media.videoCodec || '').toUpperCase()} → H.264` : selectedQuality}`}${techStats.hlsBitrate > 0 ? ` • ${(techStats.hlsBitrate / 1000).toFixed(0)} кбит/с` : ''}`}
+        audioLine={`${streamBadges.audioLabel}${streamBadges.isAudioTrans ? ' (транскод)' : ''}`}
         playbackRate={playbackRate}
         tech={techStats}
       />
 
       {/* Bottom Controls Bar */}
       <div
-        className={`absolute bottom-0 left-0 right-0 p-4 sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent transition-opacity duration-300 z-20 flex flex-col gap-2 ${
+        className={`absolute bottom-0 left-0 right-0 px-3 pt-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent transition-opacity duration-300 z-20 flex flex-col gap-1.5 sm:gap-2 ${
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
@@ -1728,6 +1768,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             const ratio = clamp01((e.clientX - rect.left) / Math.max(1, rect.width));
             setHoverPreview({ ratio, time: ratio * effectiveDuration });
             handleMouseMove();
+          }}
+          onPointerMove={(e) => {
+            // Тач-драг по строке: mousemove на таче не едет вообще, поэтому во время
+            // ведения пальцем сверху ничего не надписывалось. pointermove едет и на таче.
+            // Мышь пропускаем — её уже покрывает onMouseMove выше (без двойных ререндеров).
+            if (e.pointerType === 'mouse') return;
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = clamp01((e.clientX - rect.left) / Math.max(1, rect.width));
+            setHoverPreview({ ratio, time: ratio * effectiveDuration });
           }}
           onMouseLeave={() => setHoverPreview(null)}
         >
@@ -1766,7 +1815,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               // Только joint — одиночный слайдер не трогаем.
               if (isWatchTogether && seekCommitGuardRef.current) return;
               setIsScrubbing(true);
-              setScrubTime(parseFloat((e.target as HTMLInputElement).value));
+              const v = parseFloat((e.target as HTMLInputElement).value);
+              setScrubTime(v);
+              // Тултип над строкой клеим к бегунку: на таче mousemove не едет за пальцем,
+              // без этого сверху замирало старое время, а снизу шло живое — расхождение.
+              if (effectiveDuration > 0) {
+                setHoverPreview({ ratio: Math.min(1, Math.max(0, v / effectiveDuration)), time: v });
+              }
             }}
             onChange={(e) => {
               if (isWatchTogether) {
@@ -1781,6 +1836,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 seekCommitGuardRef.current = true;
                 commitSeekFromPointer(e);
               }
+              // Жест пальцем закончился — гасим превью (mouseleave на таче не бывает)
+              if (e.pointerType !== 'mouse') setHoverPreview(null);
             }}
             onPointerCancel={(e) => {
               // Прерванный жест (тач, второй палец, увод указателя): без этого isScrubbing
@@ -1790,6 +1847,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 seekCommitGuardRef.current = true;
                 commitSeekFromPointer(e);
               }
+              if (e.pointerType !== 'mouse') setHoverPreview(null);
             }}
             onKeyUp={(e) => {
               if (isWatchTogether && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End')) {
@@ -1802,8 +1860,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         </div>
 
         {/* Action Row */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+        <div className="flex items-center justify-between gap-1 sm:gap-2">
+          <div className="flex items-center gap-1 sm:gap-3 min-w-0 flex-1">
             <button
               onClick={togglePlay}
               aria-label={isPlaying ? 'Пауза (Space/K)' : 'Играть (Space/K)'}
@@ -1812,13 +1870,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
             </button>
 
-            <button onClick={() => { skip(-10); flashSeekHint('-10с'); }} aria-label="Назад 10 секунд (←)" className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center text-slate-300 hover:text-white hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg" title="Назад 10с (←)">
+            <button onClick={() => { skip(-10); flashSeekHint('-10с'); }} aria-label="Назад 10 секунд (←)" className={`${isWatchTogether ? 'hidden sm:flex' : 'flex'} p-1.5 sm:p-2 min-w-[36px] sm:min-w-[40px] min-h-[40px] items-center justify-center text-slate-300 hover:text-white hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg`} title="Назад 10с (←)">
               <span className="relative inline-flex">
                 <RotateCcw className="w-5 h-5" />
                 <span className="absolute inset-0 flex items-center justify-center text-[7px] font-bold pt-[2px]">10</span>
               </span>
             </button>
-            <button onClick={() => { skip(10); flashSeekHint('+10с'); }} aria-label="Вперед 10 секунд (→)" className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center text-slate-300 hover:text-white hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg" title="Вперед 10с (→)">
+            <button onClick={() => { skip(10); flashSeekHint('+10с'); }} aria-label="Вперед 10 секунд (→)" className={`${isWatchTogether ? 'hidden sm:flex' : 'flex'} p-1.5 sm:p-2 min-w-[36px] sm:min-w-[40px] min-h-[40px] items-center justify-center text-slate-300 hover:text-white hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg`} title="Вперед 10с (→)">
               <span className="relative inline-flex">
                 <RotateCw className="w-5 h-5" />
                 <span className="absolute inset-0 flex items-center justify-center text-[7px] font-bold pt-[2px]">10</span>
@@ -1843,7 +1901,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               <button
                 onClick={() => setAudioGainBoost(audioBoost === 1.0 ? 1.5 : audioBoost === 1.5 ? 2.0 : 1.0)}
                 aria-label="Усилитель звука до 200%"
-                className={`text-[10px] font-bold px-1.5 py-0.5 min-h-[28px] rounded border transition-colors focus-visible:ring-2 focus-visible:ring-cinema-gold ${
+                className={`hidden sm:block text-[10px] font-bold px-1.5 py-0.5 min-h-[28px] rounded border transition-colors focus-visible:ring-2 focus-visible:ring-cinema-gold ${
                   audioBoost > 1.0 ? 'bg-cinema-gold/20 text-cinema-gold border-cinema-gold' : 'bg-white/5 text-slate-400 border-white/10'
                 }`}
                 title="Усилитель звука до 200%"
@@ -1853,7 +1911,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             </div>
 
             {/* Time Stamp & Sync button */}
-            <div className="text-xs text-slate-300 font-mono tabular-nums tracking-wider flex items-center gap-1.5 whitespace-nowrap">
+            <div className="text-[11px] sm:text-xs text-slate-300 font-mono tabular-nums tracking-wider flex items-center gap-1 sm:gap-1.5 whitespace-nowrap min-w-0">
               <span>{formatTime(displayTime)}</span>
               <span className="text-slate-500">/</span>
               <span className="hidden sm:inline">{formatTime(effectiveDuration)}</span>
@@ -1866,42 +1924,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                     setJustSynced(true);
                     setTimeout(() => setJustSynced(false), 2000);
                   }}
-                  className="px-2 py-0.5 rounded-md border text-[10px] font-bold bg-white/10 hover:bg-white/20 text-cinema-gold border-cinema-gold/30 cursor-pointer ml-2"
+                  className="px-2 py-1 min-h-[32px] rounded-md border text-[10px] font-bold bg-white/10 hover:bg-white/20 text-cinema-gold border-cinema-gold/30 cursor-pointer ml-1 sm:ml-2 whitespace-nowrap"
+                  title={isHost ? 'Выровнять всех' : 'Выровнять с хостом'}
                 >
-                  {justSynced ? '✓ Выровнено' : isHost ? '👑 Выровнять всех' : '📡 Выровнять'}
+                  {justSynced ? '✓' : isHost ? '👑' : '📡'}
+                  <span className="hidden min-[420px]:inline">
+                    {justSynced ? ' Выровнено' : isHost ? ' Выровнять всех' : ' Выровнять'}
+                  </span>
                 </button>
               )}
 
             </div>
           </div>
 
-          {/* Right: Shortcuts, Speed, PiP, Settings & Fullscreen */}
+          {/* Right: Shortcuts, Settings & Fullscreen (скорость/PiP/буст — только в шестерёнке, без дублей) */}
           <div className="flex items-center gap-1 sm:gap-2 relative shrink-0">
             <ShortcutsButton onOpen={() => setShowShortcuts(true)} />
-            <button
-              onClick={() => {
-                const order = [0.5, 0.75, 1, 1.25, 1.5, 2];
-                const idx = order.findIndex((r) => r === playbackRate);
-                applyPlaybackRate(order[((idx < 0 ? 2 : idx) + 1) % order.length]);
-              }}
-              aria-label={`Скорость ${playbackRate}x — нажать для следующей`}
-              title="Скорость воспроизведения (+/-)"
-              className="px-2 min-h-[40px] flex items-center gap-1 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold"
-            >
-              <Gauge className="w-4 h-4" />
-              <span className="text-[11px] font-bold font-mono">{playbackRate}x</span>
-            </button>
-
-            {pipSupported && (
-              <button
-                onClick={togglePictureInPicture}
-                aria-label={isPip ? 'Выйти из картинка-в-картинке (P)' : 'Картинка-в-картинке (P)'}
-                title="Картинка-в-картинке (P)"
-                className={`p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold ${isPip ? 'bg-cinema-gold text-black' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
-              >
-                <PictureInPicture2 className="w-5 h-5" />
-              </button>
-            )}
 
             <div className="relative">
               <button
@@ -1926,6 +1964,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 onSelectSubtitleTrack={(i) => setSelectedSubtitleTrack(i)}
                 playbackRate={playbackRate}
                 onSelectRate={(r) => applyPlaybackRate(r)}
+                audioBoost={audioBoost}
+                onCycleBoost={() => setAudioGainBoost(audioBoost === 1.0 ? 1.5 : audioBoost === 1.5 ? 2.0 : 1.0)}
+                pipSupported={pipSupported}
+                isPip={isPip}
+                onTogglePip={() => togglePictureInPicture()}
                 onClose={() => setShowSettingsMenu(false)}
               />
             </div>

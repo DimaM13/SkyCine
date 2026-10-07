@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Radio, Disc3, Subtitles, Gauge } from 'lucide-react';
+import { Radio, Disc3, Subtitles, Gauge, Volume2, PictureInPicture2 } from 'lucide-react';
 import { MediaTrack } from '../../types';
 import { qualityLabel, PLAYBACK_RATES } from './playerUtils';
 
@@ -17,6 +17,11 @@ interface PlayerSettingsMenuProps {
   onSelectSubtitleTrack: (idx: number) => void;
   playbackRate: number;
   onSelectRate: (r: number) => void;
+  audioBoost: number;
+  onCycleBoost: () => void;
+  pipSupported: boolean;
+  isPip: boolean;
+  onTogglePip: () => void;
   onClose: () => void;
 }
 
@@ -34,6 +39,11 @@ export const PlayerSettingsMenu: React.FC<PlayerSettingsMenuProps> = ({
   onSelectSubtitleTrack,
   playbackRate,
   onSelectRate,
+  audioBoost,
+  onCycleBoost,
+  pipSupported,
+  isPip,
+  onTogglePip,
   onClose,
 }) => {
   const [tab, setTab] = useState<MenuTab>('root');
@@ -70,6 +80,16 @@ export const PlayerSettingsMenu: React.FC<PlayerSettingsMenuProps> = ({
             <span className="flex items-center gap-2"><Gauge className="w-4 h-4 text-cinema-gold" /> Скорость</span>
             <span className="text-slate-400">{playbackRate}x</span>
           </button>
+          <button onClick={() => { onCycleBoost(); }} className="flex items-center justify-between p-2 min-h-[40px] rounded-lg hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-cinema-gold">
+            <span className="flex items-center gap-2"><Volume2 className="w-4 h-4 text-cinema-gold" /> Усиление звука</span>
+            <span className="text-slate-400">{audioBoost > 1.0 ? `+${Math.round((audioBoost - 1.0) * 100)}%` : 'Выкл'}</span>
+          </button>
+          {pipSupported && (
+            <button onClick={() => { onTogglePip(); setTab('root'); onClose(); }} className="flex items-center justify-between p-2 min-h-[40px] rounded-lg hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-cinema-gold">
+              <span className="flex items-center gap-2"><PictureInPicture2 className="w-4 h-4 text-cinema-gold" /> Картинка-в-картинке</span>
+              <span className="text-slate-400">{isPip ? 'Вкл' : 'Выкл'}</span>
+            </button>
+          )}
         </div>
       )}
 
