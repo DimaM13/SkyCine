@@ -74,8 +74,14 @@ export function buildHlsSessionId(
   return `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${tvSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
 }
 
+// GOP-профиль файла для copy-нарезки: длина сегмента + максимальный интервал
+// между ключевыми кадрами (нужен TARGETDURATION с запасом — см. generateVodPlaylist).
+export interface GopProfile {
+  segDuration: number;
+  maxGop: number;
+}
 // Предикат direct-copy видео. ТВИН логики canCopyVideo из _createContinuousHlsSession
-// и getSegmentDuration — при смене белых списков менять синхронно во всех трёх местах!
+// и getGopProfile — при смене белых списков менять синхронно во всех трёх местах!
 // ЛОКАЛЬНЫЙ ЭКСПЕРИМЕНТ: 4K VP9 на Apple идёт напрямую (исключение убрано).
 // isTv=true: только H.264/HEVC (TV_COPY_VIDEO), остальное — транскод в H.264.
 export function isDirectCopyVideo(media: MediaItem, quality: string, isApple: boolean, isTv: boolean = false): boolean {
@@ -142,91 +148,139 @@ class FFmpegService {
   private sessionCreationPromises: Map<string, Promise<{ sessionId: string }>> = new Map();
   private restartDebounceMap: Map<string, number> = new Map();
   private segmentDurationCache: Map<string, number> = new Map();
+  private gopMaxCache: Map<string, number> = new Map();
   private detectedEncoder: string | null = null;
 
-  public async getSegmentDuration(media: MediaItem, quality: string = 'original', isApple: boolean = false, isTv: boolean = false): Promise<number> {
+  public async getGopProfile(media: MediaItem, quality: string = 'original', isApple: boolean = false, isTv: boolean = false): Promise<GopProfile> {
     // Единый предикат с _createContinuousHlsSession (ТВИН убран: было два списка).
-    // isTv=true: copy только H.264/HEVC, остальное — транскод с seg=4.0.
+    // isTv=true: copy только H.264/HEVC, остальное — транскод.
     const canCopyVideo = isDirectCopyVideo(media, quality, isApple, isTv);
 
     if (!canCopyVideo) {
-      return 4.0;
+      // Транскод: -g 48 -keyint_min 48 => ключ каждые ~2с (24fps),
+      // сегменты 4–6с при hls_time 4.0. Запас 2.0 покрывает TARGETDURATION.
+      return { segDuration: 4.0, maxGop: 2.0 };
     }
 
-    if (this.segmentDurationCache.has(media.id)) {
-      return this.segmentDurationCache.get(media.id)!;
+    const cachedSeg = this.segmentDurationCache.get(media.id);
+    const cachedGop = this.gopMaxCache.get(media.id);
+    if (cachedSeg !== undefined && cachedSeg > 0 && cachedGop !== undefined && cachedGop > 0) {
+      return { segDuration: cachedSeg, maxGop: cachedGop };
     }
 
-    // 1. Check if already stored in database
-    if (media.segmentDuration && media.segmentDuration > 0) {
-      this.segmentDurationCache.set(media.id, media.segmentDuration);
-      return media.segmentDuration;
-    }
-
+    // 1. Кэш в БД: нужны ОБА значения. Старые строки (только segmentDuration
+    // от пробы первых 20с) не годятся — допробиваем и перезаписываем.
     try {
-      const row = db.prepare('SELECT segmentDuration FROM media_items WHERE id = ?').get(media.id) as { segmentDuration?: number } | undefined;
-      if (row?.segmentDuration && row.segmentDuration > 0) {
+      const row = db.prepare('SELECT segmentDuration, gopMax FROM media_items WHERE id = ?').get(media.id) as { segmentDuration?: number; gopMax?: number } | undefined;
+      if (row?.segmentDuration && row.segmentDuration > 0 && row?.gopMax && row.gopMax > 0) {
         this.segmentDurationCache.set(media.id, row.segmentDuration);
-        return row.segmentDuration;
+        this.gopMaxCache.set(media.id, row.gopMax);
+        return { segDuration: row.segmentDuration, maxGop: row.gopMax };
       }
     } catch {}
 
+    // 2. Проба сэмплами по всему файлу (GOP бывает рваный: ровный на старте,
+    // 0.5–1с дальше — проба первых 20с врала и ломала строгие плееры).
+    const probed = await this.probeGopProfile(media);
+    if (probed) {
+      this.segmentDurationCache.set(media.id, probed.segDuration);
+      this.gopMaxCache.set(media.id, probed.maxGop);
+      try {
+        db.prepare('UPDATE media_items SET segmentDuration = ?, gopMax = ? WHERE id = ?').run(probed.segDuration, probed.maxGop, media.id);
+      } catch {}
+      logger.info('HLS', `GOP-профиль для ${media.title || media.id}: seg=${probed.segDuration}s maxGOP=${probed.maxGop}s (сохранено в БД)`);
+      return probed;
+    }
+
+    const fallback: GopProfile = { segDuration: 4.0, maxGop: 2.0 };
+    this.segmentDurationCache.set(media.id, fallback.segDuration);
+    this.gopMaxCache.set(media.id, fallback.maxGop);
     try {
-      const res = await new Promise<string>((resolve) => {
-        const proc = spawn('ffprobe', [
-          '-v', 'error',
-          '-select_streams', 'v:0',
-          '-show_entries', 'packet=pts_time,flags',
-          '-of', 'csv=p=0',
-          '-read_intervals', '%+20',
-          media.filePath
-        ], { windowsHide: true });
+      db.prepare('UPDATE media_items SET segmentDuration = ?, gopMax = ? WHERE id = ?').run(fallback.segDuration, fallback.maxGop, media.id);
+    } catch {}
+    return fallback;
+  }
 
-        let stdout = '';
-        proc.stdout.on('data', d => stdout += d.toString());
-        proc.on('close', () => resolve(stdout));
-        proc.on('error', () => resolve(''));
-        setTimeout(() => {
-          try { proc.kill(); } catch {}
-          resolve(stdout);
-        }, 3000);
+  public async getSegmentDuration(media: MediaItem, quality: string = 'original', isApple: boolean = false, isTv: boolean = false): Promise<number> {
+    return (await this.getGopProfile(media, quality, isApple, isTv)).segDuration;
+  }
+
+  // Ключевые кадры в окрестности offsetSec (60 пакетов после сика).
+  // Пустой массив при ошибке/таймауте — сэмпл просто пропускается.
+  private probeKeyframesAt(filePath: string, offsetSec: number): Promise<number[]> {
+    return new Promise((resolve) => {
+      const interval = `${Math.max(0, Math.round(offsetSec))}%+#60`;
+      const proc = spawn('ffprobe', [
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'packet=pts_time,flags',
+        '-of', 'csv=p=0',
+        '-read_intervals', interval,
+        filePath
+      ], { windowsHide: true });
+
+      let stdout = '';
+      const timer = setTimeout(() => {
+        try { proc.kill(); } catch {}
+        resolve([]);
+      }, 8000);
+      proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        try {
+          const kfs = stdout.split('\n')
+            .filter((l) => l.includes(',K'))
+            .map((l) => parseFloat(l.split(',')[0]))
+            .filter((n) => !isNaN(n));
+          resolve(kfs);
+        } catch {
+          resolve([]);
+        }
       });
+      proc.on('error', () => {
+        clearTimeout(timer);
+        resolve([]);
+      });
+    });
+  }
 
-      const keyframes = res.split('\n')
-        .filter(l => l.includes(',K'))
-        .map(l => parseFloat(l.split(',')[0]))
-        .filter(n => !isNaN(n));
-
-      if (keyframes.length >= 2) {
-        const diff = Math.abs(keyframes[1] - keyframes[0]);
-        if (diff >= 3.5 && diff <= 15) {
-          const duration = Math.round(diff * 100) / 100;
-          this.segmentDurationCache.set(media.id, duration);
-          try {
-            db.prepare('UPDATE media_items SET segmentDuration = ? WHERE id = ?').run(duration, media.id);
-          } catch {}
-          logger.info('HLS', `Detected GOP interval for ${media.title || media.id}: ${duration}s (saved to database)`);
-          return duration;
-        } else if (diff > 0.5 && diff < 3.5) {
-          const factor = Math.ceil(4.0 / diff);
-          const duration = Math.round(diff * factor * 100) / 100;
-          this.segmentDurationCache.set(media.id, duration);
-          try {
-            db.prepare('UPDATE media_items SET segmentDuration = ? WHERE id = ?').run(duration, media.id);
-          } catch {}
-          logger.info('HLS', `Detected frequent GOP (${diff}s), normalized segment duration for ${media.title || media.id}: ${duration}s (saved to database)`);
-          return duration;
+  // GOP-профиль по сэмплам вдоль всего файла: старт, четверти, хвост.
+  // Дешевле полного скана на порядки (сик + 60 пакетов на точку), кэшируется
+  // в памяти и БД — повторные сессии пробу не делают.
+  private async probeGopProfile(media: MediaItem): Promise<GopProfile | null> {
+    try {
+      const D = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 0;
+      const offsets = D > 60
+        ? [5, D * 0.25, D * 0.5, D * 0.75, Math.max(0, D - 20)]
+        : [5];
+      const diffs: number[] = [];
+      const deadline = Date.now() + 25000;
+      for (const t of offsets) {
+        if (Date.now() > deadline) break;
+        const kfs = await this.probeKeyframesAt(media.filePath, t);
+        for (let i = 1; i < kfs.length; i++) {
+          const d = kfs[i] - kfs[i - 1];
+          if (d > 0.05 && d <= 30) diffs.push(d);
         }
       }
-    } catch (e: any) {
-      logger.warn('HLS', `Failed to probe keyframe interval for ${media.id}: ${e?.message || e}`);
+      if (diffs.length < 3) return null;
+      const sorted = [...diffs].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      const max = Math.min(15, Math.max(...diffs));
+      let seg: number;
+      if (median >= 3.5) {
+        seg = Math.min(15, median);
+      } else {
+        const factor = Math.ceil(4.0 / median);
+        seg = median * factor;
+      }
+      return {
+        segDuration: Math.round(seg * 100) / 100,
+        maxGop: Math.round(max * 100) / 100,
+      };
+    } catch {
+      return null;
     }
-
-    this.segmentDurationCache.set(media.id, 4.0);
-    try {
-      db.prepare('UPDATE media_items SET segmentDuration = ? WHERE id = ?').run(4.0, media.id);
-    } catch {}
-    return 4.0;
   }
 
   constructor() {
@@ -979,7 +1033,7 @@ class FFmpegService {
     return this.continuousSessions.has(sessionId) || this.closingSessions.has(sessionId);
   }
 
-  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0, segDuration: number = 4): string {
+  public generateVodPlaylist(media: MediaItem, sessionId: string, token?: string, startTime: number = 0, segDuration: number = 4, gopSlack: number = 0): string {
     const duration = media.durationSeconds && media.durationSeconds > 0 ? media.durationSeconds : 7200;
     const segmentDuration = segDuration && segDuration > 0 ? segDuration : 4;
     const isApple = sessionId.includes('_apple');
@@ -1002,7 +1056,12 @@ class FFmpegService {
     if (!isTv) {
       m3u8 += `#EXT-X-INDEPENDENT-SEGMENTS\n`;
     }
-    m3u8 += `#EXT-X-TARGETDURATION:${Math.ceil(segmentDuration)}\n`;
+    // TARGETDURATION с запасом под максимальный GOP: при copy-нарезке ffmpeg
+    // режет только по ключевым, реальные сегменты длиннее hls_time на величину
+    // до maxGOP. Без запаса сегмент длиннее TARGETDURATION — нарушение спеки,
+    // которое строгие плееры (нативный AVPlayer, прошивки ТВ) не прощают.
+    const slack = gopSlack > 0 ? gopSlack : 2.0;
+    m3u8 += `#EXT-X-TARGETDURATION:${Math.ceil(segmentDuration + slack)}\n`;
     // MEDIA-SEQUENCE константа 0 + single rendition (без STREAM-INF/MEDIA):
     // требование webOS "sequence совпадает по rendition" выполнено тривиально,
     // отдельный CODECS не нужен (нет multivariant).
@@ -1023,7 +1082,106 @@ class FFmpegService {
 
     m3u8 += `#EXT-X-ENDLIST\n`;
 
-    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, segDuration=${segmentDuration}s, startOffset=${startTime}s, type=${ext}${isTv ? `, tv=${tvClient}` : ''}`);
+    logger.info('HLS', `📋 Playlist generated [${sessionId}]: duration=${duration}s (${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s), segments=${totalSegments}, segDuration=${segmentDuration}s, targetDuration=${Math.ceil(segmentDuration + slack)}s, startOffset=${startTime}s, type=${ext}${isTv ? `, tv=${tvClient}` : ''}`);
+    return m3u8;
+  }
+
+  /**
+   * Multivariant-мастер для ТВ (Tizen/webOS, single rendition).
+   * ЗАЧЕМ: AVPlay отвергает голый media-плейлист как NOT_SUPPORTED_FILE
+   * (событие PLAYER_MSG_BITRATE_CHANGE с BITRATE:99999999 — прошивке негде
+   * взять битрейт/кодеки). Мастер с BANDWIDTH+CODECS+RESOLUTION снимает вопрос.
+   * CODECS описывает то, что РЕАЛЬНО лежит в сегментах (copy vs транскод
+   * внутри — см. зеркало предикатов из _create): профиль/уровень видео из
+   * streamDetails сканера, аудио — выбранная дорожка или AAC-транскод.
+   * Только ТВ: Apple/PC продолжают получать bare media-плейлист как раньше.
+   */
+  public generateTvMasterPlaylist(media: MediaItem, sessionId: string, token?: string, quality: string = 'original', audioIndex: number = 0): string {
+    const tvClient = parseTvClient(sessionId);
+    const isTv = tvClient !== null;
+    const canCopyVideo = isDirectCopyVideo(media, quality, false, isTv);
+
+    // --- Проба потоков из streamDetails (сканер кладёт ffprobe-JSON) ---
+    let vCodec = '', vProfile = '', vLevel = 0, width = 0, height = 0;
+    let aCodec = '', aProfile = '';
+    try {
+      const raw = (media as any).streamDetails;
+      const streams = typeof raw === 'string' ? JSON.parse(raw || '[]') : (Array.isArray(raw) ? raw : []);
+      const vst = streams.find((s: any) => s?.codec_type === 'video') || {};
+      vCodec = String(vst.codec_name || '').toLowerCase();
+      vProfile = String(vst.profile || '');
+      vLevel = Number(vst.level || 0);
+      width = Number(vst.width || 0);
+      height = Number(vst.height || 0);
+      const ast = streams.find((s: any) => s?.codec_type === 'audio' && Number(s?.index) === Number(audioIndex))
+        || streams.find((s: any) => s?.codec_type === 'audio') || {};
+      aCodec = String(ast.codec_name || '').toLowerCase();
+      aProfile = String(ast.profile || '');
+    } catch {}
+
+    // --- Аудиодорожка: copy или AAC-транскод внутри сегментов (твин _create) ---
+    let trackAudioCodec = (aCodec || (media as any).audioCodec || '').toLowerCase();
+    try {
+      if (Number(audioIndex) > 0) {
+        const track = db.prepare('SELECT codec, channels FROM media_tracks WHERE mediaItemId = ? AND streamIndex = ?').get(media.id, audioIndex) as { codec: string; channels: number } | undefined;
+        if (track?.codec) trackAudioCodec = track.codec.toLowerCase();
+      } else {
+        const track = db.prepare('SELECT codec, channels FROM media_tracks WHERE mediaItemId = ? AND type = "AUDIO" ORDER BY isDefault DESC, streamIndex ASC LIMIT 1').get(media.id) as { codec: string; channels: number } | undefined;
+        if (track?.codec) trackAudioCodec = track.codec.toLowerCase();
+      }
+    } catch {}
+    const canCopyAudio = TV_COPY_AUDIO.some((c) => trackAudioCodec.includes(c));
+
+    // --- CODECS: видео ---
+    let videoCodecStr = '';
+    if (!canCopyVideo) {
+      // Наш транскод: H.264 High (профиль high форсится в _create).
+      videoCodecStr = (width > 1920 || height > 1080) ? 'avc1.640033' : 'avc1.640028';
+    } else if (vCodec.includes('h264') || vCodec.includes('avc')) {
+      const p = vProfile.toLowerCase();
+      const profHex = p.startsWith('baseline') ? '42E0' : p.startsWith('main') ? '4D40' : p.startsWith('high') ? '6400' : '4200';
+      const lvlHex = vLevel > 0 ? Math.round(vLevel).toString(16).toUpperCase().padStart(2, '0') : '28';
+      videoCodecStr = `avc1.${profHex}${lvlHex}`;
+    } else if (vCodec.includes('hevc') || vCodec.includes('hev') || vCodec.includes('h265') || vCodec.includes('hvc')) {
+      const p = vProfile.toLowerCase();
+      // hvc1.<profile>.<compat>.L<level>.B0 — Main (1) / Main10 (2), tier Main (B0).
+      const profIdc = p.includes('main 10') || p.includes('main10') ? 2 : 1;
+      const lvl = vLevel > 0 ? Math.round(vLevel) : 120;
+      videoCodecStr = `hvc1.${profIdc}.6.L${lvl}.B0`;
+    }
+
+    // --- CODECS: аудио (то, что реально в сегментах) ---
+    let audioCodecStr = '';
+    if (!canCopyAudio) {
+      audioCodecStr = 'mp4a.40.2'; // ТВ-транскод звука — всегда AAC
+    } else if (trackAudioCodec.includes('aac')) {
+      audioCodecStr = /he-aac|heaac/i.test(aProfile) ? 'mp4a.40.5' : 'mp4a.40.2';
+    } else if (trackAudioCodec.includes('eac3') || trackAudioCodec.includes('ec-3') || trackAudioCodec.includes('dd+')) {
+      audioCodecStr = 'ec-3';
+    } else if (trackAudioCodec.includes('ac3') || trackAudioCodec.includes('ac-3')) {
+      audioCodecStr = 'ac-3';
+    } else if (trackAudioCodec.includes('mp3') || trackAudioCodec.includes('mpga')) {
+      audioCodecStr = 'mp4a.69';
+    } else if (trackAudioCodec.includes('opus')) {
+      audioCodecStr = 'Opus';
+    }
+
+    // --- BANDWIDTH: файловый битрейт с запасом 25% (copy) ---
+    const dur = (media as any).durationSeconds > 0 ? (media as any).durationSeconds : 0;
+    const bytes = (media as any).fileSize > 0 ? (media as any).fileSize : 0;
+    let bw = dur > 0 && bytes > 0 ? Math.ceil((bytes * 8) / dur * 1.25) : 0;
+    if (!bw || bw < 1_000_000) bw = canCopyVideo ? 8_000_000 : 5_000_000;
+
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+    const codecs = [videoCodecStr, audioCodecStr].filter(Boolean).join(',');
+    const resAttr = width > 0 && height > 0 ? `,RESOLUTION=${width}x${height}` : '';
+    const codecsAttr = codecs ? `,CODECS="${codecs}"` : '';
+
+    let m3u8 = `#EXTM3U\n`;
+    m3u8 += `#EXT-X-STREAM-INF:BANDWIDTH=${bw},AVERAGE-BANDWIDTH=${bw}${codecsAttr}${resAttr},CLOSED-CAPTIONS=NONE\n`;
+    m3u8 += `/api/stream/hls/session/${sessionId}/playlist.m3u8${tokenParam}\n`;
+
+    logger.info('HLS', `📋 TV master generated [${sessionId}]: bw=${bw}, codecs="${codecs || '?'}", res=${width > 0 ? `${width}x${height}` : '?'}`);
     return m3u8;
   }
 

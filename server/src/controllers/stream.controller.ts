@@ -468,9 +468,20 @@ export class StreamController {
       // Start/prewarm session
       ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch(() => {});
 
+      // ТВ-прошивки (AVPlay) отвергают голый media-плейлист как
+      // NOT_SUPPORTED_FILE — им нужен multivariant-мастер с BANDWIDTH/CODECS.
+      // Apple/PC продолжают получать bare media-плейлист как раньше.
+      if (tvClient) {
+        const master = ffmpegService.generateTvMasterPlaylist(media, sessionId, token, quality, audioIndex);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-cache, no-store');
+        res.send(master);
+        return;
+      }
+
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
-      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple, tvClient !== null);
-      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, segDuration);
+      const profile = await ffmpegService.getGopProfile(media, quality, isApple, tvClient !== null);
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, profile.segDuration, profile.maxGop);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');
@@ -502,8 +513,8 @@ export class StreamController {
       const isApple = sessionId.includes('_apple');
       const isTv = parseTvClient(sessionId) !== null;
       const startT = req.query.startTime ? parseFloat(req.query.startTime as string) : 0;
-      const segDuration = await ffmpegService.getSegmentDuration(media, quality, isApple, isTv);
-      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, segDuration);
+      const profile = await ffmpegService.getGopProfile(media, quality, isApple, isTv);
+      const playlist = ffmpegService.generateVodPlaylist(media, sessionId, token, startT, profile.segDuration, profile.maxGop);
 
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache, no-store');

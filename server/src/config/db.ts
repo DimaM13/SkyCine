@@ -74,6 +74,7 @@ export function initDatabase() {
       episodeNumber INTEGER,
       streamDetails TEXT,
       segmentDuration REAL,
+      gopMax REAL,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -158,6 +159,10 @@ export function initDatabase() {
 
   try {
     db.exec('ALTER TABLE media_items ADD COLUMN segmentDuration REAL;');
+  } catch (e) {}
+
+  try {
+    db.exec('ALTER TABLE media_items ADD COLUMN gopMax REAL;');
   } catch (e) {}
 
   try {
