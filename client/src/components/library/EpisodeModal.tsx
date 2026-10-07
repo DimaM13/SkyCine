@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { MediaItem } from '../../types';
 import { apiClient } from '../../api/client';
+import { VlcOpenButton } from './VlcOpenButton';
 
 interface EpisodeModalProps {
   episode: MediaItem | null;
@@ -251,6 +252,13 @@ export const EpisodeModal: React.FC<EpisodeModalProps> = ({
               <Users className="w-4 h-4" />
               <span>Смотреть вместе</span>
             </button>
+
+            <VlcOpenButton
+              mediaId={episode.id}
+              title={`${showTitle || episode.showTitle || episode.title} S${episode.seasonNumber || 1}E${episode.episodeNumber || 1} — ${episode.title}`}
+              compact
+              className="w-full sm:w-auto justify-center"
+            />
           </div>
         </div>
       </div>

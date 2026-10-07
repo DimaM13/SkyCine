@@ -5,6 +5,7 @@ import { apiClient } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { MediaItem } from '../../types';
 import { MediaAccessModal } from '../admin/MediaAccessModal';
+import { VlcOpenButton } from './VlcOpenButton';
 
 interface MediaModalProps {
   mediaId: string | null;
@@ -260,6 +261,8 @@ export const MediaModal: React.FC<MediaModalProps> = ({
                   <Users className="w-4 h-4 text-cinema-gold" />
                   <span>Смотреть вместе с друзьями</span>
                 </button>
+
+                <VlcOpenButton mediaId={media.id} title={media.title} />
 
                 {isAdmin && (
                   <>

@@ -1,24 +1,21 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import Hls from 'hls.js';
 import {
-  Play, Pause, Volume2, VolumeX, Maximize, Minimize,
-  RotateCcw, RotateCw, Settings, MessageSquare,
-  Users, Radio, Disc3, Subtitles, Volume1,
-  ArrowLeft, Share2, Activity, Cpu, Film, Music,
-  Minus, Square, X
+  Play, Pause, Volume2, VolumeX, Volume1,
+  RotateCcw, RotateCw, Settings,
+  Maximize, Minimize, Gauge, PictureInPicture2
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
 import { apiClient } from '../../api/client';
+import { qualityLabel, formatTime, clamp01 } from './playerUtils';
+import { PlayerTopBar } from './PlayerTopBar';
+import { PlayerStatsModal } from './PlayerStatsModal';
+import { PlayerSettingsMenu } from './PlayerSettingsMenu';
+import { SeekFlash, CenterFlash, ShortcutsButton, ShortcutsModal } from './PlayerOverlays';
+import type { SeekFlashData, CenterFlashData } from './PlayerOverlays';
 
-// Подпись качества в меню/бейджах: 'transcode' = транскод без смены разрешения
-// (сервер: тот же else-бранч ffmpeg — H264 + исходный размер, без -b:v; в sessionId
-// парсится тем же регексом _q([a-zA-Z0-9]+)_, отдельных правок сервера не надо).
-export function qualityLabel(q: string): string {
-  if (q === 'original') return 'Оригинал';
-  if (q === 'transcode') return 'Оригинал (транскод)';
-  return q;
-}
+export { qualityLabel };
 
 interface CustomPlayerProps {
   media: MediaItem;
@@ -109,6 +106,17 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const [isBuffering, setIsBuffering] = useState(false);
   const [showStatsModal, setShowStatsModal] = useState(false);
   const [justSynced, setJustSynced] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [isPip, setIsPip] = useState(false);
+  const [pipSupported, setPipSupported] = useState(false);
+  const [hoverPreview, setHoverPreview] = useState<{ ratio: number; time: number } | null>(null);
+  const [seekHint, setSeekHint] = useState<string | null>(null);
+  const [autoNotice, setAutoNotice] = useState<string | null>(null);
+  const [seekFlash, setSeekFlash] = useState<SeekFlashData | null>(null);
+  const [centerFlash, setCenterFlash] = useState<CenterFlashData | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const flashKeyRef = useRef(0);
+  const [techStats, setTechStats] = useState({ droppedFrames: 0, totalFrames: 0, hlsLevel: -1, hlsBitrate: 0, fallbackStage: 0, bufferedAhead: 0 });
 
   const audioTracks = useMemo(() => media.tracks?.filter((t: MediaTrack) => t.type === 'AUDIO') || [], [media.tracks]);
   const subtitleTracks = useMemo(() => media.tracks?.filter((t: MediaTrack) => t.type === 'SUBTITLE') || [], [media.tracks]);
@@ -127,7 +135,6 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>(defaultAudioTrackIndex);
   const [selectedSubtitleTrack, setSelectedSubtitleTrack] = useState<number>(-1);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
-  const [activeMenuTab, setActiveMenuTab] = useState<'root' | 'quality' | 'audio' | 'subtitles'>('root');
 
   const isAppleDevice = useMemo(() => {
     if (typeof navigator === 'undefined') return false;
@@ -392,6 +399,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     bufLogRef.current = [];
     parseStreakRef.current = { sn: -2, count: 0 };
   }, [media.id]);
+  const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
   // Единый авто-фолбэк: первая ступень — 'transcode' (то же разрешение, чистая
   // упаковка с ключевыми кадрами), вторая — '720p' (если вес всё равно не лезет).
   // Возвращает true если переключили. Ручной выбор качества гасит автомат.
@@ -408,6 +416,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       autoSwitchingRef.current = true;
       sendPlayerLog('auto-fallback', 'warn', { detail: `${reason} -> ${next} ${detail}`.slice(0, 200) });
       try { setSelectedQuality(next); } catch {}
+      try {
+        setAutoNotice(`Авто-качество: ${qualityLabel(next)} (было тяжело)`);
+        window.setTimeout(() => setAutoNotice(null), 4000);
+        setTechStats((s) => ({ ...s, fallbackStage: fallbackStageRef.current }));
+      } catch {}
       evictLogRef.current = [];
       bufLogRef.current = [];
       return true;
@@ -415,7 +428,35 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       return false;
     }
   }, [sendPlayerLog]);
-  const isDesktop = typeof window !== 'undefined' && Boolean((window as any).desktopPlayer?.isDesktop);
+
+  // PiP: доступность + синхронизация иконки с системным событием
+  useEffect(() => {
+    try {
+      setPipSupported(typeof document !== 'undefined' && !!(document as any).pictureInPictureEnabled && !isDesktop);
+    } catch { setPipSupported(false); }
+    const onEnter = () => setIsPip(true);
+    const onLeave = () => setIsPip(false);
+    try {
+      (document as any).addEventListener?.('enterpictureinpicture', onEnter);
+      (document as any).addEventListener?.('leavepictureinpicture', onLeave);
+    } catch {}
+    return () => {
+      try {
+        (document as any).removeEventListener?.('enterpictureinpicture', onEnter);
+        (document as any).removeEventListener?.('leavepictureinpicture', onLeave);
+      } catch {}
+    };
+  }, [isDesktop]);
+
+  // Применяем скорость к <video> (HLS/Direct переживают пересоздание src — дотягиваем здесь)
+  useEffect(() => {
+    if (isDesktop) return;
+    const video = videoRef.current;
+    if (!video) return;
+    try {
+      if (Math.abs((video.playbackRate || 1) - playbackRate) > 0.01) video.playbackRate = playbackRate;
+    } catch {}
+  }, [playbackRate, isDesktop, videoRef, selectedQuality, selectedAudioTrack, media.id]);
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
 
   useEffect(() => {
@@ -1166,11 +1207,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }, 3000);
   };
 
+  const popCenter = useCallback((kind: 'play' | 'pause') => {
+    flashKeyRef.current += 1;
+    const key = flashKeyRef.current;
+    setCenterFlash({ kind, key });
+    window.setTimeout(() => {
+      setCenterFlash((cur) => (cur && cur.key === key ? null : cur));
+    }, 600);
+  }, []);
+
   const togglePlay = () => {
     if (isWatchTogether) {
       if (isPlaying) {
+        popCenter('pause');
         onPauseRequest?.();
       } else {
+        popCenter('play');
         onPlayRequest?.();
       }
       return;
@@ -1179,6 +1231,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (isDesktop) {
       const dp = (window as any).desktopPlayer;
       dp?.togglePlay();
+      popCenter(isPlaying ? 'pause' : 'play');
       return;
     }
 
@@ -1186,10 +1239,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     if (!video) return;
 
     if (!video.paused) {
+      popCenter('pause');
       video.pause();
       setIsPlaying(false);
       reportProgress();
     } else {
+      popCenter('play');
       video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
     }
   };
@@ -1242,6 +1297,63 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     triggerSeek(newPos);
   };
 
+  // Дабл-тап как в YouTube: одиночный тап по бокам тогглит play с задержкой 300мс,
+  // второй тап в то же место отменяет тоггл и мотает ∓10с; дальнейшие быстрые тапы
+  // суммируются (∓20, ∓30…) с ютуб-анимацией. Работает и тачем, и мышью.
+  const tapStateRef = useRef<{
+    lastTap: number; lastSide: 'left' | 'right' | null; pendingSingle: number | null;
+    streakSide: 'left' | 'right' | null; streakCount: number; streakAt: number;
+  }>({ lastTap: 0, lastSide: null, pendingSingle: null, streakSide: null, streakCount: 0, streakAt: 0 });
+
+  const handleZoneTap = useCallback((side: 'left' | 'right') => {
+    const st = tapStateRef.current;
+    const now = Date.now();
+    const dir = side === 'left' ? -1 : 1;
+
+    const doSeekFlash = (total: number) => {
+      const base = videoRef.current?.currentTime ?? currentTime;
+      triggerSeek(base + dir * 10);
+      flashKeyRef.current += 1;
+      const key = flashKeyRef.current;
+      setSeekFlash({ side, seconds: total, key });
+      window.setTimeout(() => {
+        setSeekFlash((cur) => (cur && cur.key === key ? null : cur));
+      }, 780);
+    };
+
+    // Продолжение серии: тапы подряд после дабл-тапа добавляют по 10с
+    if (st.streakSide === side && now - st.streakAt < 1000) {
+      st.streakCount += 1;
+      st.streakAt = now;
+      doSeekFlash(st.streakCount * 10);
+      return;
+    }
+    // Второй быстрый тап — это дабл-тап: гасим отложенный тоггл, мотаем
+    if (st.lastSide === side && now - st.lastTap < 320) {
+      if (st.pendingSingle) {
+        window.clearTimeout(st.pendingSingle);
+        st.pendingSingle = null;
+      }
+      st.lastTap = 0;
+      st.lastSide = null;
+      st.streakSide = side;
+      st.streakCount = 1;
+      st.streakAt = now;
+      doSeekFlash(10);
+      return;
+    }
+    // Первый тап — ждём 300мс: вдруг это начало дабл-тапа
+    st.lastTap = now;
+    st.lastSide = side;
+    st.streakSide = null;
+    st.streakCount = 0;
+    if (st.pendingSingle) window.clearTimeout(st.pendingSingle);
+    st.pendingSingle = window.setTimeout(() => {
+      st.pendingSingle = null;
+      togglePlay();
+    }, 300);
+  }, [triggerSeek, togglePlay, currentTime, videoRef]);
+
   const changeVolume = (val: number) => {
     setVolume(val);
     setIsMuted(val === 0);
@@ -1271,6 +1383,36 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
   };
 
+  const flashSeekHint = useCallback((text: string) => {
+    setSeekHint(text);
+    window.setTimeout(() => setSeekHint((cur) => (cur === text ? null : cur)), 900);
+  }, []);
+
+  const applyPlaybackRate = useCallback((r: number) => {
+    setPlaybackRate(r);
+    if (isDesktop) {
+      try { (window as any).desktopPlayer?.setRate?.(r); } catch {}
+      return;
+    }
+    const video = videoRef.current;
+    if (video) {
+      try { video.playbackRate = r; } catch {}
+    }
+  }, [isDesktop, videoRef]);
+
+  const togglePictureInPicture = useCallback(async () => {
+    if (isDesktop) return;
+    const video = videoRef.current as any;
+    if (!video) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await (document as any).exitPictureInPicture();
+      } else if (video.requestPictureInPicture) {
+        await video.requestPictureInPicture();
+      }
+    } catch {}
+  }, [isDesktop, videoRef]);
+
   const toggleFullscreen = () => {
     if (isDesktop) {
       const dp = (window as any).desktopPlayer;
@@ -1285,6 +1427,115 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
     }
   };
+
+  // Хоткеи: Space/K — play/pause, ←/→/J/L — ±10с (Shift — ±30с), ↑/↓ — громкость,
+  // F — fullscreen, M — mute, P — PiP, 0-9 — % длительности, +/- — скорость.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const tag = (t?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t as any)?.isContentEditable) {
+        if ((t as HTMLInputElement)?.type !== 'range') return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key;
+      if (k === '?' || k === '/') {
+        e.preventDefault();
+        setShowShortcuts((v) => !v);
+        return;
+      }
+      if (showShortcuts && (k === 'Escape' || k === 'Enter')) {
+        setShowShortcuts(false);
+        return;
+      }
+      const lower = k.toLowerCase();
+      if (k === ' ' || lower === 'k' || lower === 'л') {
+        e.preventDefault();
+        togglePlay();
+      } else if (k === 'ArrowLeft' || lower === 'j' || lower === 'о') {
+        e.preventDefault();
+        const d = e.shiftKey ? -30 : -10;
+        const base = videoRef.current?.currentTime ?? currentTime;
+        triggerSeek(base + d);
+        flashSeekHint(`${d}с`);
+      } else if (k === 'ArrowRight' || lower === 'l' || lower === 'д') {
+        e.preventDefault();
+        const d = e.shiftKey ? 30 : 10;
+        const base = videoRef.current?.currentTime ?? currentTime;
+        triggerSeek(base + d);
+        flashSeekHint(`+${d}с`);
+      } else if (lower === 'f' || lower === 'а') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (lower === 'm' || lower === 'ь') {
+        e.preventDefault();
+        toggleMute();
+      } else if (lower === 'p' || lower === 'з') {
+        e.preventDefault();
+        togglePictureInPicture();
+      } else if (k === 'ArrowUp') {
+        e.preventDefault();
+        changeVolume(Math.min(1, Math.round((volume + 0.05) * 100) / 100));
+      } else if (k === 'ArrowDown') {
+        e.preventDefault();
+        changeVolume(Math.max(0, Math.round((volume - 0.05) * 100) / 100));
+      } else if (k >= '0' && k <= '9') {
+        e.preventDefault();
+        const ratio = parseInt(k, 10) / 10;
+        triggerSeek(ratio * effectiveDuration);
+      } else if (k === '+' || k === '=') {
+        e.preventDefault();
+        const idx = [0.5, 0.75, 1, 1.25, 1.5, 2].findIndex((r) => r === playbackRate);
+        const next = [0.5, 0.75, 1, 1.25, 1.5, 2][Math.min(5, (idx < 0 ? 2 : idx) + 1)];
+        applyPlaybackRate(next);
+      } else if (k === '-' || k === '_') {
+        e.preventDefault();
+        const idx = [0.5, 0.75, 1, 1.25, 1.5, 2].findIndex((r) => r === playbackRate);
+        const next = [0.5, 0.75, 1, 1.25, 1.5, 2][Math.max(0, (idx < 0 ? 2 : idx) - 1)];
+        applyPlaybackRate(next);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [togglePlay, triggerSeek, toggleFullscreen, toggleMute, togglePictureInPicture, changeVolume, volume, currentTime, effectiveDuration, playbackRate, applyPlaybackRate, videoRef, showShortcuts]);
+
+  // Тех-статистика для модалки: дропы + HLS-уровень/битрейт + буфер впереди (поллинг пока открыта)
+  useEffect(() => {
+    if (!showStatsModal) return;
+    const id = window.setInterval(() => {
+      try {
+        const video = videoRef.current;
+        let dropped = 0;
+        let total = 0;
+        try {
+          const q: any = (video as any)?.getVideoPlaybackQuality?.();
+          if (q) {
+            dropped = q.droppedVideoFrames || 0;
+            total = q.totalVideoFrames || 0;
+          }
+        } catch {}
+        let lvl = -1;
+        let br = 0;
+        try {
+          const hls: any = hlsRef.current;
+          if (hls) {
+            lvl = typeof hls.currentLevel === 'number' ? hls.currentLevel : -1;
+            const lv = lvl >= 0 ? hls.levels?.[lvl] : null;
+            br = lv?.bitrate || 0;
+          }
+        } catch {}
+        let ahead = 0;
+        try {
+          const cur = video?.currentTime || 0;
+          const b = video?.buffered;
+          if (b && b.length > 0) ahead = Math.max(0, b.end(b.length - 1) - cur);
+        } catch {}
+        setTechStats((s) => ({ ...s, droppedFrames: dropped, totalFrames: total, hlsLevel: lvl, hlsBitrate: br, bufferedAhead: ahead, fallbackStage: fallbackStageRef.current }));
+      } catch {}
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [showStatsModal, videoRef]);
 
   const setupAudioGain = useCallback(() => {
     const video = videoRef.current;
@@ -1315,22 +1566,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
   };
 
-  const formatTime = (secs: number) => {
-    if (isNaN(secs) || secs < 0) return '0:00';
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = Math.floor(secs % 60);
-    if (h > 0) {
-      return `${h}:${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
-    }
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
-
   return (
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className={`relative w-full h-full ${isDesktop ? 'bg-transparent' : 'bg-black'} flex items-center justify-center select-none overflow-hidden group font-sans touch-none`}
+      className={`relative w-full h-full ${isDesktop ? 'bg-transparent' : 'bg-black'} flex items-center justify-center select-none overflow-hidden group font-sans touch-none ${!showControls && isPlaying ? 'cursor-none' : ''}`}
     >
       {!isDesktop ? (
         <video
@@ -1393,185 +1633,86 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       {/* Floating Reaction Overlay */}
       {reactions.length > 0 && <ReactionOverlay reactions={reactions} />}
 
+      {/* Double-tap seek zones (YouTube-style): тап — play/pause, дабл-тап — ∓10с,
+          серия быстрых тапов суммируется. */}
+      {!isDesktop && (
+        <>
+          <div
+            onClick={() => handleZoneTap('left')}
+            className="absolute left-0 top-[15%] bottom-[20%] w-[28%] z-10"
+          />
+          <div
+            onClick={() => handleZoneTap('right')}
+            className="absolute right-0 top-[15%] bottom-[20%] w-[28%] z-10"
+          />
+        </>
+      )}
+
+      <SeekFlash flash={seekFlash} />
+      <CenterFlash flash={centerFlash} />
+      <ShortcutsModal open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+
+      {/* Seek hint + auto-quality toasts */}
+      {(seekHint || autoNotice) && (
+        <div className="absolute inset-x-0 top-20 flex flex-col items-center gap-2 pointer-events-none z-40">
+          {seekHint && (
+            <div className="px-3 py-1.5 rounded-full bg-black/70 border border-white/15 text-white text-sm font-bold animate-fade-in">
+              {seekHint}
+            </div>
+          )}
+          {autoNotice && (
+            <div className="px-3 py-1.5 rounded-full bg-amber-400/90 text-black text-xs font-bold animate-fade-in">
+              {autoNotice}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Buffering Spinner */}
       {isBuffering && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30">
-          <div className="w-14 h-14 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
+          <div className="w-14 h-14 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin shadow-glow-gold"></div>
         </div>
       )}
 
-      {/* Top Header Controls */}
-      <div
-        className={`absolute top-0 left-0 right-0 p-4 sm:p-6 bg-gradient-to-b from-black/90 via-black/50 to-transparent transition-opacity duration-300 z-30 flex items-center justify-between select-none ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}
-        style={{ WebkitAppRegion: 'drag' } as any}
-      >
-        <div className="flex items-center gap-3 min-w-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
-          {onBack && (
-            <button
-              onClick={() => {
-                reportProgress();
-                if (isDesktop) {
-                  (window as any).desktopPlayer?.closePlayer();
-                }
-                onBack();
-              }}
-              className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all cursor-pointer shrink-0"
-              title="Назад"
-            >
-              <ArrowLeft className="w-5 h-5" />
-            </button>
-          )}
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-sm sm:text-base font-bold text-white truncate max-w-xs sm:max-w-md md:max-w-xl">
-                {media.title}
-              </h1>
-              {media.type === 'EPISODE' && media.seasonNumber && media.episodeNumber && (
-                <span className="text-[11px] text-cinema-gold font-bold px-1.5 py-0.5 rounded bg-cinema-gold/10 border border-cinema-gold/20">
-                  Сезон {media.seasonNumber} • Серия {media.episodeNumber}
-                </span>
-              )}
-            </div>
+      <PlayerTopBar
+        visible={showControls}
+        title={media.title}
+        seasonNumber={media.seasonNumber}
+        episodeNumber={media.episodeNumber}
+        mediaType={media.type}
+        badges={streamBadges}
+        isWatchTogether={isWatchTogether}
+        membersCount={members.length}
+        isDesktop={isDesktop}
+        isSidebarOpen={isSidebarOpen}
+        onBack={onBack ? () => {
+          reportProgress();
+          if (isDesktop) {
+            (window as any).desktopPlayer?.closePlayer();
+          }
+          onBack();
+        } : undefined}
+        onInvite={onInvite}
+        onToggleSidebar={onToggleSidebar}
+        onToggleStats={() => setShowStatsModal(!showStatsModal)}
+      />
 
-            {/* Stream Badges */}
-            <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-              {/* Playback Mode Badge: Direct Play (green) or Direct Stream (green) or Transcoding (blue) */}
-              {streamBadges.modeType === 'direct' || streamBadges.modeType === 'stream' ? (
-                <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5 shadow-sm backdrop-blur-md">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  {streamBadges.modeText}
-                </span>
-              ) : (
-                <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1.5 shadow-sm backdrop-blur-md">
-                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                  {streamBadges.modeText}
-                </span>
-              )}
-
-              {/* Watch Together Badge */}
-              {isWatchTogether && (
-                <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold tracking-wider uppercase bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1 shadow-sm backdrop-blur-md">
-                  <Users className="w-3 h-3 text-purple-400" />
-                  Комната ({members.length})
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Top Right Actions */}
-        <div className="flex items-center gap-2 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
-          {isWatchTogether && onInvite && (
-            <button
-              onClick={onInvite}
-              className="px-3 py-1.5 rounded-xl bg-cinema-gold/15 hover:bg-cinema-gold/30 text-cinema-gold border border-cinema-gold/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-              title="Пригласить друзей"
-            >
-              <Share2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Позвать</span>
-            </button>
-          )}
-
-          {isWatchTogether && onToggleSidebar && (
-            <button
-              onClick={onToggleSidebar}
-              className={`px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all ${
-                isSidebarOpen ? 'bg-cinema-gold text-black border-cinema-gold' : 'bg-white/10 text-slate-200 border-white/15 hover:bg-white/20'
-              }`}
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              <span>Чат</span>
-            </button>
-          )}
-
-          <button
-            onClick={() => setShowStatsModal(!showStatsModal)}
-            className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 text-xs cursor-pointer"
-            title="Инфо о потоке"
-          >
-            <Activity className="w-4 h-4" />
-          </button>
-
-          {isDesktop && (
-            <div className="flex items-center gap-1 ml-2 pl-2 border-l border-white/15">
-              <button
-                onClick={() => (window as any).desktopPlayer?.minimizeWindow?.()}
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 transition-colors cursor-pointer"
-                title="Свернуть"
-              >
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() => (window as any).desktopPlayer?.maximizeWindow?.()}
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 transition-colors cursor-pointer"
-                title="Развернуть"
-              >
-                <Square className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() => (window as any).desktopPlayer?.closeWindow?.()}
-                className="p-2 rounded-xl bg-red-500/20 hover:bg-red-600 text-red-300 hover:text-white transition-colors cursor-pointer"
-                title="Закрыть"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Stream Stats Modal */}
-      {showStatsModal && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute top-16 right-4 w-80 bg-cinema-900/95 border border-cinema-gold/30 backdrop-blur-2xl rounded-2xl p-4 shadow-2xl z-50 text-xs text-slate-200"
-        >
-          <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-3">
-            <span className="font-bold text-white flex items-center gap-1.5">
-              <Activity className="w-4 h-4 text-cinema-gold" /> Параметры потока
-            </span>
-            <button onClick={() => setShowStatsModal(false)} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10">✕</button>
-          </div>
-          <div className="space-y-2 text-[11px]">
-            <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
-              <span className="text-slate-400">Режим:</span>
-              <span className="font-semibold text-cinema-gold text-right">{streamBadges.modeText}</span>
-            </div>
-            <div className="flex justify-between items-center px-1">
-              <span className="text-slate-400">Видеопоток:</span>
-              <span className="text-white font-mono">{streamBadges.videoLabel || 'Оригинал'}</span>
-            </div>
-            <div className="flex justify-between items-center px-1">
-              <span className="text-slate-400">Качество видео:</span>
-              <span className="text-white font-mono">{streamBadges.isVideoDirectCopy ? 'Оригинал (Direct Copy)' : `Транскод (${selectedQuality === 'original' ? (media.videoCodec || '').toUpperCase() + ' → H.264' : selectedQuality})`}</span>
-            </div>
-            <div className="flex justify-between items-center px-1">
-              <span className="text-slate-400">Аудиодорожка:</span>
-              <span className="text-white font-mono">{streamBadges.audioLabel}</span>
-            </div>
-            <div className="flex justify-between items-center px-1">
-              <span className="text-slate-400">Обработка звука:</span>
-              <span className="text-white font-mono">{streamBadges.isAudioTrans ? `Транскод в AAC (${streamBadges.aCodec} → AAC)` : `Оригинал (${streamBadges.aCodec} Direct Copy)`}</span>
-            </div>
-            <div className="flex justify-between items-center px-1">
-              <span className="text-slate-400">Контейнер / HLS:</span>
-              <span className="text-white font-mono">{streamBadges.containerLabel}</span>
-            </div>
-            <div className="flex justify-between items-center px-1">
-              <span className="text-slate-400">Движок плеера:</span>
-              <span className="text-cinema-gold font-mono">{streamBadges.engineLabel}</span>
-            </div>
-            {effectiveDuration > 0 && (
-              <div className="flex justify-between items-center px-1 border-t border-white/5 pt-2 text-[10px]">
-                <span className="text-slate-500">Буфер / Длина:</span>
-                <span className="text-slate-400 font-mono">{Math.round(bufferedTime)}с / {Math.round(effectiveDuration)}с</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <PlayerStatsModal
+        open={showStatsModal}
+        onClose={() => setShowStatsModal(false)}
+        modeText={streamBadges.modeText}
+        videoLabel={streamBadges.videoLabel}
+        qualityText={streamBadges.isVideoDirectCopy ? 'Оригинал (Direct Copy)' : `Транскод (${selectedQuality === 'original' ? (media.videoCodec || '').toUpperCase() + ' → H.264' : selectedQuality})`}
+        audioLabel={streamBadges.audioLabel}
+        audioProcessing={streamBadges.isAudioTrans ? `Транскод в AAC (${streamBadges.aCodec} → AAC)` : `Оригинал (${streamBadges.aCodec} Direct Copy)`}
+        containerLabel={streamBadges.containerLabel}
+        engineLabel={streamBadges.engineLabel}
+        bufferedTime={bufferedTime}
+        effectiveDuration={effectiveDuration}
+        playbackRate={playbackRate}
+        tech={techStats}
+      />
 
       {/* Bottom Controls Bar */}
       <div
@@ -1580,21 +1721,39 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         }`}
       >
         {/* Timeline Scrubber */}
-        <div className="relative w-full flex items-center">
+        <div
+          className="relative w-full flex items-center group/timeline py-2 -my-1"
+          onMouseMove={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = clamp01((e.clientX - rect.left) / Math.max(1, rect.width));
+            setHoverPreview({ ratio, time: ratio * effectiveDuration });
+            handleMouseMove();
+          }}
+          onMouseLeave={() => setHoverPreview(null)}
+        >
           <div
-            className="absolute left-0 top-1/2 -translate-y-1/2 h-1.5 bg-white/20 rounded-full pointer-events-none"
+            className="absolute left-0 top-1/2 -translate-y-1/2 h-1 group-hover/timeline:h-1.5 bg-white/20 rounded-full pointer-events-none transition-all"
             style={{ width: `${effectiveDuration > 0 ? (bufferedTime / effectiveDuration) * 100 : 0}%` }}
           />
           <div
-            className="absolute left-0 top-1/2 -translate-y-1/2 h-1.5 bg-cinema-gold rounded-full pointer-events-none"
+            className="absolute left-0 top-1/2 -translate-y-1/2 h-1 group-hover/timeline:h-1.5 bg-cinema-gold rounded-full pointer-events-none transition-all"
             style={{ width: `${effectiveDuration > 0 ? (displayTime / effectiveDuration) * 100 : 0}%` }}
           />
+          {hoverPreview && effectiveDuration > 0 && (
+            <div
+              className="absolute -top-7 px-2 py-0.5 rounded-md bg-black/85 border border-white/15 text-[11px] font-mono text-white pointer-events-none whitespace-nowrap z-20"
+              style={{ left: `${Math.min(94, Math.max(6, hoverPreview.ratio * 100))}%`, transform: 'translateX(-50%)' }}
+            >
+              {formatTime(hoverPreview.time)}
+            </div>
+          )}
           <input
             type="range"
             min={0}
             max={effectiveDuration || 100}
             step={0.1}
             value={displayTime}
+            aria-label="Позиция воспроизведения"
             onPointerDown={() => {
               // Новый жест — снимаем защиту от запоздалых тач-событий прошлого коммита.
               // (ref пишем всегда, поведение одиночки не меняется)
@@ -1638,30 +1797,37 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 triggerSeek(parseFloat((e.target as HTMLInputElement).value));
               }
             }}
-            className="w-full h-1.5 bg-transparent appearance-none cursor-pointer relative z-10 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cinema-gold"
+            className="w-full h-6 bg-transparent appearance-none cursor-pointer relative z-10 focus-visible:ring-2 focus-visible:ring-cinema-gold rounded [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cinema-gold [&::-webkit-slider-thumb]:shadow-glow-gold [&::-webkit-slider-thumb]:cursor-grab group-hover/timeline:[&::-webkit-slider-thumb]:scale-110 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-cinema-gold [&::-moz-range-thumb]:border-0"
           />
         </div>
 
         {/* Action Row */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               onClick={togglePlay}
-              className="p-2.5 rounded-full bg-white/10 hover:bg-cinema-gold hover:text-black text-white transition-all cursor-pointer"
+              aria-label={isPlaying ? 'Пауза (Space/K)' : 'Играть (Space/K)'}
+              className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/10 hover:bg-cinema-gold hover:text-black hover:scale-105 active:scale-95 text-white transition-all cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold shadow-lg"
             >
               {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
             </button>
 
-            <button onClick={() => skip(-10)} className="p-2 text-slate-300 hover:text-white cursor-pointer" title="Назад 10с">
-              <RotateCcw className="w-4 h-4" />
+            <button onClick={() => { skip(-10); flashSeekHint('-10с'); }} aria-label="Назад 10 секунд (←)" className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center text-slate-300 hover:text-white hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg" title="Назад 10с (←)">
+              <span className="relative inline-flex">
+                <RotateCcw className="w-5 h-5" />
+                <span className="absolute inset-0 flex items-center justify-center text-[7px] font-bold pt-[2px]">10</span>
+              </span>
             </button>
-            <button onClick={() => skip(10)} className="p-2 text-slate-300 hover:text-white cursor-pointer" title="Вперед 10с">
-              <RotateCw className="w-4 h-4" />
+            <button onClick={() => { skip(10); flashSeekHint('+10с'); }} aria-label="Вперед 10 секунд (→)" className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center text-slate-300 hover:text-white hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg" title="Вперед 10с (→)">
+              <span className="relative inline-flex">
+                <RotateCw className="w-5 h-5" />
+                <span className="absolute inset-0 flex items-center justify-center text-[7px] font-bold pt-[2px]">10</span>
+              </span>
             </button>
 
             {/* Volume */}
             <div className="flex items-center gap-2">
-              <button onClick={toggleMute} className="text-slate-300 hover:text-white cursor-pointer">
+              <button onClick={toggleMute} aria-label={isMuted ? 'Включить звук (M)' : 'Выключить звук (M)'} className="p-1 min-w-[36px] min-h-[36px] flex items-center justify-center text-slate-300 hover:text-white cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg">
                 {isMuted || volume === 0 ? <VolumeX className="w-5 h-5 text-red-400" /> : volume < 0.5 ? <Volume1 className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
               </button>
               <input
@@ -1670,12 +1836,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 max={1}
                 step={0.02}
                 value={isMuted ? 0 : volume}
+                aria-label="Громкость"
                 onChange={(e) => changeVolume(parseFloat(e.target.value))}
-                className="w-16 h-1 bg-white/20 accent-cinema-gold rounded-full cursor-pointer"
+                className="hidden sm:block w-16 h-1 bg-white/20 accent-cinema-gold rounded-full cursor-pointer"
               />
               <button
                 onClick={() => setAudioGainBoost(audioBoost === 1.0 ? 1.5 : audioBoost === 1.5 ? 2.0 : 1.0)}
-                className={`text-[10px] font-bold px-1.5 py-0.5 rounded border transition-colors ${
+                aria-label="Усилитель звука до 200%"
+                className={`text-[10px] font-bold px-1.5 py-0.5 min-h-[28px] rounded border transition-colors focus-visible:ring-2 focus-visible:ring-cinema-gold ${
                   audioBoost > 1.0 ? 'bg-cinema-gold/20 text-cinema-gold border-cinema-gold' : 'bg-white/5 text-slate-400 border-white/10'
                 }`}
                 title="Усилитель звука до 200%"
@@ -1685,10 +1853,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             </div>
 
             {/* Time Stamp & Sync button */}
-            <div className="text-xs text-slate-300 font-mono tracking-wider flex items-center gap-1.5">
+            <div className="text-xs text-slate-300 font-mono tabular-nums tracking-wider flex items-center gap-1.5 whitespace-nowrap">
               <span>{formatTime(displayTime)}</span>
               <span className="text-slate-500">/</span>
-              <span>{formatTime(effectiveDuration)}</span>
+              <span className="hidden sm:inline">{formatTime(effectiveDuration)}</span>
 
               {isWatchTogether && (
                 <button
@@ -1707,99 +1875,67 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             </div>
           </div>
 
-          {/* Right: Settings & Fullscreen */}
-          <div className="flex items-center gap-3 relative">
+          {/* Right: Shortcuts, Speed, PiP, Settings & Fullscreen */}
+          <div className="flex items-center gap-1 sm:gap-2 relative shrink-0">
+            <ShortcutsButton onOpen={() => setShowShortcuts(true)} />
+            <button
+              onClick={() => {
+                const order = [0.5, 0.75, 1, 1.25, 1.5, 2];
+                const idx = order.findIndex((r) => r === playbackRate);
+                applyPlaybackRate(order[((idx < 0 ? 2 : idx) + 1) % order.length]);
+              }}
+              aria-label={`Скорость ${playbackRate}x — нажать для следующей`}
+              title="Скорость воспроизведения (+/-)"
+              className="px-2 min-h-[40px] flex items-center gap-1 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold"
+            >
+              <Gauge className="w-4 h-4" />
+              <span className="text-[11px] font-bold font-mono">{playbackRate}x</span>
+            </button>
+
+            {pipSupported && (
+              <button
+                onClick={togglePictureInPicture}
+                aria-label={isPip ? 'Выйти из картинка-в-картинке (P)' : 'Картинка-в-картинке (P)'}
+                title="Картинка-в-картинке (P)"
+                className={`p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold ${isPip ? 'bg-cinema-gold text-black' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
+              >
+                <PictureInPicture2 className="w-5 h-5" />
+              </button>
+            )}
+
             <div className="relative">
               <button
                 onClick={() => setShowSettingsMenu(!showSettingsMenu)}
-                className={`p-2 rounded-lg transition-colors ${showSettingsMenu ? 'bg-cinema-gold text-black' : 'text-slate-300 hover:text-white'}`}
+                aria-label="Настройки качества и звука"
+                aria-expanded={showSettingsMenu}
+                className={`p-2 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold ${showSettingsMenu ? 'bg-cinema-gold text-black' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
                 title="Настройки качества и звука"
               >
                 <Settings className="w-5 h-5" />
               </button>
 
-              {showSettingsMenu && (
-                <div className="absolute bottom-12 right-0 w-64 bg-cinema-900/95 border border-white/15 backdrop-blur-xl rounded-2xl p-3 shadow-2xl z-50 text-xs text-slate-200">
-                  {activeMenuTab === 'root' && (
-                    <div className="flex flex-col gap-1">
-                      <div className="text-[11px] font-semibold text-slate-400 px-2 py-1 uppercase">Настройки потока</div>
-                      <button onClick={() => setActiveMenuTab('quality')} className="flex items-center justify-between p-2 rounded-lg hover:bg-white/10">
-                        <span className="flex items-center gap-2"><Radio className="w-4 h-4 text-cinema-gold" /> Качество</span>
-                        <span className="text-slate-400 capitalize">{qualityLabel(selectedQuality)}</span>
-                      </button>
-                      <button onClick={() => setActiveMenuTab('audio')} className="flex items-center justify-between p-2 rounded-lg hover:bg-white/10">
-                        <span className="flex items-center gap-2"><Disc3 className="w-4 h-4 text-cinema-gold" /> Аудиодорожка</span>
-                        <span className="text-slate-400 truncate max-w-[80px]">#{selectedAudioTrack}</span>
-                      </button>
-                      <button onClick={() => setActiveMenuTab('subtitles')} className="flex items-center justify-between p-2 rounded-lg hover:bg-white/10">
-                        <span className="flex items-center gap-2"><Subtitles className="w-4 h-4 text-cinema-gold" /> Субтитры</span>
-                        <span className="text-slate-400">{selectedSubtitleTrack === -1 ? 'Выкл' : 'Вкл'}</span>
-                      </button>
-                    </div>
-                  )}
-
-                  {activeMenuTab === 'quality' && (
-                    <div className="flex flex-col gap-1">
-                      <button onClick={() => setActiveMenuTab('root')} className="text-left text-[11px] text-cinema-gold font-semibold mb-1">← Назад</button>
-                      {['original', 'transcode', '1080p', '720p', '480p'].map((q) => (
-                        <button
-                          key={q}
-                          onClick={() => { setSelectedQuality(q); setShowSettingsMenu(false); }}
-                          className={`p-2 rounded-lg text-left capitalize flex justify-between ${selectedQuality === q ? 'bg-cinema-gold/20 text-cinema-gold font-bold' : 'hover:bg-white/10'}`}
-                        >
-                          <span>{qualityLabel(q)}</span>
-                          {selectedQuality === q && <span>✓</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {activeMenuTab === 'audio' && (
-                    <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-                      <button onClick={() => setActiveMenuTab('root')} className="text-left text-[11px] text-cinema-gold font-semibold mb-1">← Назад</button>
-                      {audioTracks.map((t: MediaTrack) => (
-                        <button
-                          key={t.streamIndex}
-                          onClick={() => { setSelectedAudioTrack(t.streamIndex); setShowSettingsMenu(false); }}
-                          className={`p-2 rounded-lg text-left flex justify-between ${selectedAudioTrack === t.streamIndex ? 'bg-cinema-gold/20 text-cinema-gold font-bold' : 'hover:bg-white/10'}`}
-                        >
-                          <div className="truncate pr-2">
-                            <p className="font-semibold text-xs">{t.title || `Дорожка #${t.streamIndex}`}</p>
-                            <p className="text-[10px] text-slate-400 uppercase">{t.language || 'und'} • {t.codec}</p>
-                          </div>
-                          {selectedAudioTrack === t.streamIndex && <span>✓</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {activeMenuTab === 'subtitles' && (
-                    <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-                      <button onClick={() => setActiveMenuTab('root')} className="text-left text-[11px] text-cinema-gold font-semibold mb-1">← Назад</button>
-                      <button
-                        onClick={() => { setSelectedSubtitleTrack(-1); setShowSettingsMenu(false); }}
-                        className={`p-2 rounded-lg text-left flex justify-between ${selectedSubtitleTrack === -1 ? 'bg-cinema-gold/20 text-cinema-gold font-bold' : 'hover:bg-white/10'}`}
-                      >
-                        <span>Отключить субтитры</span>
-                        {selectedSubtitleTrack === -1 && <span>✓</span>}
-                      </button>
-                      {subtitleTracks.map((s: MediaTrack) => (
-                        <button
-                          key={s.streamIndex}
-                          onClick={() => { setSelectedSubtitleTrack(s.streamIndex); setShowSettingsMenu(false); }}
-                          className={`p-2 rounded-lg text-left flex justify-between ${selectedSubtitleTrack === s.streamIndex ? 'bg-cinema-gold/20 text-cinema-gold font-bold' : 'hover:bg-white/10'}`}
-                        >
-                          <span>{s.title || `Субтитры #${s.streamIndex}`}</span>
-                          {selectedSubtitleTrack === s.streamIndex && <span>✓</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              <PlayerSettingsMenu
+                open={showSettingsMenu}
+                selectedQuality={selectedQuality}
+                onSelectQuality={(q) => setSelectedQuality(q)}
+                audioTracks={audioTracks}
+                selectedAudioTrack={selectedAudioTrack}
+                onSelectAudioTrack={(i) => setSelectedAudioTrack(i)}
+                subtitleTracks={subtitleTracks}
+                selectedSubtitleTrack={selectedSubtitleTrack}
+                onSelectSubtitleTrack={(i) => setSelectedSubtitleTrack(i)}
+                playbackRate={playbackRate}
+                onSelectRate={(r) => applyPlaybackRate(r)}
+                onClose={() => setShowSettingsMenu(false)}
+              />
             </div>
 
-            <button onClick={toggleFullscreen} className="p-2 text-slate-300 hover:text-white cursor-pointer">
+            <button
+              onClick={toggleFullscreen}
+              aria-label={isFullscreen ? 'Выйти из полноэкранного (F)' : 'Во весь экран (F)'}
+              title="Во весь экран (F)"
+              className="p-2 min-w-[40px] min-h-[40px] flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 rounded-lg cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold"
+            >
               {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
             </button>
           </div>
