@@ -6,6 +6,7 @@ import { logger } from './logger.service';
 import { ffmpegService } from './ffmpeg.service';
 import { roomHealthService } from './room-health.service';
 import { getJwtSecret } from '../middleware/auth.middleware';
+import { sanitizeMediaUrl } from '../controllers/media.controller';
 
 interface ConnectedUser {
   userId: string;
@@ -28,6 +29,46 @@ interface ConnectedUser {
   activity?: string;
 }
 
+// --- Этап 4: валидация входящих сокет-данных. Поведение честных не меняется:
+// лимиты заведомо выше живого использования (heartbeat 3с, seek-драги, чат).
+const MAX_POS_SEC = 24 * 3600; // отсекает NaN/Infinity/мусор; реальные фильмы короче
+const MAX_CHAT_LEN = 500;
+const MAX_NAME_LEN = 32;
+const MAX_EMOJI_LEN = 24; // ZWJ-последовательности сюда влезают
+const MAX_TITLE_LEN = 160;
+const MAX_URL_LEN = 2000;
+const MAX_BLOB_LEN = 500; // avatarUrl и прочий текст-мелочь
+
+/** Позиция в секундах или null (событие игнорим, в БД/эфир мусор не пишем). */
+function cleanPos(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > MAX_POS_SEC) return null;
+  return Math.round(n * 100) / 100;
+}
+
+/** Текст без управляющих символов + кап длины. Эмодзи и \n не трогаем. */
+function cleanText(v: unknown, max: number): string {
+  // Сравнение по кодам (числа, не эскейпы): оставляем только таб и \n,
+  // \r нормализуем в \n, остальное < 32 и DEL режем.
+  const src = String(v ?? '');
+  let out = '';
+  for (const ch of src) {
+    const c = ch.codePointAt(0) as number;
+    if (c === 10 || c === 9) { out += ch; continue; }
+    if (c === 13) { out += '\n'; continue; }
+    if (c < 32 || c === 127) continue;
+    out += ch;
+  }
+  return out.length > max ? out.slice(0, max) : out;
+}
+
+/** Имя с фолбэком. */
+function cleanName(v: unknown, fallback: string): string {
+  const s = cleanText(v, MAX_NAME_LEN).trim();
+  return s || fallback;
+}
+
 class SocketService {
   private io: Server | null = null;
   private users: Map<string, ConnectedUser> = new Map(); // socketId -> user
@@ -46,6 +87,28 @@ class SocketService {
   // roomId -> последние разосланные time_anchor. Нужны, чтобы отличить настоящую
   // локальную отмотку от штатной автокоррекции (клиент прыгнул ровно на якорь).
   private lastAnchorsByRoom: Map<string, { pos: number; ts: number }[]> = new Map();
+  // socketId -> event -> метки времени. Дропим флуд молча (без ответа — у старых
+  // клиентов нет хендлера ошибок, а честные лимиты не задевают: см. константы ниже).
+  private eventRateBySocket: Map<string, Map<string, number[]>> = new Map();
+
+  /** false если сокет превысил лимит (событие дропаем). Лимиты — см. вызовы. */
+  private checkRate(socketId: string, event: string, limit: number, windowMs: number): boolean {
+    let per = this.eventRateBySocket.get(socketId);
+    if (!per) {
+      per = new Map();
+      this.eventRateBySocket.set(socketId, per);
+    }
+    const now = Date.now();
+    let arr = per.get(event);
+    if (!arr) {
+      arr = [];
+      per.set(event, arr);
+    }
+    while (arr.length > 0 && now - arr[0] > windowMs) arr.shift();
+    if (arr.length >= limit) return false;
+    arr.push(now);
+    return true;
+  }
 
   public init(io: Server) {
     this.io = io;
@@ -55,6 +118,8 @@ class SocketService {
 
       // 1. Time Synchronization (NTP Protocol)
       socket.on('sync:ping', (data: { clientTimestamp: number }) => {
+        if (!data || typeof data !== 'object') return;
+        if (!this.checkRate(socket.id, 'sync:ping', 60, 10000)) return;
         socket.emit('sync:pong', {
           clientTimestamp: data.clientTimestamp,
           serverTimestamp: Date.now(),
@@ -68,7 +133,8 @@ class SocketService {
 
         let finalId = '';
         let finalName = 'Гость';
-        let finalAvatar: string | undefined = userData?.avatarUrl;
+        let finalAvatar: string | undefined =
+          typeof userData?.avatarUrl === 'string' ? cleanText(userData.avatarUrl, MAX_BLOB_LEN) || undefined : undefined;
         let verified = false;
 
         // A. Пробуем JWT: валидный токен = доказанная личность
@@ -104,7 +170,7 @@ class SocketService {
           } else {
             finalId = supplied || `guest:${socket.id.slice(0, 8)}`;
           }
-          finalName = String(userData?.username || 'Гость').slice(0, 32) || 'Гость';
+          finalName = cleanName(userData?.username, 'Гость');
         }
 
         const user: ConnectedUser = {
@@ -129,14 +195,15 @@ class SocketService {
       socket.on('user:activity', (data: { activity?: string; status?: string }) => {
         const user = this.users.get(socket.id);
         if (user) {
-          user.activity = data.activity;
-          if (data.status) user.status = data.status;
+          if (data.activity !== undefined) user.activity = cleanText(data.activity, 64);
+          if (data.status !== undefined) user.status = cleanText(data.status, 32);
           this.broadcastPresence(user.userId, user.status, user.activity);
         }
       });
 
       // 3. Room Join / Leave
       socket.on('room:join', (data: { roomId: string; userId: string; username: string; avatarUrl?: string; streamMode?: 'direct' | 'fmp4' }) => {
+        if (!data || typeof data !== 'object') return;
         const { roomId } = data;
         if (!roomId) return;
 
@@ -144,9 +211,10 @@ class SocketService {
         // а не из полей джоина — их можно подделать
         const connUser = this.users.get(socket.id);
         const userId = connUser?.userId || data.userId;
-        const username = connUser?.username || data.username;
-        const avatarUrl = connUser?.avatarUrl || data.avatarUrl;
-        const streamMode = data.streamMode;
+        const username = cleanName(connUser?.username || data.username, 'Гость');
+        const avatarRaw = connUser?.avatarUrl || data.avatarUrl;
+        const avatarUrl = typeof avatarRaw === 'string' ? cleanText(avatarRaw, MAX_BLOB_LEN) || undefined : undefined;
+        const streamMode = data.streamMode === 'fmp4' ? 'fmp4' : 'direct';
 
         socket.join(roomId);
 
@@ -261,13 +329,28 @@ class SocketService {
         shouldPlay?: boolean;
         userId?: string;
       }) => {
-        const { roomId, action, position, playbackRate = 1.0, shouldPlay } = data;
+        // Пустой emit без payload ронял процесс на деструктуризации (uncaught в хендлере)
+        if (!data || typeof data !== 'object') return;
+        let { roomId, action, position, playbackRate = 1.0, shouldPlay } = data;
         if (!roomId) return;
+        // Неизвестный action раньше всё равно писал фид и сбрасывал базлайны — дропаем
+        if (action !== 'PLAY' && action !== 'PAUSE' && action !== 'SEEK') return;
+        // Битая позиция (NaN/минус/гигабайты) отравляла livePosition всей комнате
+        const cleanActionPos = cleanPos(position);
+        if (cleanActionPos === null) {
+          logger.warn('ROOM_ACTION', `Room ${roomId} игнорирую ${action} с битой позицией`);
+          return;
+        }
+        position = cleanActionPos;
+        playbackRate = typeof playbackRate === 'number' && Number.isFinite(playbackRate)
+          ? Math.min(4, Math.max(0.25, playbackRate)) : 1.0;
+        // Живое использование: тапы + seek-драги (троттлинг клиента ~4/с) — 60/10с с запасом
+        if (!this.checkRate(socket.id, 'room:action', 60, 10000)) return;
 
         const now = Date.now();
         const user = this.users.get(socket.id);
         const member = this.roomMembers.get(roomId)?.get(socket.id);
-        const initiatedBy = user?.username || member?.username || 'Участник';
+        const initiatedBy = cleanName(user?.username || member?.username, 'Участник');
         const initiatedByUserId = user?.userId || member?.userId || data.userId || '';
 
         logger.info('ROOM_ACTION', `Room ${roomId} action: ${action} pos: ${position.toFixed(1)}s (by: ${initiatedBy})`);
@@ -370,6 +453,8 @@ class SocketService {
       socket.on('room:host_heartbeat', (data: { roomId: string; position: number }) => {
         if (!data?.roomId) return;
         const now = Date.now();
+        // Каденс живых — раз в 3с; лимит с огромным запасом, флуд режем
+        if (!this.checkRate(socket.id, 'room:host_heartbeat', 40, 10000)) return;
 
         // Короткое окно после seek, чтобы не откатывать свежий seek якорем от тормозящего клиента
         const lastSeek = this.lastSeekTimeByRoom.get(data.roomId) || 0;
@@ -380,8 +465,10 @@ class SocketService {
         const sender = this.users.get(socket.id);
         const senderMember = this.roomMembers.get(data.roomId)?.get(socket.id);
         const senderUserId = sender?.userId || senderMember?.userId || socket.id;
-        const senderName = sender?.username || senderMember?.username || 'Участник';
-        const pos = data.position || 0;
+        const senderName = cleanName(sender?.username || senderMember?.username, 'Участник');
+        const pos = cleanPos(data.position);
+        // Битый heartbeat игнорим целиком — иначе NaN/минус едет в детект откатов и якорь
+        if (pos === null) return;
 
         try {
           const cur = db.prepare('SELECT currentPosition, serverTimestamp, state, playbackRate FROM rooms WHERE id = ?').get(data.roomId) as any;
@@ -470,35 +557,39 @@ class SocketService {
       // 6. Force Sync All to Host Position
       socket.on('room:force_sync_all', (data: { roomId: string; position: number }) => {
         if (!data?.roomId) return;
+        const pos = cleanPos(data.position);
+        if (pos === null) return;
+        // Кнопка жмётся руками — 10/10с с запасом
+        if (!this.checkRate(socket.id, 'room:force_sync_all', 10, 10000)) return;
         const now = Date.now();
         const user = this.users.get(socket.id);
         const scheduledPlayAt = now + 200;
 
         try {
-          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(data.position, scheduledPlayAt, data.roomId);
+          db.prepare('UPDATE rooms SET currentPosition = ?, serverTimestamp = ? WHERE id = ?').run(pos, scheduledPlayAt, data.roomId);
         } catch {}
-        this.resetHeartbeatBaselines(data.roomId, data.position, now);
+        this.resetHeartbeatBaselines(data.roomId, pos, now);
         this.lastAcceptedAnchorByRoom.set(data.roomId, now);
 
         io.to(data.roomId).emit('room:force_sync_all', {
-          position: data.position,
+          position: pos,
           serverTimestamp: scheduledPlayAt,
-          initiatedBy: user?.username || 'Хост',
+          initiatedBy: cleanName(user?.username, 'Хост'),
         });
 
         io.to(data.roomId).emit('room:system_message', {
-          text: `👑 Хост ${user?.username || ''} синхронизировал воспроизведение для всех`,
+          text: `👑 Хост ${cleanName(user?.username, '')} синхронизировал воспроизведение для всех`,
           type: 'sync',
           timestamp: now,
         });
         this.emitActionFeed(data.roomId, {
           id: `feed-${now}-${Math.random().toString(36).slice(2, 7)}`,
           userId: user?.userId || '',
-          username: user?.username || 'Хост',
+          username: cleanName(user?.username, 'Хост'),
           avatarUrl: user?.avatarUrl,
           action: 'SYNC',
-          position: data.position,
-          text: `${user?.username || 'Хост'} синхронизировал всех на ${this.formatPos(data.position)}`,
+          position: pos,
+          text: `${cleanName(user?.username, 'Хост')} синхронизировал всех на ${this.formatPos(pos)}`,
           timestamp: now,
         });
       });
@@ -511,23 +602,40 @@ class SocketService {
         rttMs?: number; pingMs?: number; droppedFrames?: number; platform?: string; hwdec?: string;
       }) => {
         if (!data?.roomId) return;
+        // Каденс живых — 3с (+2с fastPoll) с клиента; лимит с запасом
+        if (!this.checkRate(socket.id, 'room:member_status', 40, 10000)) return;
         const members = this.roomMembers.get(data.roomId);
         if (members && members.has(socket.id)) {
           const m = members.get(socket.id)!;
           const wasBuffering = Boolean(m.isBuffering);
-          m.currentPosition = data.currentPosition || 0;
-          if (data.bufferedPosition !== undefined) m.bufferedPosition = data.bufferedPosition;
-          if (data.isBuffering !== undefined) m.isBuffering = data.isBuffering;
-          if (data.isPlaying !== undefined) m.isPlaying = data.isPlaying;
-          if (data.bufferedAheadSec !== undefined && Number.isFinite(data.bufferedAheadSec)) m.bufferedAheadSec = Math.max(0, data.bufferedAheadSec);
-          else if (data.bufferedPosition !== undefined) m.bufferedAheadSec = Math.max(0, (data.bufferedPosition || 0) - (data.currentPosition || 0));
-          if (data.stallCount !== undefined) m.stallCount = data.stallCount;
-          if (data.stallMs !== undefined) m.stallMs = data.stallMs;
-          if (data.rttMs !== undefined) { m.rttMs = data.rttMs; m.pingMs = data.rttMs; }
-          else if (data.pingMs !== undefined) { m.pingMs = data.pingMs; m.rttMs = data.pingMs; }
-          if (data.droppedFrames !== undefined) m.droppedFrames = data.droppedFrames;
-          if (data.platform) (m as RoomMember).platform = data.platform;
-          if (data.hwdec !== undefined) (m as RoomMember).hwdec = data.hwdec;
+          // Позиция — смысл события: битая — игнорим событие целиком
+          const curPos = cleanPos(data.currentPosition);
+          if (curPos === null) return;
+          m.currentPosition = curPos;
+          let buf: number | undefined;
+          if (data.bufferedPosition !== undefined) {
+            const b = cleanPos(data.bufferedPosition);
+            if (b !== null) {
+              m.bufferedPosition = b;
+              buf = b;
+            }
+          }
+          if (typeof data.isBuffering === 'boolean') m.isBuffering = data.isBuffering;
+          if (typeof data.isPlaying === 'boolean') m.isPlaying = data.isPlaying;
+          if (typeof data.bufferedAheadSec === 'number' && Number.isFinite(data.bufferedAheadSec)) {
+            m.bufferedAheadSec = Math.min(MAX_POS_SEC, Math.max(0, data.bufferedAheadSec));
+          } else if (buf !== undefined) {
+            m.bufferedAheadSec = Math.min(MAX_POS_SEC, Math.max(0, buf - curPos));
+          }
+          const finiteNonNeg = (v: unknown): v is number =>
+            typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000000000;
+          if (finiteNonNeg(data.stallCount)) m.stallCount = data.stallCount;
+          if (finiteNonNeg(data.stallMs)) m.stallMs = data.stallMs;
+          if (finiteNonNeg(data.rttMs)) { m.rttMs = data.rttMs; m.pingMs = data.rttMs; }
+          else if (finiteNonNeg(data.pingMs)) { m.pingMs = data.pingMs; m.rttMs = data.pingMs; }
+          if (finiteNonNeg(data.droppedFrames)) m.droppedFrames = data.droppedFrames;
+          if (typeof data.platform === 'string' && data.platform) (m as RoomMember).platform = cleanText(data.platform, 24);
+          if (typeof data.hwdec === 'string') (m as RoomMember).hwdec = cleanText(data.hwdec, 24);
           // isReady для обратной совместимости: готов = не буферизуется
           m.isReady = !m.isBuffering;
           if (m.bufferedAheadSec !== undefined && m.bufferedAheadSec >= 0) {
@@ -583,33 +691,42 @@ class SocketService {
 
       // 8. Chat Messages
       socket.on('room:chat_message', (data: { roomId: string; text: string; userId?: string; username?: string; avatarUrl?: string }) => {
-        if (!data?.roomId || !data?.text?.trim()) return;
+        if (!data?.roomId) return;
+        // Живой чат — единицы сообщений в минуту; 8/10с с запасом
+        if (!this.checkRate(socket.id, 'room:chat_message', 8, 10000)) return;
+        const text = cleanText(data.text, MAX_CHAT_LEN).trim();
+        if (!text) return;
 
         const user = this.users.get(socket.id);
         const senderUserId = user?.userId || data.userId || 'guest';
-        const senderUsername = user?.username || data.username || 'Пользователь';
-        const senderAvatar = user?.avatarUrl || data.avatarUrl;
+        const senderUsername = cleanName(user?.username || data.username, 'Пользователь');
+        const rawAvatar = user?.avatarUrl || data.avatarUrl;
+        const senderAvatar = typeof rawAvatar === 'string' ? cleanText(rawAvatar, MAX_BLOB_LEN) || undefined : undefined;
 
         io.to(data.roomId).emit('room:chat_message', {
           id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           userId: senderUserId,
           username: senderUsername,
           avatarUrl: senderAvatar,
-          text: data.text.trim(),
+          text,
           timestamp: Date.now(),
         });
       });
 
       // 9. Floating Emoji Reactions
       socket.on('room:reaction', (data: { roomId: string; emoji: string; username?: string }) => {
-        if (!data?.roomId || !data?.emoji) return;
+        if (!data?.roomId) return;
+        // Бурные реакции — клики подряд; 20/10с хватает, флуд режем
+        if (!this.checkRate(socket.id, 'room:reaction', 20, 10000)) return;
+        const emoji = cleanText(data.emoji, MAX_EMOJI_LEN);
+        if (!emoji) return;
 
         const user = this.users.get(socket.id);
-        const senderUsername = user?.username || data.username || 'Участник';
+        const senderUsername = cleanName(user?.username || data.username, 'Участник');
 
         io.to(data.roomId).emit('room:reaction', {
           id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          emoji: data.emoji,
+          emoji,
           username: senderUsername,
           timestamp: Date.now(),
         });
@@ -624,6 +741,7 @@ class SocketService {
         mediaTitle: string;
         posterPath?: string;
       }) => {
+        if (!data || typeof data !== 'object') return;
         const sender = this.users.get(socket.id);
         if (!sender || !data.targetUserId) return;
 
@@ -631,13 +749,13 @@ class SocketService {
         if (targetSockets) {
           for (const targetSocketId of targetSockets) {
             io.to(targetSocketId).emit('notification:room_invite', {
-              senderUsername: sender.username,
-              senderAvatar: sender.avatarUrl,
-              roomId: data.roomId,
-              roomCode: data.roomCode,
-              roomTitle: data.roomTitle,
-              mediaTitle: data.mediaTitle,
-              posterPath: data.posterPath,
+              senderUsername: cleanName(sender.username, 'Участник'),
+              senderAvatar: typeof sender.avatarUrl === 'string' ? cleanText(sender.avatarUrl, MAX_BLOB_LEN) : sender.avatarUrl,
+              roomId: cleanText(data.roomId, 64),
+              roomCode: cleanText(data.roomCode, 32),
+              roomTitle: cleanText(data.roomTitle, MAX_TITLE_LEN),
+              mediaTitle: cleanText(data.mediaTitle, MAX_TITLE_LEN),
+              posterPath: sanitizeMediaUrl(data.posterPath),
               timestamp: Date.now(),
             });
           }
@@ -719,6 +837,7 @@ class SocketService {
 
       // 11. Disconnect Cleanup
       socket.on('disconnect', () => {
+        this.eventRateBySocket.delete(socket.id);
         for (const [roomId, roomMap] of this.roomMembers.entries()) {
           if (roomMap.has(socket.id)) {
             this.handleLeaveRoom(socket, roomId);
