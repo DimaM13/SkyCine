@@ -208,14 +208,36 @@ export class StreamController {
       }
 
       if (range) {
-        const parts = range.replace(/bytes=/, '').split('-');
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-        if (isNaN(start) || start >= fileSize || end >= fileSize || start > end) {
+        // RFC 7233: "bytes=start-end", "bytes=start-" и суффикс "bytes=-N".
+        // Мусор (не-цифры, отрицательные, start за файлом) — 416 как раньше.
+        // Конец за файлом — клампим (строго по RFC он satisfiable); "bytes=0-abc"
+        // раньше давал кривой Content-Length: NaN, теперь 416.
+        const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+        if (!m) {
           res.setHeader('Content-Range', `bytes */${fileSize}`);
           res.status(416).end();
           return;
+        }
+        let start: number;
+        let end: number;
+        if (m[1] === '') {
+          const suffix = m[2] === '' ? NaN : parseInt(m[2], 10);
+          if (!Number.isInteger(suffix) || suffix <= 0) {
+            res.setHeader('Content-Range', `bytes */${fileSize}`);
+            res.status(416).end();
+            return;
+          }
+          start = Math.max(0, fileSize - suffix);
+          end = fileSize - 1;
+        } else {
+          start = parseInt(m[1], 10);
+          end = m[2] !== '' ? parseInt(m[2], 10) : fileSize - 1;
+          if (start >= fileSize || end < start) {
+            res.setHeader('Content-Range', `bytes */${fileSize}`);
+            res.status(416).end();
+            return;
+          }
+          if (end >= fileSize) end = fileSize - 1;
         }
 
         const chunksize = (end - start) + 1;
@@ -278,8 +300,11 @@ export class StreamController {
 
       const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount, tvClient);
 
-      // Start / Prewarm continuous session
-      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch(() => {});
+      // Start / Prewarm continuous session (ошибку больше не глотаем молча —
+      // иначе клиент получает sessionId на мёртвую сессию и уходит в цикл 404)
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch((e: any) => {
+        logger.warn('HLS', `prewarm failed [${sessionId}]: ${e?.message || e}`);
+      });
 
       res.json({ sessionId, playlistUrl: `/api/stream/hls/session/${sessionId}/playlist.m3u8` });
     } catch (err: any) {
@@ -364,8 +389,10 @@ export class StreamController {
 
       const sessionId = buildHlsSessionId(media.id, quality, audioIndex, isApple, roomId, userId, mount, tvClient);
 
-      // Start/prewarm session
-      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch(() => {});
+      // Start/prewarm session (см. выше — ошибку логируем, не глотаем)
+      ffmpegService.startContinuousHlsSession(media, quality, audioIndex, startTime, isApple, sessionId, userId, tvClient).catch((e: any) => {
+        logger.warn('HLS', `prewarm failed [${sessionId}]: ${e?.message || e}`);
+      });
 
       // ТВ-прошивки (AVPlay) отвергают голый media-плейлист как
       // NOT_SUPPORTED_FILE — им нужен multivariant-мастер с BANDWIDTH/CODECS.

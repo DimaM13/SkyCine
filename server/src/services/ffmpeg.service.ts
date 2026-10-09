@@ -67,11 +67,17 @@ export function buildHlsSessionId(
 ): string {
   const deviceSuffix = isApple ? 'apple' : 'pc';
   const tvSuffix = tvClient === 'tizen' ? '_tvtizen' : tvClient === 'webos' ? '_tvwebos' : '';
-  const roomSuffix = roomId ? `_r${roomId}` : '';
-  const userSuffix = (roomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
+  const cleanRoomId = String(roomId || '').replace(/[^a-zA-Z0-9-]/g, '').substring(0, 64);
+  const roomSuffix = cleanRoomId ? `_r${cleanRoomId}` : '';
+  const userSuffix = (cleanRoomId && userId) ? `_u${userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8)}` : '';
   const cleanMount = (mount || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
   const mountSuffix = cleanMount ? `_m${cleanMount}` : '';
-  return `${mediaId}_q${quality}_a${audioIndex}_${deviceSuffix}${tvSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
+  // mediaId/quality идут в путь папки сессии: чистим до безопасного алфавита.
+  // Честные значения (uuid, original/transcode/1080p/720p/480p) не меняются.
+  const cleanMediaId = String(mediaId || '').replace(/[^a-zA-Z0-9-]/g, '').substring(0, 64);
+  const cleanQuality = String(quality || 'original').replace(/[^a-zA-Z0-9]/g, '').substring(0, 16) || 'original';
+  const aIdx = Number.isInteger(audioIndex) ? (audioIndex as number) : 0;
+  return `${cleanMediaId}_q${cleanQuality}_a${aIdx}_${deviceSuffix}${tvSuffix}${roomSuffix}${userSuffix}${mountSuffix}`;
 }
 
 // GOP-профиль файла для copy-нарезки: длина сегмента + максимальный интервал
@@ -579,16 +585,31 @@ class FFmpegService {
 
   private testEncoder(encoderName: string): Promise<boolean> {
     return new Promise((resolve) => {
-      const proc = spawn('ffmpeg', ['-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.1', '-c:v', encoderName, '-f', 'null', '-']);
-      FFmpegService.registerSpawnedPid(proc.pid);
-      proc.on('close', (code) => {
-        FFmpegService.unregisterSpawnedPid(proc.pid);
-        resolve(code === 0);
-      });
-      proc.on('error', () => {
-        FFmpegService.unregisterSpawnedPid(proc.pid);
-        resolve(false);
-      });
+      let proc: import('child_process').ChildProcess | null = null;
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try {
+          if (proc?.pid) FFmpegService.unregisterSpawnedPid(proc.pid);
+        } catch {}
+        resolve(ok);
+      };
+      // Без таймаута зависший тестовый ffmpeg подвешивал первый старт сессии навсегда
+      const timer = setTimeout(() => {
+        try { proc?.kill('SIGKILL'); } catch {}
+        finish(false);
+      }, 15000);
+      try {
+        proc = spawn('ffmpeg', ['-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.1', '-c:v', encoderName, '-f', 'null', '-']);
+        FFmpegService.registerSpawnedPid(proc.pid);
+      } catch {
+        finish(false);
+        return;
+      }
+      proc.on('close', (code) => finish(code === 0));
+      proc.on('error', () => finish(false));
     });
   }
 
@@ -608,12 +629,9 @@ class FFmpegService {
     const deviceSuffix = isApple ? 'apple' : 'pc';
     const sessionId = sessionIdOverride || `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
 
-    // 0. Смена качества (original <-> transcode, ручная или авто-фолбэк) даёт ДРУГОЙ
-    // sessionId — старая сессия того же плеера (тот же mount) сама не умрёт и будет
-    // висеть жирным грузом до idle-таймаута. Убиваем такие stale-варианты ЖЁСТКО
-    // (процесс + папка + проверка) ДО старта новой сессии.
-    await this.killStaleQualityVariants(media.id, sessionId);
-
+    // 0. Проверяем in-flight ДО stale-kill: N конкурентных стартов раньше каждый
+    // сначала резал stale-варианты, а потом вставал в один промис — лишние
+    // retire/пересоздания и гонка retire-vs-create. Теперь лишние просто ждут.
     // 1. Check if session creation is already in flight
     const inFlight = this.sessionCreationPromises.get(sessionId);
     if (inFlight) {
@@ -621,13 +639,23 @@ class FFmpegService {
       return inFlight;
     }
 
+    // 1b. Смена качества (original <-> transcode, ручная или авто-фолбэк) даёт ДРУГОЙ
+    // sessionId — старая сессия того же плеера (тот же mount) сама не умрёт и будет
+    // висеть жирным грузом до idle-таймаута. Убиваем такие stale-варианты ЖЁСТКО
+    // (процесс + папка + проверка) ДО старта новой сессии.
+    await this.killStaleQualityVariants(media.id, sessionId);
+
     // 2. Check if an existing session covers this position.
     // Сессия с АВАРИЙНО умершим процессом (не EOF с кодом 0 — такие досчитали файл и раздают
     // сегменты с диска) никогда не переиспользуется — пересоздаём.
     let existing = this.continuousSessions.get(sessionId);
     if (existing && this.isProcessCrashed(existing)) {
-      logger.info('HLS', `Dead session object [${sessionId}] found (process crashed), dropping and recreating`);
+      logger.info('HLS', `Dead session object [${sessionId}] found (process crashed), retiring fully and recreating`);
+      // Полная зачистка (процесс/watchers/папка), а не голый delete из карты —
+      // иначе краши копят мусор на RAM-диске. retire асинхронен: карту чистим
+      // сразу для консистентности, повторный delete внутри retire — no-op.
       this.continuousSessions.delete(sessionId);
+      this.retireSession(sessionId, existing).catch(() => {});
       existing = undefined;
     }
     if (existing && existing.process && !existing.process.killed) {
@@ -725,10 +753,21 @@ class FFmpegService {
         kills.push(this.retireSession(sId, session));
       }
       await Promise.all(kills);
-    } catch {}
+    } catch (e: any) {
+      logger.warn('HLS', `killStaleQualityVariants failed for ${mediaId}: ${e?.message || e}`);
+    }
   }
 
+  // Дублирующийся retire одной сессии (beacon + sweeper + socket-таймер) — no-op:
+  // без гарда конкурентные retire дважды терминируют процесс и дергают rm папки.
+  private retiringSessions = new Set<string>();
+
   private async retireSession(sessionId: string, session: ContinuousHlsSession): Promise<void> {
+    if (this.retiringSessions.has(sessionId)) {
+      logger.debug('HLS', `retire ${sessionId} уже идёт — пропускаем дубль`);
+      return;
+    }
+    this.retiringSessions.add(sessionId);
     try {
       this.stopSegmentWatcher(session);
       if (session.isSuspended) {
@@ -757,7 +796,11 @@ class FFmpegService {
           logger.error('HLS', `⚠️ Session dir NOT fully deleted: ${dirToDelete} (${(leftover / 1048576).toFixed(1)}MB left, likely locked handles)`);
         }
       } catch {}
-    } catch {}
+    } catch {
+      // Ошибки retire гасим как раньше (тихий тракт), но гард снимаем всегда
+    } finally {
+      this.retiringSessions.delete(sessionId);
+    }
   }
 
   public async warmupFile(filePath: string): Promise<void> {
@@ -1220,10 +1263,11 @@ class FFmpegService {
     // 2. If session exists, deliver segment or resume
     if (session) {
       // Процесс аварийно умер — не ждём 6с впустую, сразу 404: плеер перечитает master.m3u8
-      // и сессия пересоздастся. Чистый EOF (код 0) идёт обычным путём — сегменты на диске.
+      // и сессия пересоздастся. Заодно полная зачистка (см. выше), не голый delete.
       if (!isInit && this.isProcessCrashed(session)) {
-        logger.warn('HLS', `Session process crashed [${sessionId}], dropping entry so next request recreates it`);
+        logger.warn('HLS', `Session process crashed [${sessionId}], retiring fully so next request recreates it`);
         this.continuousSessions.delete(sessionId);
+        this.retireSession(sessionId, session).catch(() => {});
         return null;
       }
       // Хвостовой фантом (остаточный риск): запрошен ПОСЛЕДНИЙ сегмент плейлиста, а ffmpeg уже
@@ -1470,18 +1514,40 @@ class FFmpegService {
         '-'
       ];
 
-      const proc = spawn('ffmpeg', args);
-      FFmpegService.registerSpawnedPid(proc.pid);
+      let proc: import('child_process').ChildProcess | null = null;
+      let done = false;
+      const finish = (fn: () => void) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try {
+          if (proc?.pid) FFmpegService.unregisterSpawnedPid(proc.pid);
+        } catch {}
+        fn();
+      };
+      // Уход клиента раньше не останавливал экстракцию (молчала вхолостую),
+      // висящий файл — навсегда. Плюс кап вывода от раздутых субтитров.
+      const timer = setTimeout(() => {
+        try { proc?.kill('SIGKILL'); } catch {}
+        finish(() => reject(new Error('Subtitle extraction timed out')));
+      }, 30000);
+      try {
+        proc = spawn('ffmpeg', args);
+        FFmpegService.registerSpawnedPid(proc.pid);
+      } catch (e) {
+        finish(() => reject(e as Error));
+        return;
+      }
       let output = '';
-      proc.stdout.on('data', (chunk) => { output += chunk.toString(); });
+      proc.stdout?.on('data', (chunk) => {
+        if (output.length < 2 * 1024 * 1024) output += chunk.toString();
+      });
       proc.on('close', (code) => {
-        FFmpegService.unregisterSpawnedPid(proc.pid);
-        if (code === 0) resolve(output);
-        else reject(new Error(`Failed to extract subtitle: exit code ${code}`));
+        if (code === 0) finish(() => resolve(output));
+        else finish(() => reject(new Error(`Failed to extract subtitle: exit code ${code}`)));
       });
       proc.on('error', (err) => {
-        FFmpegService.unregisterSpawnedPid(proc.pid);
-        reject(err);
+        finish(() => reject(err));
       });
     });
   }
@@ -1497,7 +1563,7 @@ class FFmpegService {
       for (const [sessionId, session] of Array.from(this.continuousSessions.entries())) {
         if (now - session.lastAccess > INACTIVE_SESSION_TIMEOUT_MS) {
           logger.info('HLS', `⏱️ Inactive session timeout (>10m) for ${sessionId}, terminating process...`);
-          this.retireSession(sessionId, session);
+          await this.retireSession(sessionId, session);
         }
       }
 
