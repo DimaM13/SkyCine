@@ -407,6 +407,13 @@ export class StreamController {
         return;
       }
 
+      // Токен уже проверен middleware; сверяем права как у мастера (без смены поведения честных)
+      const plUser = req.user as { id: string; role: string } | undefined;
+      if (!plUser || !permissionService.hasMediaOrRoomAccess(plUser.id, plUser.role, media.id)) {
+        res.status(403).send('Forbidden');
+        return;
+      }
+
       const qualityMatch = sessionId.match(/_q([a-zA-Z0-9]+)_/);
       const quality = qualityMatch ? qualityMatch[1] : 'original';
       const isApple = sessionId.includes('_apple');
@@ -433,6 +440,12 @@ export class StreamController {
       const media = db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaId) as MediaItem | undefined;
       if (!media) {
         res.status(404).send('Media not found');
+        return;
+      }
+
+      const segUser = req.user as { id: string; role: string } | undefined;
+      if (!segUser || !permissionService.hasMediaOrRoomAccess(segUser.id, segUser.role, media.id)) {
+        res.status(403).send('Forbidden');
         return;
       }
 
@@ -478,6 +491,12 @@ export class StreamController {
       const media = db.prepare('SELECT filePath FROM media_items WHERE id = ?').get(id) as { filePath: string } | undefined;
       if (!media || !fs.existsSync(media.filePath)) {
         res.status(404).send('Media not found');
+        return;
+      }
+
+      const subUser = req.user as { id: string; role: string } | undefined;
+      if (!subUser || !permissionService.hasMediaOrRoomAccess(subUser.id, subUser.role, id as string)) {
+        res.status(403).send('Forbidden');
         return;
       }
 

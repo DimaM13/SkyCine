@@ -38,6 +38,7 @@ router.post('/libraries/add-show-folder', requireAdmin, LibraryController.addSho
 router.delete('/libraries/:libraryId', requireAdmin, LibraryController.deleteLibrary);
 router.post('/libraries/:libraryId/scan', requireAdmin, LibraryController.scanLibrary);
 router.post('/libraries/scan-all', requireAdmin, LibraryController.scanAll);
+router.get('/libraries/:libraryId/items', authenticateToken, LibraryController.getLibraryItems);
 router.get('/libraries/scan-status', authenticateToken, LibraryController.getScanStatus);
 
 // --- Media Routes ---
@@ -46,6 +47,7 @@ router.get('/media/shows', authenticateToken, MediaController.getShows);
 router.get('/media/shows/:showTitle/episodes', authenticateToken, MediaController.getShowEpisodes);
 router.get('/media/item/:id', authenticateToken, MediaController.getMediaItem);
 router.get('/media/item/:id/thumbnail', MediaController.getThumbnail);
+router.get('/media/search', authenticateToken, MediaController.searchMedia);
 router.get('/media/continue-watching', authenticateToken, MediaController.getContinueWatching);
 router.post('/media/progress', authenticateToken, MediaController.updateProgress);
 router.get('/media/shows/match-search', requireAdmin, MediaController.searchShowMatch);
@@ -67,11 +69,14 @@ router.get('/stream/:id/remux', authenticateToken, StreamController.remuxStream)
 router.get('/stream/:id/master.m3u8', authenticateToken, StreamController.getHlsMaster);
 router.get('/stream/hls/session/start/:id', authenticateToken, StreamController.startHlsSession);
 router.post('/stream/hls/session/end', optionalAuth, StreamController.endHlsSession);
-router.get('/stream/hls/session/:sessionId/playlist.m3u8', StreamController.getHlsSessionPlaylist);
-router.get('/stream/hls/session/:sessionId/:segmentName', StreamController.getHlsSessionSegment);
-router.get('/stream/hls/:sessionId/:segmentName', StreamController.getHlsSessionSegment);
-router.get('/stream/:mediaId/:segmentName', StreamController.getHlsSessionSegment);
-router.get('/stream/:id/subtitle/:trackIndex', StreamController.getSubtitle);
+// Сегменты/плейлисты/субтитры: токен вшивают серверные генераторы плейлистов
+// (?token= в URL init/сегментов) и <track src> клиентов — нативные плееры
+// (hls.js, Safari, AVPlay) его присылают, ничего на клиентах менять не надо.
+router.get('/stream/hls/session/:sessionId/playlist.m3u8', authenticateToken, StreamController.getHlsSessionPlaylist);
+router.get('/stream/hls/session/:sessionId/:segmentName', authenticateToken, StreamController.getHlsSessionSegment);
+router.get('/stream/hls/:sessionId/:segmentName', authenticateToken, StreamController.getHlsSessionSegment);
+router.get('/stream/:mediaId/:segmentName', authenticateToken, StreamController.getHlsSessionSegment);
+router.get('/stream/:id/subtitle/:trackIndex', authenticateToken, StreamController.getSubtitle);
 
 // --- Rooms (Watch Together) Routes ---
 router.get('/rooms', authenticateToken, RoomsController.getRooms);

@@ -263,6 +263,38 @@ export class MediaController {
     }
   }
 
+  // Поиск по библиотеке (нужен TV-клиентам: GET /media/search?q=).
+  // LIKE экранируем (иначе %/_ из ввода — wildcard-инъекция), фильтр прав как везде.
+  public static async searchMedia(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const q = (req.query.q as string || '').trim().slice(0, 80);
+      const userId = req.user?.id || '';
+      const userRole = req.user?.role || 'USER';
+      if (!q) {
+        res.json({ items: [] });
+        return;
+      }
+      const filter = permissionService.getMediaFilter(userId, userRole, 'm');
+      const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      const items = db.prepare(`
+        SELECT m.*, l.name as libraryName,
+               wh.progressSeconds as userProgress,
+               wh.isCompleted as userCompleted
+        FROM media_items m
+        JOIN libraries l ON m.libraryId = l.id
+        LEFT JOIN watch_history wh ON (wh.mediaItemId = m.id AND wh.userId = ?)
+        WHERE ${filter.sql}
+          AND (m.title LIKE ? ESCAPE '\\' OR m.originalTitle LIKE ? ESCAPE '\\' OR m.showTitle LIKE ? ESCAPE '\\')
+        ORDER BY m.title ASC
+        LIMIT 50
+      `).all(userId, ...filter.params, like, like, like);
+      res.json({ items });
+    } catch (err) {
+      logger.error('MEDIA_ERR', 'API Error:', err);
+      res.status(500).json({ error: 'Ошибка поиска по медиатеке' });
+    }
+  }
+
   public static async updateProgress(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = req.user!.id;
@@ -455,6 +487,12 @@ export class MediaController {
   public static async getThumbnail(req: Request, res: Response): Promise<void> {
     try {
       const id = String(req.params.id || '');
+      // Маршрут публичный (прошивки TV тянут превью без токена) — режем traversal
+      // на входе: id медиа это uuid (hex + дефисы), всё остальное не обслуживаем.
+      if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) {
+        res.status(400).send('Некорректный id');
+        return;
+      }
 
       const thumbDir = path.resolve(__dirname, '../../data/thumbnails');
       const thumbFile = path.join(thumbDir, `${id}.jpg`);

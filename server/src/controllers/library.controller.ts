@@ -1,8 +1,10 @@
 import { Response } from 'express';
+import { logger } from '../services/logger.service';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
+import { permissionService } from '../services/permission.service';
 import { scannerService } from '../services/scanner.service';
 
 export class LibraryController {
@@ -66,6 +68,49 @@ export class LibraryController {
       res.json({ libraries });
     } catch (err) {
       res.status(500).json({ error: 'Ошибка получения библиотек' });
+    }
+  }
+
+  // Содержимое библиотеки (нужно TV-клиентам: GET /libraries/:libraryId/items).
+  // Форма item как в getMovies, фильтр прав тот же.
+  public static async getLibraryItems(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { libraryId } = req.params;
+      const userId = req.user?.id || '';
+      const userRole = req.user?.role || 'USER';
+
+      const library = db.prepare('SELECT id FROM libraries WHERE id = ?').get(libraryId) as any;
+      if (!library) {
+        res.status(404).json({ error: 'Библиотека не найдена' });
+        return;
+      }
+
+      const filter = permissionService.getMediaFilter(userId, userRole, 'm');
+      const items = db.prepare(`
+        SELECT m.*, l.name as libraryName,
+               wh.progressSeconds as userProgress,
+               wh.isCompleted as userCompleted
+        FROM media_items m
+        JOIN libraries l ON m.libraryId = l.id
+        LEFT JOIN watch_history wh ON (wh.mediaItemId = m.id AND wh.userId = ?)
+        WHERE m.libraryId = ? AND ${filter.sql}
+        ORDER BY m.title ASC
+      `).all(userId, libraryId, ...filter.params);
+
+      const parsed = items.map((m: any) => {
+        let tracks = [];
+        if (typeof m.tracks === 'string') {
+          try { tracks = JSON.parse(m.tracks); } catch {}
+        } else if (Array.isArray(m.tracks)) {
+          tracks = m.tracks;
+        }
+        return { ...m, tracks };
+      });
+
+      res.json({ items: parsed });
+    } catch (err) {
+      logger.error('LIBRARY_ERR', 'API Error:', err);
+      res.status(500).json({ error: 'Ошибка получения содержимого библиотеки' });
     }
   }
 

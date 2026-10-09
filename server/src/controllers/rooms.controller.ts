@@ -84,7 +84,9 @@ export class RoomsController {
   public static async createRoom(req: AuthRequest, res: Response): Promise<void> {
     try {
       const hostUserId = req.user!.id;
-      const { mediaItemId, youtubeUrl, title, isPrivate, password, sourceType } = req.body;
+      // TV-клиенты шлют mediaId вместо mediaItemId — принимаем оба (только добавление, ничего не ломаем)
+      const { mediaItemId: bodyMediaItemId, mediaId: bodyMediaId, youtubeUrl, title, isPrivate, password, sourceType } = req.body;
+      const mediaItemId = bodyMediaItemId || bodyMediaId;
 
       const isYouTube = sourceType === 'YOUTUBE' || (youtubeUrl && !mediaItemId);
 
