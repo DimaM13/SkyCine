@@ -407,6 +407,8 @@ class ScannerService {
     const existing = db.prepare('SELECT id FROM media_items WHERE filePath = ?').get(filePath) as { id: string } | undefined;
     const mediaId = existing?.id || uuidv4();
 
+    // Атомарно: медиа + треки одним махом, иначе падение между оставляет медиа без дорожек
+    const writeEpisodeTx = db.transaction(() => {
     if (existing) {
       db.prepare(`
         UPDATE media_items SET
@@ -463,18 +465,39 @@ class ScannerService {
         track.isDefault ? 1 : 0
       );
     }
+    });
+    writeEpisodeTx();
   }
 
-  private collectFiles(dir: string): string[] {
+  private collectFiles(dir: string, depth: number = 0, seen?: Set<string>): string[] {
     let results: string[] = [];
+    // Петли симлинков (A->B->A) давали бесконечную рекурсию, бездонная вложенность —
+    // зависший скан. Режем: кап глубины + канонические пути + dev:ino.
+    if (depth > 25) return results;
+    if (!seen) seen = new Set<string>();
     try {
+      let key: string;
+      try {
+        key = fs.realpathSync(dir);
+      } catch {
+        return results;
+      }
+      try {
+        const st = fs.statSync(dir) as any;
+        if (st && typeof st.dev === 'number' && typeof st.ino === 'number') key += `#${st.dev}:${st.ino}`;
+      } catch {
+        return results;
+      }
+      if (seen.has(key)) return results;
+      seen.add(key);
+
       const list = fs.readdirSync(dir);
       for (const file of list) {
         const fullPath = path.join(dir, file);
         try {
           const stat = fs.statSync(fullPath);
           if (stat && stat.isDirectory()) {
-            results = results.concat(this.collectFiles(fullPath));
+            results = results.concat(this.collectFiles(fullPath, depth + 1, seen));
           } else {
             const ext = path.extname(file).toLowerCase();
             if (VIDEO_EXTENSIONS.has(ext)) {
@@ -542,6 +565,8 @@ class ScannerService {
 
     const mediaId = existing?.id || uuidv4();
 
+    // Атомарно (см. эпизоды выше): медиа + треки одним махом
+    const writeMediaTx = db.transaction(() => {
     if (existing) {
       db.prepare(`
         UPDATE media_items SET
@@ -600,6 +625,8 @@ class ScannerService {
         track.isDefault ? 1 : 0
       );
     }
+    });
+    writeMediaTx();
   }
 
   private probeFile(filePath: string): Promise<{
@@ -610,18 +637,27 @@ class ScannerService {
     tracks: any[];
     rawStreams: any[];
   }> {
-    return new Promise((resolve) => {
+    type ProbeResult = {
+      durationSeconds: number;
+      resolution: string;
+      videoCodec: string;
+      audioCodec: string;
+      tracks: any[];
+      rawStreams: any[];
+    };
+    const fallback: ProbeResult = {
+      durationSeconds: 0,
+      resolution: '1080p',
+      videoCodec: 'unknown',
+      audioCodec: 'unknown',
+      tracks: [],
+      rawStreams: [],
+    };
+    const probe: Promise<ProbeResult> = new Promise((resolve) => {
       ffmpeg.ffprobe(filePath, (err, metadata) => {
         if (err || !metadata) {
           logger.error('SCANNER', `[PROBE] Failed to probe "${filePath}": ${err?.message || 'No metadata returned'}`);
-          return resolve({
-            durationSeconds: 0,
-            resolution: '1080p',
-            videoCodec: 'unknown',
-            audioCodec: 'unknown',
-            tracks: [],
-            rawStreams: [],
-          });
+          return resolve(fallback);
         }
 
         const format = metadata.format || {};
@@ -714,6 +750,13 @@ class ScannerService {
         });
       });
     });
+    // Висящий ffprobe (битый файл/FIFO) раньше кирпичил скан навсегда:
+    // через 30с берём fallback и идём дальше (дочь-процесс прибьёт сама ОС/ffmpeg).
+    const probeTimeout: Promise<ProbeResult> = new Promise((resolve) => setTimeout(() => {
+      logger.error('SCANNER', `[PROBE] Timeout 30s on "${filePath}" — беру fallback`);
+      resolve(fallback);
+    }, 30000));
+    return Promise.race([probe, probeTimeout]);
   }
 }
 

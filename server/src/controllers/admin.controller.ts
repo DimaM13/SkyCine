@@ -39,15 +39,40 @@ export class AdminController {
     try {
       const updates = req.body; // e.g. { tmdbApiKey: '...', transcodeHardware: 'nvenc' }
 
+      // Разрешённые ключи (см. ServerSettings): всё остальное игнорим, иначе
+      // опечатка затирает/мусорит (раньше писался любой k). Значения валидируем.
+      const stringCap = (max: number) => (v: string) => v.slice(0, max);
+      const RULES: Record<string, (v: string) => string | null> = {
+        serverName: stringCap(80),
+        tmdbApiKey: stringCap(128),
+        transcodeHardware: (v) => (['auto', 'nvenc', 'qsv', 'amf', 'vaapi', 'cpu'].includes(v) ? v : null),
+        maxTranscodeBitrate: (v) => {
+          const n = parseInt(v, 10);
+          return Number.isInteger(n) && n >= 500 && n <= 100000 ? String(n) : null;
+        },
+        transcodeTempDir: stringCap(260),
+        allowPublicRegistration: (v) => (v === 'true' ? 'true' : v === 'false' ? 'false' : null),
+      };
+
       const updateStmt = db.prepare(`
         INSERT INTO server_settings (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `);
 
+      const { logger } = await import('../services/logger.service');
       for (const [k, v] of Object.entries(updates)) {
-        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-          updateStmt.run(k, v.toString());
+        const rule = RULES[k];
+        if (!rule) {
+          logger.warn('ADMIN', `updateSettings: неизвестный ключ ${k} — игнорирую`);
+          continue;
         }
+        if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') continue;
+        const norm = rule(String(v));
+        if (norm === null) {
+          logger.warn('ADMIN', `updateSettings: невалидное значение ${k} — игнорирую`);
+          continue;
+        }
+        updateStmt.run(k, norm);
       }
 
       res.json({ message: 'Настройки сервера успешно сохранены' });

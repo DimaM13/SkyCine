@@ -252,8 +252,11 @@ export function initDatabase() {
   // станет админом — см. AuthController.register; открыть можно в настройках).
   // Существующие базы не трогаем (INSERT OR IGNORE ниже по файлу).
   insertSetting.run('allowPublicRegistration', 'false');
-  // RAM disk: always force transcodeTempDir to R:\Temp for HLS chunk storage
-  db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('transcodeTempDir', 'R:\\Temp');
+  // RAM disk для HLS-чанков: дефолт только если ключа нет — выбор админа
+  // больше не затираем при каждом старте (раньше REPLACE сносил настройку).
+  // Дефолт по ОС, чтобы свежие Linux-установки не получали битый R:\Temp.
+  const defaultTempDir = process.platform === 'win32' ? 'R:\\Temp' : '/tmp/skycine';
+  db.prepare('INSERT OR IGNORE INTO server_settings (key, value) VALUES (?, ?)').run('transcodeTempDir', defaultTempDir);
 
   // Ensure transcode temp directory exists
   const tempDir = path.resolve(dataDir, 'transcodes');
