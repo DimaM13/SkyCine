@@ -1,12 +1,24 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { db } from '../config/db';
 import { User } from '../types';
 
+// Одноразовый секрет на процесс — только если секрет не настроен через env/.env.
+// ensureJwtSecret() в index.ts обычно уже всё настроил до первого вызова.
+// Публичного дефолта больше нет: сковать токены по исходникам из git нельзя.
+let ephemeralSecret: string | null = null;
+
 export function getJwtSecret(): string {
   // Ленивое чтение env: секрет подсовывается при старте (см. ensureJwtSecret
   // в index.ts) уже ПОСЛЕ загрузки модулей — константа на это опоздала бы.
-  return process.env.JWT_SECRET || 'myplex_super_secret_jwt_key_2026_cinema';
+  const cur = (process.env.JWT_SECRET || '').trim();
+  if (cur.length >= 32) return cur;
+  if (!ephemeralSecret) {
+    ephemeralSecret = crypto.randomBytes(48).toString('hex');
+    console.warn('[SECURITY] JWT_SECRET не настроен — использую временный секрет на процесс. Все сессии слетят при рестарте. Запустите сервер через src/index.ts чтобы сохранить постоянный секрет в .env.');
+  }
+  return ephemeralSecret;
 }
 
 export interface AuthRequest extends Request {
