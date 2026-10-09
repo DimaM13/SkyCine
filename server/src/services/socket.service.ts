@@ -7,6 +7,7 @@ import { ffmpegService } from './ffmpeg.service';
 import { roomHealthService } from './room-health.service';
 import { getJwtSecret } from '../middleware/auth.middleware';
 import { sanitizeMediaUrl } from '../controllers/media.controller';
+import { verifyRoomPassword, stripRoomSecret } from './room-password';
 
 interface ConnectedUser {
   userId: string;
@@ -48,7 +49,7 @@ function cleanPos(v: unknown): number | null {
 }
 
 /** Текст без управляющих символов + кап длины. Эмодзи и \n не трогаем. */
-function cleanText(v: unknown, max: number): string {
+export function cleanText(v: unknown, max: number): string {
   // Сравнение по кодам (числа, не эскейпы): оставляем только таб и \n,
   // \r нормализуем в \n, остальное < 32 и DEL режем.
   const src = String(v ?? '');
@@ -112,6 +113,12 @@ class SocketService {
 
   public init(io: Server) {
     this.io = io;
+
+    // Этап 5: чистка комнат-сирот — пустые (нет сокетов) и якорь старше 24ч.
+    // Активные комнаты якорь обновляют постоянно, их не задеваем.
+    setInterval(() => {
+      try { this.sweepEmptyRooms(); } catch (e) { logger.error('ROOM_TTL', 'sweep error', e); }
+    }, 5 * 60 * 1000);
 
     io.on('connection', (socket: Socket) => {
       logger.info('SOCKET', `Client connected: ${socket.id}`);
@@ -207,6 +214,22 @@ class SocketService {
         const { roomId } = data;
         if (!roomId) return;
 
+        // Приватная комната: без верного пароля не пускаем (код NEED_PASSWORD —
+        // будущий UI спросит пароль; старые клиенты в приватные не попадут).
+        try {
+          const gate = db.prepare('SELECT id, isPrivate, password FROM rooms WHERE id = ?').get(roomId) as any;
+          if (gate && gate.isPrivate) {
+            const supplied = (data as any)?.password;
+            if (!verifyRoomPassword(gate.id, gate.password, supplied)) {
+              socket.emit('room:join_error', {
+                roomId,
+                code: supplied ? 'WRONG_PASSWORD' : 'NEED_PASSWORD',
+              });
+              return;
+            }
+          }
+        } catch {}
+
         // SECURITY: личность берём из проверенного сокета (user:connect),
         // а не из полей джоина — их можно подделать
         const connUser = this.users.get(socket.id);
@@ -284,9 +307,9 @@ class SocketService {
           uniqueMembers.set(m.userId, m);
         }
 
-        // Send initial state to newly joined client
+        // Send initial state to newly joined client (пароль наружу не отдаём даже своим)
         socket.emit('room:initial_state', {
-          room,
+          room: stripRoomSecret(room),
           members: Array.from(uniqueMembers.values()),
           serverTimestamp: now,
           livePosition,
@@ -921,9 +944,106 @@ class SocketService {
         this.emitRoomHealth(roomId, true);
         if (member?.userId && !hasOtherConnections) {
           this.lastHeartbeatByRoom.get(roomId)?.delete(member.userId);
-          await ffmpegService.killUserSessionInRoom(roomId, member.userId);
+          try {
+            await ffmpegService.killUserSessionInRoom(roomId, member.userId);
+          } catch (e: any) {
+            logger.error('ROOM_HOST', `killUserSession on leave failed room=${roomId}: ${e?.message || e}`);
+          }
+          // Хост ушёл последним сокетом — корону старейшему ПРОВЕРЕННОМУ участнику
+          // из users. Гостевые id туда не встанут (FK rooms.hostUserId бы упал) и
+          // spoof-ids отсекаем флагом verified. Нет таких — комната без хоста.
+          try {
+            const row = db.prepare('SELECT hostUserId FROM rooms WHERE id = ?').get(roomId) as any;
+            if (row && row.hostUserId === member.userId) {
+              const candidates = Array.from(members.entries())
+                .sort(([, a], [, b]) => (a.joinedAt < b.joinedAt ? -1 : 1));
+              let heir: RoomMember | undefined;
+              for (const [sid, c] of candidates) {
+                const verified = !!this.users.get(sid)?.verified;
+                let exists = false;
+                try {
+                  exists = !!db.prepare('SELECT id FROM users WHERE id = ?').get(c.userId);
+                } catch {
+                  exists = false;
+                }
+                if (verified && exists) {
+                  heir = c;
+                  break;
+                }
+              }
+              if (heir) {
+                db.prepare('UPDATE rooms SET hostUserId = ? WHERE id = ?').run(heir.userId, roomId);
+                logger.info('ROOM_HOST', `Хост ${member.userId} ушёл из ${roomId} — новым хостом стал ${heir.userId} (${heir.username})`);
+                this.io?.to(roomId).emit('room:system_message', {
+                  text: `👑 ${heir.username} стал хостом комнаты`,
+                  type: 'host',
+                  timestamp: Date.now(),
+                });
+                this.emitRoomMembers(roomId, true);
+              } else {
+                logger.info('ROOM_HOST', `Хост ${member.userId} ушёл из ${roomId} — проверенных участников нет, комната без хоста`);
+              }
+            }
+          } catch (e: any) {
+            logger.error('ROOM_HOST', `migrate failed room=${roomId}: ${e?.message || e}`);
+          }
         }
       }
+    }
+  }
+
+  /**
+   * Полное закрытие комнаты: выселить сокеты, почистить память, убить сессии.
+   * Вызывает deleteRoom; клиенты без хендлера room:closed просто перестанут
+   * получать события (полноценный редирект — следующим шагом в клиентах).
+   */
+  public async closeRoom(roomId: string): Promise<void> {
+    try {
+      this.io?.to(roomId).emit('room:closed', { roomId });
+      const members = this.roomMembers.get(roomId);
+      if (members) {
+        for (const sid of Array.from(members.keys())) {
+          try {
+            this.io?.sockets.sockets.get(sid)?.leave(roomId);
+          } catch {}
+        }
+        this.roomMembers.delete(roomId);
+      }
+      this.lastSeekTimeByRoom.delete(roomId);
+      this.lastMembersEmitByRoom.delete(roomId);
+      this.lastHealthEmitByRoom.delete(roomId);
+      this.lastRollbackNoticeByRoom.delete(roomId);
+      this.lastHeartbeatByRoom.delete(roomId);
+      this.lastAcceptedAnchorByRoom.delete(roomId);
+      this.lastAnchorsByRoom.delete(roomId);
+      for (const u of this.users.values()) {
+        if (u.currentRoomId === roomId) u.currentRoomId = undefined;
+      }
+    } catch (e) {
+      logger.error('ROOM_CLOSE', 'closeRoom error', e);
+    }
+    try {
+      await ffmpegService.killSessionsForRoom(roomId);
+    } catch {}
+  }
+
+  /** Сироты: нет сокетов + якорь старше 24ч — удаляем вместе с сессиями. */
+  private sweepEmptyRooms(): void {
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    let rows: any[] = [];
+    try {
+      rows = db.prepare('SELECT id FROM rooms WHERE serverTimestamp < ?').all(cutoff) as any[];
+    } catch {
+      return;
+    }
+    for (const r of rows) {
+      try {
+        const mem = this.roomMembers.get(r.id);
+        if (mem && mem.size > 0) continue;
+        db.prepare('DELETE FROM rooms WHERE id = ?').run(r.id);
+        ffmpegService.killSessionsForRoom(r.id).catch(() => {});
+        logger.info('ROOM_TTL', `Удалена пустая комната-сирота ${r.id}`);
+      } catch {}
     }
   }
 

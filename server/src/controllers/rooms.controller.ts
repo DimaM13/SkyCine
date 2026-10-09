@@ -1,18 +1,42 @@
 import { logger } from '../services/logger.service';
 import { Response } from 'express';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { YouTubeController } from './youtube.controller';
-import { ffmpegService } from '../services/ffmpeg.service';
+import { socketService, cleanText } from '../services/socket.service';
+import { hashRoomPassword, verifyRoomPassword, stripRoomSecret, MAX_ROOM_PASSWORD_LEN } from '../services/room-password';
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
+  // crypto вместо Math.random (коды перебираемы) — совместимо: тот же алфавит/длина
+  const bytes = crypto.randomBytes(6);
   for (let i = 0; i < 6; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+    code += chars.charAt(bytes[i] % chars.length);
   }
   return code;
+}
+
+/** Уникальный код с ретраями (раньше коллизия падала в 500 по UNIQUE). */
+function generateUniqueRoomCode(): string {
+  for (let i = 0; i < 5; i++) {
+    const code = generateRoomCode();
+    try {
+      const hit = db.prepare('SELECT id FROM rooms WHERE code = ?').get(code) as any;
+      if (!hit) return code;
+    } catch {
+      return code;
+    }
+  }
+  return generateRoomCode();
+}
+
+/** Название комнаты: чистый текст + кап (без смены поведения обычных названий). */
+function cleanRoomTitle(raw: unknown, fallback: string): string {
+  const t = cleanText(raw, 160).trim();
+  return t || fallback;
 }
 
 export function extractYouTubeId(urlOrId: string): string | null {
@@ -63,15 +87,17 @@ export class RoomsController {
       `).all() as any[];
 
       const rooms = rawRooms.map((room) => {
-        if (room.sourceType === 'YOUTUBE') {
+        // Пароль никогда не отдаём наружу (ни хеш, ни legacy-plaintext)
+        const safe: any = stripRoomSecret(room);
+        if (safe.sourceType === 'YOUTUBE') {
           return {
-            ...room,
-            mediaTitle: room.youtubeTitle || room.title,
-            posterPath: room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`,
-            backdropPath: room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`,
+            ...safe,
+            mediaTitle: safe.youtubeTitle || safe.title,
+            posterPath: safe.youtubeThumbnail || `https://i.ytimg.com/vi/${safe.youtubeId}/hqdefault.jpg`,
+            backdropPath: safe.youtubeThumbnail || `https://i.ytimg.com/vi/${safe.youtubeId}/hqdefault.jpg`,
           };
         }
-        return room;
+        return safe;
       });
 
       res.json({ rooms });
@@ -104,8 +130,9 @@ export class RoomsController {
 
         const ytInfo = await fetchYouTubeInfo(ytId);
         const id = uuidv4();
-        const code = generateRoomCode();
-        const roomTitle = title?.trim() || `YouTube: ${ytInfo.title}`;
+        const code = generateUniqueRoomCode();
+        const roomTitle = cleanRoomTitle(title, `YouTube: ${ytInfo.title}`);
+        const roomPassword = password ? hashRoomPassword(String(password).slice(0, MAX_ROOM_PASSWORD_LEN)) : null;
 
         db.prepare(`
           INSERT INTO rooms (
@@ -124,7 +151,7 @@ export class RoomsController {
           ytInfo.thumbnail,
           Date.now(),
           isPrivate ? 1 : 0,
-          password || null
+          roomPassword
         );
 
         res.status(201).json({
@@ -158,15 +185,16 @@ export class RoomsController {
       }
 
       const id = uuidv4();
-      const code = generateRoomCode();
-      const roomTitle = title || `Совместный просмотр: ${media.title}`;
+      const code = generateUniqueRoomCode();
+      const roomTitle = cleanRoomTitle(title, `Совместный просмотр: ${media.title}`);
+      const roomPassword = password ? hashRoomPassword(String(password).slice(0, MAX_ROOM_PASSWORD_LEN)) : null;
 
       db.prepare(`
         INSERT INTO rooms (
           id, code, title, hostUserId, mediaItemId, sourceType,
           state, currentPosition, serverTimestamp, playbackRate, isPrivate, password
         ) VALUES (?, ?, ?, ?, ?, 'LOCAL', 'PAUSED', 0, ?, 1.0, ?, ?)
-      `).run(id, code, roomTitle, hostUserId, mediaItemId, Date.now(), isPrivate ? 1 : 0, password || null);
+      `).run(id, code, roomTitle, hostUserId, mediaItemId, Date.now(), isPrivate ? 1 : 0, roomPassword);
 
       res.status(201).json({
         message: 'Комната создана',
@@ -206,6 +234,21 @@ export class RoomsController {
         return;
       }
 
+      // Приватная комната: без верного пароля — 403 с машинным кодом.
+      // Публичные без изменений; старые клиенты пароль не шлют и в приватные
+      // больше не попадут (UI пароля — отдельно следующим шагом в клиентах).
+      if (room.isPrivate) {
+        const supplied = (req.query.password as string) || (req.body as any)?.password;
+        if (!verifyRoomPassword(room.id, room.password, supplied)) {
+          const code = supplied ? 'WRONG_PASSWORD' : 'NEED_PASSWORD';
+          res.status(403).json({
+            error: code === 'NEED_PASSWORD' ? 'Комната приватная: нужен пароль' : 'Неверный пароль комнаты',
+            code,
+          });
+          return;
+        }
+      }
+
       let tracks: any[] = [];
       if (room.mediaItemId) {
         tracks = db.prepare('SELECT * FROM media_tracks WHERE mediaItemId = ? ORDER BY type ASC, streamIndex ASC').all(room.mediaItemId);
@@ -217,7 +260,7 @@ export class RoomsController {
         room.backdropPath = room.youtubeThumbnail || `https://i.ytimg.com/vi/${room.youtubeId}/hqdefault.jpg`;
       }
 
-      res.json({ room: { ...room, tracks } });
+      res.json({ room: { ...stripRoomSecret(room), tracks } });
     } catch (err) {
       logger.error('ROOM_ERR', 'getRoom error:', err);
       res.status(500).json({ error: 'Ошибка получения комнаты' });
@@ -241,13 +284,14 @@ export class RoomsController {
         return;
       }
 
+      // Выселяем сокеты и гасим сессии ДО удаления строки (иначе висячие мемберы).
+      // killSessionsForRoom внутри closeRoom — для всех типов комнат, включая YouTube.
+      await socketService.closeRoom(roomId);
       if (room.youtubeId) {
         const otherRoom = db.prepare('SELECT id FROM rooms WHERE youtubeId = ? AND id != ?').get(room.youtubeId, roomId);
         if (!otherRoom) {
           YouTubeController.deleteCache(room.youtubeId);
         }
-      } else {
-        await ffmpegService.killSessionsForRoom(roomId);
       }
 
       db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
