@@ -2,7 +2,7 @@ import { logger } from '../services/logger.service';
 import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { exec } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
@@ -38,6 +38,24 @@ function queueThumbnailJob<T>(fn: () => Promise<T>): Promise<T> {
       thumbJobQueue.push(execute);
     }
   });
+}
+
+/**
+ * Разрешённые значения картинок (постеры/фоны/стиллы): https?://… и серверные
+ * относительные пути без схемы. Всё остальное (javascript:, data:, C:\, \\, ..)
+ * в БД не пишем — иначе хранимый open-redirect/XSS через <img src> и res.redirect.
+ * Источники сканера/TMDB (https) и относительные пути проходят как раньше.
+ */
+export function sanitizeMediaUrl(raw: unknown): string {
+  const v = String(raw || '').trim().slice(0, 500);
+  if (!v) return '';
+  if (/^https?:\/\/[^/\s]+(\/\S*)?$/i.test(v)) return v;
+  // Протокол-релатив (//evil.com/…) браузер откроет как внешний хост — запретить
+  if (v.startsWith('//')) return '';
+  if (v.includes(':') || v.includes('\\') || /[\s<>]/.test(v)) return '';
+  const parts = v.split('/');
+  if (parts.includes('..')) return '';
+  return v;
 }
 
 export class MediaController {
@@ -382,8 +400,8 @@ export class MediaController {
         originalTitle || '',
         year || null,
         overview || '',
-        posterPath || '',
-        backdropPath || '',
+        sanitizeMediaUrl(posterPath),
+        sanitizeMediaUrl(backdropPath),
         rating || 0,
         id
       );
@@ -438,8 +456,8 @@ export class MediaController {
         title,
         originalTitle || '',
         year || null,
-        posterPath || '',
-        backdropPath || '',
+        sanitizeMediaUrl(posterPath),
+        sanitizeMediaUrl(backdropPath),
         rating || 0,
         showTitle
       );
@@ -466,7 +484,7 @@ export class MediaController {
               WHERE showTitle = ? AND seasonNumber = ? AND episodeNumber = ? AND type = 'EPISODE'
             `).run(
               epTitle,
-              ep.stillPath || null,
+              sanitizeMediaUrl(ep.stillPath) || null,
               ep.overview || '',
               ep.rating || rating || null,
               title,
@@ -528,16 +546,35 @@ export class MediaController {
         task = queueThumbnailJob(async () => {
           return new Promise<string | null>((resolve) => {
             const seekSec = Math.min(120, Math.max(10, Math.floor((media.durationSeconds || 300) * 0.15)));
-            const ffmpegCmd = `ffmpeg -y -ss ${seekSec} -i "${media.filePath}" -vframes 1 -q:v 4 -vf "scale=480:-1" "${thumbFile}"`;
-
-            exec(ffmpegCmd, { timeout: 8000 }, (err) => {
-              if (err || !fs.existsSync(thumbFile)) {
+            // БЕЗ shell: массив аргументов — имя файла с кавычками/$()/`;` безопасно.
+            // stdio ignore — вывод ffmpeg не нужен, пайпы не забьются.
+            let done = false;
+            let proc: ChildProcess | null = null;
+            const finish = (ok: boolean) => {
+              if (done) return;
+              done = true;
+              clearTimeout(timer);
+              if (ok && fs.existsSync(thumbFile)) resolve(thumbFile);
+              else {
                 failedThumbnailIds.set(id, Date.now());
                 resolve(null);
-              } else {
-                resolve(thumbFile);
               }
-            });
+            };
+            const timer = setTimeout(() => {
+              try { proc?.kill('SIGKILL'); } catch {}
+              finish(false);
+            }, 8000);
+            try {
+              proc = spawn('ffmpeg', [
+                '-y', '-ss', String(seekSec), '-i', media.filePath,
+                '-vframes', '1', '-q:v', '4', '-vf', 'scale=480:-1', thumbFile,
+              ], { windowsHide: true, stdio: 'ignore' });
+            } catch {
+              finish(false);
+              return;
+            }
+            proc.on('error', () => finish(false));
+            proc.on('close', (code) => finish(code === 0));
           });
         }).finally(() => {
           activeThumbnailTasks.delete(id);
@@ -550,10 +587,11 @@ export class MediaController {
       if (resultFile && fs.existsSync(resultFile)) {
         res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
         res.sendFile(resultFile);
-      } else if (media.posterPath) {
-        res.redirect(media.posterPath);
       } else {
-        res.status(404).send('Не удалось создать миниатюру');
+        // Наследие старых строк: редиректим только санитизированное, иначе 404
+        const safePoster = sanitizeMediaUrl(media.posterPath);
+        if (safePoster) res.redirect(safePoster);
+        else res.status(404).send('Не удалось создать миниатюру');
       }
     } catch (err) {
       logger.error('MEDIA_ERR', 'API Error:', err);

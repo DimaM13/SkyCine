@@ -501,6 +501,19 @@ export class StreamController {
       }
 
       const streamIndex = parseInt(trackIndex as string, 10);
+      if (!Number.isInteger(streamIndex) || streamIndex < 0 || streamIndex > 99) {
+        res.status(400).send('Bad track index');
+        return;
+      }
+      // Дорожка обязана принадлежать этому медиа и быть субтитрами —
+      // иначе произвольный -map 0:N + спавн ffmpeg неавторизованным запросом.
+      const subTrack = db.prepare(
+        'SELECT streamIndex FROM media_tracks WHERE mediaItemId = ? AND streamIndex = ? AND type = ?'
+      ).get(id as string, streamIndex, 'SUBTITLE') as any;
+      if (!subTrack) {
+        res.status(404).send('Subtitle track not found');
+        return;
+      }
       const subtitleContent = await ffmpegService.extractSubtitle(media.filePath, streamIndex, format);
 
       res.setHeader('Content-Type', format === 'ass' ? 'text/plain; charset=utf-8' : 'text/vtt; charset=utf-8');
