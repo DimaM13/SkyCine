@@ -112,11 +112,22 @@ app.use('/api', apiRouter);
 // Serve Frontend in Production / All-in-one Mode
 const clientDist = path.resolve(__dirname, '../../client/dist');
 if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+  app.use(express.static(clientDist, {
+    setHeaders: (res, filePath) => {
+      // index.html всегда перепроверяется (иначе браузер держит старый бандл после пересборки),
+      // хэшированные ассеты кэшируются навсегда — имя меняется при каждой сборке
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache');
+      } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/socket.io') || req.path.startsWith('/uploads')) {
       return next();
     }
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(clientDist, 'index.html'));
   });
 }

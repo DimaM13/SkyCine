@@ -50,18 +50,26 @@ export const MoviesPage: React.FC = () => {
   useScrollRestore('skycine_movies_scroll', !loading && movies.length > 0);
 
   useEffect(() => {
+    let raf = 0;
     const handleScroll = () => {
-      const scrollBottom = window.innerHeight + window.scrollY;
-      const threshold = document.documentElement.scrollHeight - 600;
-      if (scrollBottom >= threshold) {
-        setVisibleCount((prev) => prev + 36);
-      }
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const scrollBottom = window.innerHeight + window.scrollY;
+        const threshold = document.documentElement.scrollHeight - 600;
+        if (scrollBottom >= threshold) {
+          setVisibleCount((prev) => (prev < movies.length ? Math.min(prev + 36, movies.length) : prev));
+        }
+      });
     };
 
     window.addEventListener('scroll', handleScroll, { passive: true });
     handleScroll();
 
-    return () => window.removeEventListener('scroll', handleScroll);
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, [movies.length]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {

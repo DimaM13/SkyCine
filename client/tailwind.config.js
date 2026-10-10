@@ -34,12 +34,17 @@ export default {
       animation: {
         'pulse-subtle': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'float-reaction': 'floatUp 2.5s ease-out forwards',
+        'logo-shine': 'logoShine 4s ease-in-out infinite',
       },
       keyframes: {
         floatUp: {
           '0%': { transform: 'translateY(0) scale(0.8)', opacity: '1' },
           '50%': { opacity: '0.9' },
           '100%': { transform: 'translateY(-180px) scale(1.4)', opacity: '0' },
+        },
+        logoShine: {
+          '0%': { transform: 'translateX(-220%) skewX(-18deg)' },
+          '45%, 100%': { transform: 'translateX(420%) skewX(-18deg)' },
         },
       },
     },

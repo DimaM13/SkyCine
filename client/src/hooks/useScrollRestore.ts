@@ -1,4 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { scrollDebug } from '../utils/scrollDebug';
+
+// Документ «схлопнут»: контент страницы уже удалён из DOM (маунт плеера/спиннер),
+// браузер заclamp-ил скролл в максимум почти пустого документа (~начало).
+// Сохранять такую позицию нельзя — она перезаписала бы реальную.
+function isDocCollapsed(): boolean {
+  try {
+    return document.documentElement.scrollHeight - window.innerHeight < 64;
+  } catch {
+    return false;
+  }
+}
 
 function readScroll(key: string): number {
   try {
@@ -8,10 +20,14 @@ function readScroll(key: string): number {
   }
 }
 
-function saveScroll(key: string) {
+function saveScroll(key: string): boolean {
   try {
+    if (isDocCollapsed()) return false;
     localStorage.setItem(key, String(Math.max(0, Math.round(window.scrollY || 0))));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -26,55 +42,77 @@ export function useScrollRestore(storageKey: string, ready: boolean) {
     if (!ready || restoredRef.current === storageKey) return;
     restoredRef.current = storageKey;
     const y = readScroll(storageKey);
-    if (y <= 0) return;
-    // Два прохода: сразу после paint + контрольный (картинки могут сдвинуть layout)
-    let innerTimer: any = null;
-    const raf = requestAnimationFrame(() => {
-      window.scrollTo(0, y);
-      innerTimer = setTimeout(() => {
-        try {
-          if (Math.abs((window.scrollY || 0) - y) > 240) window.scrollTo(0, y);
-        } catch {}
-      }, 400);
-    });
+    if (y <= 0) {
+      scrollDebug('restore-skip', { key: storageKey, y });
+      return;
+    }
+    // Проход 0 — безусловно (nav-reset как раз поставил 0, порог тут вреден).
+    // Повторные — только если позицию СНУЛО к началу (cur < y - 240):
+    // поздний restore браузера/сдвиг layout; с прокруткой юзера не драться.
+    const delays = [0, 300, 800, 1500];
+    scrollDebug('restore', { key: storageKey, y });
+    let cancelled = false;
+    let applied = false;
+    const timers: any[] = delays.map((delay, i) =>
+      setTimeout(() => {
+        if (cancelled) return;
+        const cur = window.scrollY || 0;
+        if (i === 0 || cur < y - 240) {
+          applied = true;
+          window.scrollTo(0, y);
+          scrollDebug('restore-apply', { attempt: i, y, cur, after: window.scrollY || 0 });
+        } else if (i === delays.length - 1) {
+          scrollDebug('restore-settled', { y, cur });
+        }
+      }, delay)
+    );
     return () => {
-      cancelAnimationFrame(raf);
-      if (innerTimer) clearTimeout(innerTimer);
+      cancelled = true;
+      timers.forEach(clearTimeout);
+      // Cleanup до первого применения (StrictMode double-mount / мгновенный анмаунт):
+      // снимаем отметку, иначе повторный маунт никогда не восстановит позицию
+      if (!applied) restoredRef.current = null;
     };
   }, [ready, storageKey]);
 
-  // Сохранение при размонтировании (уход в плеер/другой раздел)
-  useEffect(() => {
-    return () => {
-      saveScroll(storageKey);
-    };
-  }, [storageKey]);
-
-  // Непрерывное сохранение (троттлинг): размонтирование вообще может не
-  // случиться (полный релоад вкладки, jetsam Safari, краш) — тогда сработает
-  // последнее сохранённое значение, а не позавчерашнее.
+  // Непрерывное сохранение + финальное при уходе (в одном эффекте).
+  // pendingY обновляется только пока документ цел; cleanup выполняется ПОСЛЕ
+  // размонтирования контента — если страница схлопнулась (уход в плеер),
+  // пишем последнюю валидную позицию, а не заclamp-енный ноль.
   useEffect(() => {
     let last = 0;
     let timer: any = null;
-    const onScroll = () => {
-      const now = Date.now();
-      if (now - last < 500) {
-        if (!timer) {
-          timer = setTimeout(() => {
-            timer = null;
-            last = Date.now();
-            saveScroll(storageKey);
-          }, 550);
-        }
-        return;
-      }
-      last = now;
-      saveScroll(storageKey);
+    let pendingY = Math.max(0, Math.round(window.scrollY || 0));
+
+    const flush = () => {
+      try {
+        localStorage.setItem(storageKey, String(Math.max(0, Math.round(pendingY))));
+      } catch {}
     };
+
+    const onScroll = () => {
+      if (isDocCollapsed()) return;
+      pendingY = window.scrollY || 0;
+      const now = Date.now();
+      if (now - last >= 500) {
+        last = now;
+        flush();
+      } else if (!timer) {
+        timer = setTimeout(() => {
+          timer = null;
+          last = Date.now();
+          flush();
+        }, 550);
+      }
+    };
+
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.removeEventListener('scroll', onScroll);
       if (timer) clearTimeout(timer);
+      const collapsed = isDocCollapsed();
+      flush();
+      scrollDebug('save-unmount', { key: storageKey, y: pendingY, collapsed });
     };
   }, [storageKey]);
 }

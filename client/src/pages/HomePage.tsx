@@ -9,6 +9,7 @@ import { HeroBanner } from '../components/library/HeroBanner';
 import { MediaCard } from '../components/library/MediaCard';
 import { MediaModal } from '../components/library/MediaModal';
 import { MediaItem, ContinueWatchingItem, Room, Library } from '../types';
+import { useScrollRestore } from '../hooks/useScrollRestore';
 
 interface LibrarySectionData {
  library: Library;
@@ -25,6 +26,9 @@ export const HomePage: React.FC = () => {
  const [isModalOpen, setIsModalOpen] = useState(false);
  const [loading, setLoading] = useState(true);
 
+ // Возврат скролла после ухода в плеер (App сбрасывает в 0 при навигации)
+ useScrollRestore('skycine_home_scroll', !loading);
+
  const fetchHomeData = async () => {
  setLoading(true);
  try {
@@ -38,33 +42,25 @@ export const HomePage: React.FC = () => {
  setActiveRooms(roomsRes.data.rooms || []);
 
  const libs: Library[] = libsRes.data.libraries || [];
- const sections: LibrarySectionData[] = [];
- let firstMovie: MediaItem | null = null;
 
- // Fetch items for each library dynamically
- for (const lib of libs) {
+ // Fetch items for all libraries in parallel (was a sequential loop — slow with many libs)
+ const sections: LibrarySectionData[] = await Promise.all(
+ libs.map(async (lib) => {
+ try {
  if (lib.type === 'SHOWS') {
- try {
  const res = await apiClient.get('/media/shows', { params: { libraryId: lib.id } });
- sections.push({ library: lib, items: res.data.shows || [] });
- } catch {
- sections.push({ library: lib, items: [] });
+ return { library: lib, items: res.data.shows || [] };
  }
- } else {
- try {
  const res = await apiClient.get('/media/movies', { params: { libraryId: lib.id } });
- const moviesList: MediaItem[] = res.data.movies || [];
- sections.push({ library: lib, items: moviesList });
- if (!firstMovie && moviesList.length > 0 && lib.type === 'MOVIES') {
- firstMovie = moviesList[0];
- }
+ return { library: lib, items: res.data.movies || [] };
  } catch {
- sections.push({ library: lib, items: [] });
+ return { library: lib, items: [] };
  }
- }
- }
+ })
+ );
 
- setFeaturedMovie(firstMovie);
+ const firstLib = sections.find((s) => s.library.type === 'MOVIES' && s.items.length > 0);
+ setFeaturedMovie(firstLib ? (firstLib.items[0] as MediaItem) : null);
  setLibrarySections(sections);
  } catch (err) {
  console.error('fetchHomeData error:', err);

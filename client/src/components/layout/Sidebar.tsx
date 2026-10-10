@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home, Film, Tv, Video, Radio, Users, Shield, Plus,
-  Sparkles, Clapperboard, Folder, ChevronRight, X, Layers
+  Sparkles, Clapperboard, Folder, ChevronRight, X, Layers, Play
 } from 'lucide-react';
 import { apiClient } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
@@ -56,11 +56,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
         {/* Mobile Header with Close Button */}
         <div className="flex md:hidden items-center justify-between pb-2 border-b border-white/10">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-cinema-gold to-yellow-300 flex items-center justify-center shadow-glow-gold">
-              <Film className="w-4 h-4 text-black fill-black" />
+            <div className="relative w-8 h-8 rounded-xl overflow-hidden bg-gradient-to-br from-yellow-300 via-cinema-gold to-amber-600 shadow-glow-gold ring-1 ring-yellow-200/30">
+              <div className="absolute top-0 inset-x-0 h-2 bg-[repeating-linear-gradient(-45deg,#07090e_0_3px,#fde68a_3px_6px)]" />
+              <div className="absolute inset-0 flex items-center justify-center pt-1.5">
+                <Play className="w-3.5 h-3.5 text-black fill-black ml-0.5" />
+              </div>
             </div>
-            <span className="text-base font-extrabold text-white font-['Outfit']">
-              Sky<span className="text-cinema-gold">Cine</span>
+            <span className="text-base font-extrabold font-['Outfit']">
+              <span className="bg-gradient-to-r from-slate-100 via-white to-slate-300 bg-clip-text text-transparent">Sky</span>
+              <span className="bg-gradient-to-r from-yellow-300 via-cinema-gold to-amber-500 bg-clip-text text-transparent drop-shadow-[0_0_8px_rgba(229,160,13,0.35)]">Cine</span>
             </span>
           </div>
 

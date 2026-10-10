@@ -19,8 +19,22 @@ export const LibraryPage: React.FC = () => {
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
 
-  const [library, setLibrary] = useState<Library | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Stale-while-revalidate: при возврате из плеера показываем прошлый список
+  // сразу (без спиннера — «как будто перезагрузку»), данные фоново обновляем.
+  const cached = useMemo<{ library: Library; movies: MediaItem[]; shows?: any[] } | null>(() => {
+    if (!libraryId) return null;
+    try {
+      const raw = sessionStorage.getItem(`skycine_lib_${libraryId}_cache`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && parsed.library ? parsed : null;
+    } catch {
+      return null;
+    }
+  }, [libraryId]);
+
+  const [library, setLibrary] = useState<Library | null>(() => cached?.library || null);
+  const [loading, setLoading] = useState(() => !cached);
   const [isScanning, setIsScanning] = useState(false);
   const scrollKey = `skycine_lib_${libraryId || 'none'}_scroll`;
   const visibleKey = `skycine_lib_${libraryId || 'none'}_visible`;
@@ -36,14 +50,25 @@ export const LibraryPage: React.FC = () => {
   useScrollRestore(scrollKey, !loading && !!library);
 
   // Movies state
-  const [movies, setMovies] = useState<MediaItem[]>([]);
+  const [movies, setMovies] = useState<MediaItem[]>(() => cached?.movies || []);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('recent');
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   // Shows state — persist per library so back from player returns to same show/season
-  const [shows, setShows] = useState<any[]>([]);
+  const [shows, setShows] = useState<any[]>(() => cached?.shows || []);
+
+  // Кэш вкладки для мгновенного возврата из плеера (см. cached выше)
+  useEffect(() => {
+    if (!libraryId || loading || !library) return;
+    try {
+      sessionStorage.setItem(
+        `skycine_lib_${libraryId}_cache`,
+        JSON.stringify({ library, movies, shows, at: Date.now() })
+      );
+    } catch {}
+  }, [libraryId, library, movies, shows, loading]);
   const [selectedShow, setSelectedShow] = useState<any | null>(() => {
     try {
       // try generic then per-library key (libraryId not known yet at init, fallback to generic)
@@ -74,9 +99,10 @@ export const LibraryPage: React.FC = () => {
   const [isApplyingMatch, setIsApplyingMatch] = useState(false);
   const [matchSuccessMsg, setMatchSuccessMsg] = useState('');
 
-  const fetchLibraryInfoAndData = () => {
+  const fetchLibraryInfoAndData = (opts?: { silent?: boolean }) => {
     if (!libraryId) return;
-    setLoading(true);
+    const silent = !!opts?.silent;
+    if (!silent) setLoading(true);
 
     apiClient.get('/libraries')
       .then((res) => {
@@ -85,9 +111,9 @@ export const LibraryPage: React.FC = () => {
         if (found) {
           setLibrary(found);
           if (found.type === 'SHOWS') {
-            fetchShows(found.id);
+            fetchShows(found.id, silent);
           } else {
-            fetchMovies(found.id);
+            fetchMovies(found.id, silent);
           }
         } else {
           setLoading(false);
@@ -96,8 +122,8 @@ export const LibraryPage: React.FC = () => {
       .catch(() => setLoading(false));
   };
 
-  const fetchMovies = (libId = libraryId) => {
-    setLoading(true);
+  const fetchMovies = (libId = libraryId, silent = false) => {
+    if (!silent) setLoading(true);
     apiClient.get('/media/movies', {
       params: {
         libraryId: libId,
@@ -107,17 +133,17 @@ export const LibraryPage: React.FC = () => {
     })
       .then((res) => { setMovies(res.data.movies || []); setVisibleCount((prev) => Math.max(prev, 50)); })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => { if (!silent) setLoading(false); });
   };
 
-  const fetchShows = (libId = libraryId) => {
-    setLoading(true);
+  const fetchShows = (libId = libraryId, silent = false) => {
+    if (!silent) setLoading(true);
     apiClient.get('/media/shows', {
       params: { libraryId: libId }
     })
       .then((res) => setShows(res.data.shows || []))
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => { if (!silent) setLoading(false); });
   };
 
   // Persist library show/season (same as ShowsPage) — so player Back returns to same place
@@ -196,17 +222,16 @@ export const LibraryPage: React.FC = () => {
     setSearch('');
     // visibleCount НЕ трогаем: он восстановлен из хранилища, иначе
     // скроллу некуда будет возвращаться (контент ужмётся до 36)
-    fetchLibraryInfoAndData();
+    // Есть кэш вкладки (возврат из плеера) — данные уже на экране, refetch тихий
+    fetchLibraryInfoAndData({ silent: !!cached });
   }, [libraryId]);
 
   useEffect(() => {
-    // Первый маунт (в т.ч. возврат из плеера): счётчик восстановлен из хранилища,
-    // не сбрасываем — иначе контент ужмётся и скролл упрётся в начало
+    // Первый маунт (в т.ч. возврат из плеера): данные уже грузит
+    // fetchLibraryInfoAndData из эффекта [libraryId] — здесь ничего не делаем,
+    // иначе при наличии кэша получим дубль-запрос и спиннер поверх контента.
     if (firstSortRef.current) {
       firstSortRef.current = false;
-      if (library && library.type === 'MOVIES') {
-        fetchMovies(library.id);
-      }
       return;
     }
     setVisibleCount(36);
@@ -218,20 +243,32 @@ export const LibraryPage: React.FC = () => {
   }, [sortBy]);
 
   useEffect(() => {
+    // rAF-throttle: обработчик не должен дёргать layout на каждом scroll-событии
+    let raf = 0;
     const handleScroll = () => {
-      const scrollBottom = window.innerHeight + window.scrollY;
-      const threshold = document.documentElement.scrollHeight - 600;
-      if (scrollBottom >= threshold) {
-        setVisibleCount((prev) => prev + 36);
-      }
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const scrollBottom = window.innerHeight + window.scrollY;
+        const threshold = document.documentElement.scrollHeight - 600;
+        if (scrollBottom >= threshold) {
+          // Только пока есть что догружать — иначе каждый scroll у низа
+          // перерисовывает всю сетку (lag на Safari)
+          const total = library?.type === 'SHOWS' ? shows.length : movies.length;
+          setVisibleCount((prev) => (prev < total ? Math.min(prev + 36, total) : prev));
+        }
+      });
     };
 
     window.addEventListener('scroll', handleScroll, { passive: true });
     // Run initial check to auto-fill large screens
     handleScroll();
 
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, [movies.length, shows.length, episodes.length]);
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [movies.length, shows.length, episodes.length, library?.type]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();

@@ -16,6 +16,7 @@ import { FriendsPage } from './pages/FriendsPage';
 import { AdminPage } from './pages/AdminPage';
 import { AuthPage } from './pages/AuthPage';
 import { Titlebar } from './components/layout/Titlebar';
+import { scrollDebug } from './utils/scrollDebug';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isLoading } = useAuth();
@@ -43,6 +44,9 @@ const MainLayout: React.FC = () => {
 
   // Reset scroll and force Safari WebKit layout reflow when navigating between routes
   useEffect(() => {
+    try {
+      scrollDebug('nav-reset', { path: location.pathname, before: window.scrollY || 0 });
+    } catch {}
     window.scrollTo(0, 0);
     const timer = setTimeout(() => {
       window.dispatchEvent(new Event('resize'));

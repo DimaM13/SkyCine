@@ -1,8 +1,11 @@
 import React from 'react';
 import { FriendsHub } from '../components/friends/FriendsHub';
+import { useScrollRestore } from '../hooks/useScrollRestore';
 import { Users } from 'lucide-react';
 
 export const FriendsPage: React.FC = () => {
+  useScrollRestore('skycine_friends_scroll', true);
+
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-8 py-8 flex flex-col gap-8">
       <div>

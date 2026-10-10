@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useScrollRestore } from '../hooks/useScrollRestore';
 import { Room, MediaItem } from '../types';
 
 export const RoomsPage: React.FC = () => {
@@ -35,6 +36,9 @@ export const RoomsPage: React.FC = () => {
       .catch(() => {})
       .finally(() => setLoading(false));
   };
+
+  // Возврат скролла после ухода в плеер комнаты (App сбрасывает в 0 при навигации)
+  useScrollRestore('skycine_rooms_scroll', !loading);
 
   useEffect(() => {
     fetchRooms();
