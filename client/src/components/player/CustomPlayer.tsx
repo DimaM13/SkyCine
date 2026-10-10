@@ -974,7 +974,36 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
     if (hlsRef.current) {
-      hlsRef.current.startLoad(safePos);
+      const hls = hlsRef.current;
+      // Актуализируем мастер-URL на любую коммит-позицию: recovery после 404
+      // (ERROR handler) делает loadSource(hlsUrlRef.current) и должен вернуться
+      // на АКТУАЛЬНУЮ позицию, а не на начальную (старый URL со старым startTime
+      // и был главным источником «сбитых» сессий после перемотки назад).
+      hlsUrlRef.current = buildStreamUrl(selectedQuality, selectedAudioTrack, safePos);
+
+      // Позиция покрыта буфером? (±0.5с на границу, минус хвостовой гэп)
+      let covered = false;
+      try {
+        const b = video.buffered;
+        for (let i = 0; i < b.length; i++) {
+          if (safePos >= b.start(i) - 0.5 && safePos <= b.end(i) - 0.3) {
+            covered = true;
+            break;
+          }
+        }
+      } catch {}
+
+      if (covered) {
+        hls.startLoad(safePos);
+      } else {
+        // Дальше буфера (перемотка назад за окно сегментов или далеко вперёд):
+        // перезапускаем источник с новым startTime — сервер поднимет HLS-сессию
+        // сразу под целевую позицию вместо каскада 404 по старому окну.
+        try {
+          hls.loadSource(hlsUrlRef.current);
+          hls.startLoad(safePos);
+        } catch {}
+      }
     }
     try { video.currentTime = safePos; } catch (e) {}
     if (shouldPlay) {
@@ -984,7 +1013,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       video.pause();
       setIsPlaying(false);
     }
-  }, [effectiveDuration, isDesktop, isPlaying, videoRef]);
+  }, [effectiveDuration, isDesktop, isPlaying, videoRef, buildStreamUrl, selectedQuality, selectedAudioTrack]);
 
   useEffect(() => {
     onAttachSeekHandler?.(doSeek);

@@ -623,29 +623,57 @@ class FFmpegService {
     ownerUserId?: string,
     tvClient?: TvClient | null,
   ): Promise<{ sessionId: string }> {
-    const isTv = tvClient === 'tizen' || tvClient === 'webos';
-    const segDuration = await this.getSegmentDuration(media, quality, isApple, isTv);
-    const cleanStartTime = Math.max(0, Math.floor(startTime));
     const deviceSuffix = isApple ? 'apple' : 'pc';
     const sessionId = sessionIdOverride || `${media.id}_q${quality}_a${audioIndex}_${deviceSuffix}`;
 
-    // 0. Проверяем in-flight ДО stale-kill: N конкурентных стартов раньше каждый
-    // сначала резал stale-варианты, а потом вставал в один промис — лишние
-    // retire/пересоздания и гонка retire-vs-create. Теперь лишние просто ждут.
-    // 1. Check if session creation is already in flight
+    // Лок сессии: промис кладётся в карту СИНХРОННО (до первого await внутри тела).
+    // Раньше in-flight проверка стояла после await getSegmentDuration, а запись в карту —
+    // ещё позже (после await killStaleQualityVariants): конкурентные старты (параллельные
+    // промахи hls.js при seek) проходили мимо защиты и запускали параллельные create —
+    // два ffmpeg на один sessionId, карта перезаписывалась, первый процесс висел призраком
+    // до zombie-свипера.
     const inFlight = this.sessionCreationPromises.get(sessionId);
     if (inFlight) {
       logger.debug('HLS', `Session creation in-flight for ${sessionId}, awaiting existing promise...`);
       return inFlight;
     }
 
-    // 1b. Смена качества (original <-> transcode, ручная или авто-фолбэк) даёт ДРУГОЙ
+    const work = this._startSessionLocked(media, quality, audioIndex, startTime, isApple, sessionId, ownerUserId, tvClient);
+    this.sessionCreationPromises.set(sessionId, work);
+    try {
+      return await work;
+    } finally {
+      if (this.sessionCreationPromises.get(sessionId) === work) {
+        this.sessionCreationPromises.delete(sessionId);
+      }
+    }
+  }
+
+  // Тело старта/рестарта сессии. Всегда вызывается под локом sessionCreationPromises
+  // (см. startContinuousHlsSession): любые await'ы тут уже не могут распахнуть дверь
+  // конкурентному create на тот же sessionId.
+  private async _startSessionLocked(
+    media: MediaItem,
+    quality: string,
+    audioIndex: number,
+    startTime: number,
+    isApple: boolean,
+    sessionId: string,
+    ownerUserId?: string,
+    tvClient?: TvClient | null,
+  ): Promise<{ sessionId: string }> {
+    const isTv = tvClient === 'tizen' || tvClient === 'webos';
+    const segDuration = await this.getSegmentDuration(media, quality, isApple, isTv);
+    const cleanStartTime = Math.max(0, Math.floor(startTime));
+    const deviceSuffix = isApple ? 'apple' : 'pc';
+
+    // Смена качества (original <-> transcode, ручная или авто-фолбэк) даёт ДРУГОЙ
     // sessionId — старая сессия того же плеера (тот же mount) сама не умрёт и будет
     // висеть жирным грузом до idle-таймаута. Убиваем такие stale-варианты ЖЁСТКО
     // (процесс + папка + проверка) ДО старта новой сессии.
     await this.killStaleQualityVariants(media.id, sessionId);
 
-    // 2. Check if an existing session covers this position.
+    // Check if an existing session covers this position.
     // Сессия с АВАРИЙНО умершим процессом (не EOF с кодом 0 — такие досчитали файл и раздают
     // сегменты с диска) никогда не переиспользуется — пересоздаём.
     let existing = this.continuousSessions.get(sessionId);
@@ -676,29 +704,14 @@ class FFmpegService {
 
       // Position changed (seek backward or far forward): HARD retire existing session
       // and only then create a new one — the old dir must be gone from disk first,
-      // иначе жирные сессии копятся и забивают 1ГБ RAM-диск. Concurrent requests
-      // ждут тот же промис (без дублей ffmpeg).
+      // иначе жирные сессии копятся и забивают 1ГБ RAM-диск. Лок уже взят внешней
+      // обёрткой — конкурентные старты ждут этот же промис (без дублей ffmpeg).
       logger.info('HLS', `🔄 Restarting session ${sessionId} for seek to ${cleanStartTime}s (prev start: ${currentStart}s, latest produced: ${currentLatestTime}s)`);
-      const restartPromise = (async () => {
-        await this.retireSession(sessionId, existing);
-        return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, false, tvClient);
-      })();
-      this.sessionCreationPromises.set(sessionId, restartPromise);
-      try {
-        return await restartPromise;
-      } finally {
-        this.sessionCreationPromises.delete(sessionId);
-      }
+      await this.retireSession(sessionId, existing);
+      return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, false, tvClient);
     }
 
-    const promise = this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, false, tvClient);
-    this.sessionCreationPromises.set(sessionId, promise);
-
-    try {
-      return await promise;
-    } finally {
-      this.sessionCreationPromises.delete(sessionId);
-    }
+    return this._createContinuousHlsSession(media, quality, audioIndex, cleanStartTime, isApple, sessionId, deviceSuffix, segDuration, ownerUserId, false, tvClient);
   }
 
   // Ждём реального завершения процесса (иначе Windows держит хендлы файлов
@@ -1281,7 +1294,14 @@ class FFmpegService {
         }
       }
       if (!isInit) {
-        session.lastRequestedSegmentIndex = Math.max(session.lastRequestedSegmentIndex, segmentIndex);
+        // Перемотка назад: якорь плейхеда опускается вслед за позицией (не Math.max),
+        // иначе throttle-логика (suspend/resume) считала гонку вперёд от СТАРОЙ позиции
+        // и работала криво после seek назад.
+        if (segmentIndex < session.lastRequestedSegmentIndex) {
+          session.lastRequestedSegmentIndex = segmentIndex;
+        } else {
+          session.lastRequestedSegmentIndex = Math.max(session.lastRequestedSegmentIndex, segmentIndex);
+        }
       }
 
       const segPath = path.join(session.sessionDir, segmentName);
@@ -1363,7 +1383,6 @@ class FFmpegService {
       }
 
       // Handle seeking (backward or far forward): The requested segment is outside the active session's window.
-      // Immediately start a fresh session at the requested segment's timestamp!
       // ТВ-маркер пробрасываем, иначе рестарт сбросит ТВ-движок на PC-правила.
       const targetStartTime = segmentIndex * segDuration;
       const isApple = sessionId.includes('_apple');
@@ -1372,6 +1391,17 @@ class FFmpegService {
       const audioMatch = sessionId.match(/_a(\d+)_/);
       const quality = qualityMatch ? qualityMatch[1] : 'original';
       const audioIndex = audioMatch ? parseInt(audioMatch[1], 10) : 0;
+
+      // PC/hls.js: быстрый 404 вместо синхронного рестарта под запросом фрагмента.
+      // hls.js сам перезапросит мастер с актуальным startTime (doSeek клиента обновляет
+      // hlsUrlRef) и сессия пересоздастся под целевую позицию — предсказуемо, без
+      // каскада 404 у параллельных фрагментов и без убийства живого ffmpeg на 3-12с
+      // под действующим HTTP-запросом. Нативные клиенты (Apple AVPlayer, ТВ-прошивки)
+      // мастером не управляются — для них рестарт оставляем как раньше.
+      if (!isApple && !tvClient) {
+        logger.info('HLS', `⚡ Seek outside window [${sessionId}] → segment #${segmentIndex} (${targetStartTime}s, latest produced #${session.latestSegmentIndex}): fast 404 for hls.js (it will reload master with the new position)`);
+        return null;
+      }
 
       logger.info('HLS', `⚡ Seek detected [${sessionId}] to segment #${segmentIndex} (${targetStartTime}s). Active window latest is #${session.latestSegmentIndex}. Re-starting session at ${targetStartTime}s`);
       await this.startContinuousHlsSession(media, quality, audioIndex, targetStartTime, isApple, sessionId, session.ownerUserId, tvClient);

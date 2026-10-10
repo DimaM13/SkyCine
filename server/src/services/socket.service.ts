@@ -944,11 +944,28 @@ class SocketService {
         this.emitRoomHealth(roomId, true);
         if (member?.userId && !hasOtherConnections) {
           this.lastHeartbeatByRoom.get(roomId)?.delete(member.userId);
-          try {
-            await ffmpegService.killUserSessionInRoom(roomId, member.userId);
-          } catch (e: any) {
-            logger.error('ROOM_HOST', `killUserSession on leave failed room=${roomId}: ${e?.message || e}`);
-          }
+          // Grace перед kill комнатной HLS-сессии: обрыв/реконнект сокета (flap в
+          // мс-секунды) раньше убивал сессию мгновенно, хотя плеер продолжал качать
+          // сегменты по HTTP — отсюда 404-шторм и «сбитые» сессии в комнатах.
+          // Через 5с перепроверяем: юзер снова в комнате (переподключился) — kill
+          // отменяем. Осознанный выход из комнаты kill'ит сессию с крошечной задержкой.
+          const leftUserId = member.userId;
+          const leftUsername = member.username;
+          setTimeout(async () => {
+            try {
+              const membersNow = this.roomMembers.get(roomId);
+              const stillInRoom = membersNow
+                ? Array.from(membersNow.values()).some((m: RoomMember) => m.userId === leftUserId)
+                : false;
+              if (stillInRoom) {
+                logger.debug('ROOM_LEAVE', `Skip HLS kill for ${leftUsername}: reconnected within grace window (room=${roomId})`);
+                return;
+              }
+              await ffmpegService.killUserSessionInRoom(roomId, leftUserId);
+            } catch (e: any) {
+              logger.error('ROOM_HOST', `killUserSession on leave failed room=${roomId}: ${e?.message || e}`);
+            }
+          }, 5000);
           // Хост ушёл последним сокетом — корону старейшему ПРОВЕРЕННОМУ участнику
           // из users. Гостевые id туда не встанут (FK rooms.hostUserId бы упал) и
           // spoof-ids отсекаем флагом verified. Нет таких — комната без хоста.
