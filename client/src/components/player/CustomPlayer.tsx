@@ -96,8 +96,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   // Seek-hold: при перемотке/перезапуске источника (hls.loadSource) и на старте
   // <video> мигает currentTime=0 (timeupdate с нулём) — строка прыгала в начало,
   // а потом назад к цели. Держим отображаемую позицию на цели, пока реальное
-  // время не догонит её (±1с) или не истечёт таймаут.
-  const seekHoldRef = useRef<{ pos: number; until: number } | null>(null);
+  // время не догонит её (±1с, seek завершён) или не истечёт таймаут.
+  // Первый seek особенный: браузер мгновенно отдаёт заданную позицию в
+  // currentTime (геттер обновляется синхронно), первый timeupdate совпадал
+  // с целью и hold отпускался ДО того, как loadSource/session-restart мигнул
+  // нулём — поэтому нужен !seeking + продление таймаута на медленный рестарт.
+  const seekHoldRef = useRef<{ pos: number; until: number; since: number; ext: number } | null>(null);
   const effectiveDurationRef = useRef<number>(effectiveDuration);
   useEffect(() => {
     effectiveDurationRef.current = effectiveDuration;
@@ -561,7 +565,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     // Старт/перезагрузка источника с позиции: пин дисплея, чтобы timeupdate
     // с нулём (до применения сикка) не сбрасывал строку времени в начало.
     if (startPos > 0) {
-      seekHoldRef.current = { pos: startPos, until: Date.now() + 8000 };
+      seekHoldRef.current = { pos: startPos, until: Date.now() + 8000, since: Date.now(), ext: 0 };
     }
 
     if (isDirect) {
@@ -984,7 +988,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     // Пин отображаемой позиции: пока <video> не доедет до цели (после loadSource
     // он мигает нулём), строка времени не должна сбрасываться в 0.
-    seekHoldRef.current = { pos: safePos, until: Date.now() + 5000 };
+    seekHoldRef.current = { pos: safePos, until: Date.now() + 5000, since: Date.now(), ext: 0 };
 
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
@@ -1168,7 +1172,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
-    const currentPos = video.currentTime || 0;
+    // Если переключение случилось посреди seek (медленный первый seek → буферизация
+    // → авто-фолбэк), currentTime может мигать нулём — перезагружаем источник с
+    // позиции ЦЕЛИ (seek-hold), а не с дёрганого 0.
+    const currentPos = seekHoldRef.current?.pos || video.currentTime || 0;
     const wasPlaying = !video.paused;
     const url = buildStreamUrl(selectedQuality, selectedAudioTrack, currentPos);
     loadStreamSource(url, isDirectPlay, wasPlaying, currentPos);
@@ -1187,8 +1194,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     let totalPos = video.currentTime || 0;
     const hold = seekHoldRef.current;
     if (hold) {
-      if (Math.abs(totalPos - hold.pos) <= 1.0 || Date.now() > hold.until) {
-        seekHoldRef.current = null; // догнали цель или таймаут — отпускаем
+      // Цель достигнута только когда seek ФАКТИЧЕСКИ завершён: геттер currentTime
+      // обновляется синхронно при присвоении, поэтому совпадение позиции при
+      // video.seeking=true ничего не значит (это и было «сброс на 0 при первом seek»).
+      const reached = Math.abs(totalPos - hold.pos) <= 1.0 && !video.seeking;
+      if (reached) {
+        seekHoldRef.current = null;
+      } else if (Date.now() > hold.until) {
+        // Первый seek может ждать серверный рестарт HLS-сессии (секции генерируются
+        // синхронно до ~6с) — если <video> ещё в состоянии seeking, продлеваем пин,
+        // но не дольше 20с от старта, иначе отпускаем на реальную позицию.
+        if (video.seeking && hold.ext < 4 && Date.now() - hold.since < 20000) {
+          hold.until = Date.now() + 4000;
+          hold.ext += 1;
+        } else {
+          seekHoldRef.current = null;
+        }
       } else {
         totalPos = hold.pos; // реальное время ещё не на цели (мигнул 0 после loadSource) — держим отображение
       }

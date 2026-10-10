@@ -16,6 +16,21 @@ let currentRunningThumbJobs = 0;
 const MAX_CONCURRENT_THUMBS = 2;
 const thumbJobQueue: Array<() => void> = [];
 
+// Виды картинок, генерируемых из видеофайла (когда TMDB-обложек нет):
+// thumb — широкоформатное превью как раньше; poster — вертикальный постер 2:3
+// для карточек; backdrop — широкий фон 16:9 для шапок/героев.
+type GeneratedImageKind = 'thumb' | 'poster' | 'backdrop';
+const GENERATED_IMAGE_SUFFIX: Record<GeneratedImageKind, string> = {
+  thumb: '',
+  poster: '_poster',
+  backdrop: '_backdrop',
+};
+const GENERATED_IMAGE_VF: Record<GeneratedImageKind, string> = {
+  thumb: 'scale=480:-1',
+  poster: 'scale=500:750:force_original_aspect_ratio=increase,crop=500:750',
+  backdrop: 'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720',
+};
+
 function queueThumbnailJob<T>(fn: () => Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     const execute = () => {
@@ -503,6 +518,18 @@ export class MediaController {
   }
 
   public static async getThumbnail(req: Request, res: Response): Promise<void> {
+    return MediaController.serveGeneratedImage(req, res, 'thumb');
+  }
+
+  public static async getPoster(req: Request, res: Response): Promise<void> {
+    return MediaController.serveGeneratedImage(req, res, 'poster');
+  }
+
+  public static async getBackdrop(req: Request, res: Response): Promise<void> {
+    return MediaController.serveGeneratedImage(req, res, 'backdrop');
+  }
+
+  private static async serveGeneratedImage(req: Request, res: Response, kind: GeneratedImageKind): Promise<void> {
     try {
       const id = String(req.params.id || '');
       // Маршрут публичный (прошивки TV тянут превью без токена) — режем traversal
@@ -513,7 +540,8 @@ export class MediaController {
       }
 
       const thumbDir = path.resolve(__dirname, '../../data/thumbnails');
-      const thumbFile = path.join(thumbDir, `${id}.jpg`);
+      const thumbFile = path.join(thumbDir, `${id}${GENERATED_IMAGE_SUFFIX[kind]}.jpg`);
+      const cacheKey = `${id}:${kind}`;
 
       // 1. Fast cache check (0ms response)
       if (fs.existsSync(thumbFile)) {
@@ -523,9 +551,9 @@ export class MediaController {
       }
 
       // 2. Fast failed-cache check (0ms response)
-      const failedTime = failedThumbnailIds.get(id);
+      const failedTime = failedThumbnailIds.get(cacheKey);
       if (failedTime && Date.now() - failedTime < 60000) {
-        res.status(404).send('Миниатюра недоступна');
+        res.status(404).send('Изображение недоступно');
         return;
       }
 
@@ -540,8 +568,8 @@ export class MediaController {
         try { fs.mkdirSync(thumbDir, { recursive: true }); } catch (e) {}
       }
 
-      // 3. Deduplicate in-flight generation for the same media ID
-      let task = activeThumbnailTasks.get(id);
+      // 3. Deduplicate in-flight generation for the same media ID + kind
+      let task = activeThumbnailTasks.get(cacheKey);
       if (!task) {
         task = queueThumbnailJob(async () => {
           return new Promise<string | null>((resolve) => {
@@ -556,7 +584,7 @@ export class MediaController {
               clearTimeout(timer);
               if (ok && fs.existsSync(thumbFile)) resolve(thumbFile);
               else {
-                failedThumbnailIds.set(id, Date.now());
+                failedThumbnailIds.set(cacheKey, Date.now());
                 resolve(null);
               }
             };
@@ -567,7 +595,7 @@ export class MediaController {
             try {
               proc = spawn('ffmpeg', [
                 '-y', '-ss', String(seekSec), '-i', media.filePath,
-                '-vframes', '1', '-q:v', '4', '-vf', 'scale=480:-1', thumbFile,
+                '-vframes', '1', '-q:v', '4', '-vf', GENERATED_IMAGE_VF[kind], thumbFile,
               ], { windowsHide: true, stdio: 'ignore' });
             } catch {
               finish(false);
@@ -577,10 +605,10 @@ export class MediaController {
             proc.on('close', (code) => finish(code === 0));
           });
         }).finally(() => {
-          activeThumbnailTasks.delete(id);
+          activeThumbnailTasks.delete(cacheKey);
         });
 
-        activeThumbnailTasks.set(id, task);
+        activeThumbnailTasks.set(cacheKey, task);
       }
 
       const resultFile = await task;
@@ -591,11 +619,11 @@ export class MediaController {
         // Наследие старых строк: редиректим только санитизированное, иначе 404
         const safePoster = sanitizeMediaUrl(media.posterPath);
         if (safePoster) res.redirect(safePoster);
-        else res.status(404).send('Не удалось создать миниатюру');
+        else res.status(404).send('Не удалось создать изображение');
       }
     } catch (err) {
       logger.error('MEDIA_ERR', 'API Error:', err);
-      res.status(500).send('Ошибка генерации миниатюры');
+      res.status(500).send('Ошибка генерации изображения');
     }
   }
 

@@ -1,5 +1,5 @@
 import { LazyImage } from './LazyImage';
-import React from 'react';
+import React, { useState } from 'react';
 import { Star, Film } from 'lucide-react';
 import { MediaItem } from '../../types';
 
@@ -21,6 +21,16 @@ export const MediaCard: React.FC<MediaCardProps> = ({
  ? Math.min(100, Math.round((userProgress / duration) * 100))
  : 0;
 
+ // Нет TMDB-постера? Тянем сгенерированный из видео (2:3). Битая TMDB-ссылка
+ // тоже сваливается в генерированный; если и он не родился — плейсхолдер.
+ const generatedPoster = `/api/media/item/${media.id}/poster`;
+ const [posterSrc, setPosterSrc] = useState(media.posterPath || generatedPoster);
+ const [posterFailed, setPosterFailed] = useState(false);
+ const handlePosterError = () => {
+ if (posterSrc !== generatedPoster) setPosterSrc(generatedPoster);
+ else setPosterFailed(true);
+ };
+
  const formatDuration = (secs: number) => {
  if (!secs || isNaN(secs)) return '';
  const h = Math.floor(secs / 3600);
@@ -36,11 +46,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({
  >
  {/* Poster Image Container */}
  <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
- {media.posterPath ? (
+ {!posterFailed ? (
  <LazyImage
- src={media.posterPath}
+ src={posterSrc}
  alt={media.title}
  loading="lazy"
+ onError={handlePosterError}
  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
  />
  ) : (

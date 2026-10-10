@@ -143,7 +143,7 @@ export const HomePage: React.FC = () => {
  ? Math.round((item.progressSeconds / item.durationSeconds) * 100)
  : 0;
 
- const thumbUrl = item.stillPath || (item.type === 'EPISODE' ? `/api/media/item/${item.mediaId}/thumbnail` : (item.backdropPath || item.posterPath));
+ const thumbUrl = item.stillPath || (item.type === 'EPISODE' ? `/api/media/item/${item.mediaId}/thumbnail` : (item.backdropPath || item.posterPath || `/api/media/item/${item.mediaId}/backdrop`));
 
  return (
  <div
@@ -285,18 +285,16 @@ export const HomePage: React.FC = () => {
  className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
  >
  <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
- {show.posterPath ? (
- <LazyImage
- src={show.posterPath}
- alt={show.showTitle}
- className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
- />
- ) : (
- <div className="w-full h-full flex flex-col items-center justify-center p-4 text-slate-500">
+ <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-slate-500">
  <Tv className="w-10 h-10 text-cinema-gold/30 mb-2" />
  <span className="text-xs text-center font-bold text-white">{show.showTitle}</span>
  </div>
- )}
+ <LazyImage
+ src={show.posterPath || `/api/media/item/${show.id}/poster`}
+ alt={show.showTitle}
+ onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+ className="relative w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+ />
 
  {show.rating && show.rating > 0 && (
  <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/70 px-2 py-0.5 rounded-lg border border-white/10 text-cinema-gold text-[10px] font-black shadow-lg">

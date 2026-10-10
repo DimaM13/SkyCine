@@ -30,6 +30,10 @@ export const MediaModal: React.FC<MediaModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
 
+  // Стадии фолбэка шапки: 0 — TMDB backdrop/poster, 1 — генерация из видео, 2 — плейсхолдер.
+  const [backdropStage, setBackdropStage] = useState(0);
+  useEffect(() => { setBackdropStage(0); }, [media?.id]);
+
   // Fix Match State
   const [showMatchModal, setShowMatchModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -145,10 +149,13 @@ export const MediaModal: React.FC<MediaModalProps> = ({
           <div className="overflow-y-auto">
             {/* Header Backdrop Banner */}
             <div className="relative h-64 md:h-80 w-full overflow-hidden bg-cinema-950">
-              {media.backdropPath || media.posterPath ? (
+              {backdropStage < 2 ? (
                 <img
-                  src={media.backdropPath || media.posterPath}
+                  src={backdropStage === 0
+                    ? (media.backdropPath || media.posterPath || `/api/media/item/${media.id}/backdrop`)
+                    : `/api/media/item/${media.id}/backdrop`}
                   alt={media.title}
+                  onError={() => setBackdropStage((s) => (s === 0 && (media.backdropPath || media.posterPath) ? 1 : 2))}
                   className="w-full h-full object-cover object-top filter brightness-85"
                 />
               ) : (

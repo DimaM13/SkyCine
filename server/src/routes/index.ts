@@ -47,6 +47,8 @@ router.get('/media/shows', authenticateToken, MediaController.getShows);
 router.get('/media/shows/:showTitle/episodes', authenticateToken, MediaController.getShowEpisodes);
 router.get('/media/item/:id', authenticateToken, MediaController.getMediaItem);
 router.get('/media/item/:id/thumbnail', MediaController.getThumbnail);
+router.get('/media/item/:id/poster', MediaController.getPoster);
+router.get('/media/item/:id/backdrop', MediaController.getBackdrop);
 router.get('/media/search', authenticateToken, MediaController.searchMedia);
 router.get('/media/continue-watching', authenticateToken, MediaController.getContinueWatching);
 router.post('/media/progress', authenticateToken, MediaController.updateProgress);

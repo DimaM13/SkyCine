@@ -76,6 +76,9 @@ export const LibraryPage: React.FC = () => {
       return g ? JSON.parse(g) : null;
     } catch { return null; }
   });
+  // Стадии фолбэка постера шоу: 0 — TMDB, 1 — генерация из видео, 2 — плейсхолдер
+  const [showPosterStage, setShowPosterStage] = useState(0);
+  useEffect(() => { setShowPosterStage(0); }, [selectedShow?.id]);
   const [episodes, setEpisodes] = useState<MediaItem[]>([]);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState<number | 'all'>(() => {
@@ -765,16 +768,21 @@ export const LibraryPage: React.FC = () => {
 
               {/* Show Hero */}
               <div className="relative rounded-3xl overflow-hidden bg-cinema-900 border border-white/10 shadow-2xl">
-                {selectedShow.backdropPath && (
-                  <div className="absolute inset-0 z-0 opacity-20 bg-cover bg-center pointer-events-none" style={{ backgroundImage: `url(${selectedShow.backdropPath})` }}>
-                    <div className="absolute inset-0 bg-gradient-to-t from-cinema-950 via-cinema-950/80 to-transparent" />
-                  </div>
-                )}
+                {/* Декоративный фон: если сгенерированный backdrop не родился — просто не отрисуется */}
+                <div
+                  className="absolute inset-0 z-0 opacity-20 bg-cover bg-center pointer-events-none"
+                  style={{ backgroundImage: `url(${selectedShow.backdropPath || `/api/media/item/${selectedShow.id}/backdrop`})` }}
+                >
+                  <div className="absolute inset-0 bg-gradient-to-t from-cinema-950 via-cinema-950/80 to-transparent" />
+                </div>
 
                 <div className="relative z-10 p-6 md:p-8 flex flex-col md:flex-row gap-6 md:gap-8 items-start">
-                  {selectedShow.posterPath ? (
+                  {showPosterStage < 2 ? (
                     <img
-                      src={selectedShow.posterPath}
+                      src={showPosterStage === 0
+                        ? (selectedShow.posterPath || `/api/media/item/${selectedShow.id}/poster`)
+                        : `/api/media/item/${selectedShow.id}/poster`}
+                      onError={() => setShowPosterStage((s) => (s === 0 && selectedShow.posterPath ? 1 : 2))}
                       alt={selectedShow.showTitle}
                       loading="lazy"
                       className="w-36 md:w-52 aspect-[2/3] rounded-2xl object-cover shadow-2xl shrink-0 border border-white/10"
@@ -1086,19 +1094,17 @@ export const LibraryPage: React.FC = () => {
                       className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
                     >
                       <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
-                        {show.posterPath ? (
-                          <img
-                            src={show.posterPath}
-                            alt={show.showTitle}
-                            loading="lazy"
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center p-4 text-slate-500">
-                            <Tv className="w-10 h-10 text-cinema-gold/30 mb-2" />
-                            <span className="text-xs text-center font-bold text-white">{show.showTitle}</span>
-                          </div>
-                        )}
+                        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-slate-500">
+                          <Tv className="w-10 h-10 text-cinema-gold/30 mb-2" />
+                          <span className="text-xs text-center font-bold text-white">{show.showTitle}</span>
+                        </div>
+                        <img
+                          src={show.posterPath || `/api/media/item/${show.id}/poster`}
+                          alt={show.showTitle}
+                          loading="lazy"
+                          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                          className="relative w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        />
 
                         {show.rating && show.rating > 0 && (
                           <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/70 backdrop-blur-md px-2 py-0.5 rounded-lg border border-white/10 text-cinema-gold text-[10px] font-black shadow-lg">

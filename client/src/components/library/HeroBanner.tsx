@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Play, Users, Star, Clock, Film } from 'lucide-react';
 import { MediaItem } from '../../types';
 
@@ -15,6 +15,11 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
  onCreateRoom,
  onOpenDetails,
 }) => {
+ // Стадии фолбэка фона: 0 — TMDB backdrop/poster, 1 — генерация из видео, 2 — скрыто.
+ // Сбрасываем на 0 при смене медиа (useState-инициализатор не переисполнится).
+ const [backdropStage, setBackdropStage] = useState(0);
+ React.useEffect(() => { setBackdropStage(0); }, [media?.id]);
+
  if (!media) {
  return (
  <div className="w-full h-80 md:h-[450px] bg-cinema-900 rounded-3xl border border-white/10 flex flex-col items-center justify-center text-slate-400 p-6">
@@ -33,16 +38,22 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({
  return `${h > 0 ? `${h}ч ` : ''}${m}мин`;
  };
 
- const backdropUrl = media.backdropPath || media.posterPath;
+ // Фон: TMDB backdrop → TMDB poster → сгенерированный из видео (16:9).
+ const generatedBackdrop = `/api/media/item/${media.id}/backdrop`;
+ const backdropSrc = backdropStage === 0
+   ? (media.backdropPath || media.posterPath || generatedBackdrop)
+   : generatedBackdrop;
+ const handleBackdropError = () => setBackdropStage((s) => (s === 0 && (media.backdropPath || media.posterPath) ? 1 : 2));
 
  return (
  <div className="relative w-full h-80 md:h-[480px] rounded-3xl overflow-hidden shadow-2xl border border-white/10 group mb-8">
  {/* Background Backdrop Image */}
- {backdropUrl && (
+ {backdropStage < 2 && (
  <img
- src={backdropUrl}
- alt={media.title}
- className="absolute inset-0 w-full h-full object-cover object-top scale-105 group-hover:scale-100 transition-transform duration-1000 filter brightness-90"
+   src={backdropSrc}
+   alt={media.title}
+   onError={handleBackdropError}
+   className="absolute inset-0 w-full h-full object-cover object-top scale-105 group-hover:scale-100 transition-transform duration-1000 filter brightness-90"
  />
  )}
 
