@@ -56,14 +56,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
           )}
 
           <Link to="/" className="flex items-center gap-3 group">
-            {/* Cinematic clapper mark */}
-            <div className="relative w-10 h-10 rounded-2xl overflow-hidden bg-gradient-to-br from-yellow-300 via-cinema-gold to-amber-600 shadow-glow-gold ring-1 ring-yellow-200/30 transition-all duration-300 group-hover:scale-105 group-hover:shadow-[0_0_32px_-4px_rgba(229,160,13,0.7)]">
-              <div className="absolute top-0 inset-x-0 h-2.5 bg-[repeating-linear-gradient(-45deg,#07090e_0_4px,#fde68a_4px_8px)] shadow-[0_1px_3px_rgba(0,0,0,0.35)]" />
-              <div className="absolute inset-0 flex items-center justify-center pt-1.5">
-                <Play className="w-4 h-4 text-black fill-black ml-0.5 drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]" />
-              </div>
-              <div className="pointer-events-none absolute inset-y-0 left-0 w-1/3 animate-logo-shine bg-gradient-to-r from-transparent via-white/45 to-transparent" />
-              <div className="pointer-events-none absolute inset-0 rounded-2xl ring-1 ring-inset ring-white/25" />
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-cinema-gold to-yellow-300 flex items-center justify-center shadow-glow-gold transform group-hover:scale-105 transition-transform">
+              <Play className="w-5 h-5 text-black fill-black ml-0.5" />
             </div>
             <div className="flex flex-col">
               <span className="text-xl font-extrabold tracking-wider font-['Outfit']">
