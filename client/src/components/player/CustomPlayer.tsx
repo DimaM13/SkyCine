@@ -93,6 +93,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     ? media.durationSeconds
     : (duration > 0 ? duration : 0);
   const currentTimeRef = useRef<number>(initialPosition || 0);
+  // Seek-hold: при перемотке/перезапуске источника (hls.loadSource) и на старте
+  // <video> мигает currentTime=0 (timeupdate с нулём) — строка прыгала в начало,
+  // а потом назад к цели. Держим отображаемую позицию на цели, пока реальное
+  // время не догонит её (±1с) или не истечёт таймаут.
+  const seekHoldRef = useRef<{ pos: number; until: number } | null>(null);
   const effectiveDurationRef = useRef<number>(effectiveDuration);
   useEffect(() => {
     effectiveDurationRef.current = effectiveDuration;
@@ -553,6 +558,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
+    // Старт/перезагрузка источника с позиции: пин дисплея, чтобы timeupdate
+    // с нулём (до применения сикка) не сбрасывал строку времени в начало.
+    if (startPos > 0) {
+      seekHoldRef.current = { pos: startPos, until: Date.now() + 8000 };
+    }
+
     if (isDirect) {
       if (hlsRef.current) {
         hlsRef.current.destroy();
@@ -971,6 +982,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
+    // Пин отображаемой позиции: пока <video> не доедет до цели (после loadSource
+    // он мигает нулём), строка времени не должна сбрасываться в 0.
+    seekHoldRef.current = { pos: safePos, until: Date.now() + 5000 };
+
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
     if (hlsRef.current) {
@@ -1169,7 +1184,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setIsPlaying(actualIsPlaying);
     }
 
-    const totalPos = video.currentTime || 0;
+    let totalPos = video.currentTime || 0;
+    const hold = seekHoldRef.current;
+    if (hold) {
+      if (Math.abs(totalPos - hold.pos) <= 1.0 || Date.now() > hold.until) {
+        seekHoldRef.current = null; // догнали цель или таймаут — отпускаем
+      } else {
+        totalPos = hold.pos; // реальное время ещё не на цели (мигнул 0 после loadSource) — держим отображение
+      }
+    }
     currentTimeRef.current = totalPos;
     if (!isScrubbing && !video.seeking) {
       setCurrentTime(totalPos);
