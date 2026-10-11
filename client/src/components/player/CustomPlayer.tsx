@@ -3,7 +3,7 @@ import Hls from 'hls.js';
 import {
   Play, Pause, Volume2, VolumeX, Volume1,
   RotateCcw, RotateCw, Settings,
-  Maximize, Minimize
+  Maximize, Minimize, SkipBack, SkipForward
 } from 'lucide-react';
 import { MediaItem, MediaTrack, RoomState } from '../../types';
 import { ReactionOverlay } from './ReactionOverlay';
@@ -16,6 +16,15 @@ import { SeekFlash, CenterFlash, ShortcutsButton, ShortcutsModal } from './Playe
 import type { SeekFlashData, CenterFlashData } from './PlayerOverlays';
 
 export { qualityLabel };
+
+// Краткие данные соседней серии для навигации prev/next (без tracks).
+export interface EpisodeNavItem {
+  id: string;
+  title: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  stillPath?: string | null;
+}
 
 interface CustomPlayerProps {
   media: MediaItem;
@@ -45,6 +54,9 @@ interface CustomPlayerProps {
   videoRef?: React.RefObject<HTMLVideoElement>;
   onStreamModeDetected?: (mode: 'direct' | 'fmp4') => void;
   onControlsVisibilityChange?: (visible: boolean) => void;
+  // Навигация по сериям (только одиночный просмотр; в комнатах — не передаётся).
+  episodeNav?: { prev?: EpisodeNavItem | null; next?: EpisodeNavItem | null };
+  onPlayEpisode?: (id: string) => void;
 }
 
 export const CustomPlayer: React.FC<CustomPlayerProps> = ({
@@ -74,6 +86,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   onAttachGetIsPaused,
   videoRef: externalVideoRef,
   onControlsVisibilityChange,
+  episodeNav,
+  onPlayEpisode,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const internalVideoRef = useRef<HTMLVideoElement>(null);
@@ -89,9 +103,16 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const [scrubTime, setScrubTime] = useState(0);
   const displayTime = isScrubbing ? scrubTime : currentTime;
   const [duration, setDuration] = useState(media.durationSeconds || 0);
-  const effectiveDuration = (media.durationSeconds && media.durationSeconds > 0)
-    ? media.durationSeconds
-    : (duration > 0 ? duration : 0);
+  // Реальная длительность <video> (контейнер/плейлист) — источник правды для бара:
+  // БД-длительность сканера может быть короче реального файла (аудио длиннее видео,
+  // min(format, videoStream)) — строка «доигрывала», а видео ещё шло. Как только
+  // элемент отдал валидный duration — используем его, БД остаётся фолбэком.
+  const [elemDuration, setElemDuration] = useState(0);
+  const effectiveDuration = elemDuration > 0
+    ? elemDuration
+    : ((media.durationSeconds && media.durationSeconds > 0)
+      ? media.durationSeconds
+      : (duration > 0 ? duration : 0));
   const currentTimeRef = useRef<number>(initialPosition || 0);
   // Seek-hold: при перемотке/перезапуске источника (hls.loadSource) и на старте
   // <video> мигает currentTime=0 (timeupdate с нулём) — строка прыгала в начало,
@@ -126,6 +147,85 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   const [showShortcuts, setShowShortcuts] = useState(false);
   const flashKeyRef = useRef(0);
   const [techStats, setTechStats] = useState({ droppedFrames: 0, totalFrames: 0, hlsBitrate: 0, fallbackStage: 0, bufferedAhead: 0 });
+  const videoEndedRef = useRef(false);
+  const isPlayingRef = useRef(false);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+
+  // === Auto-next episode: 5-секундный countdown в конце серии ===
+  const [autoNextSec, setAutoNextSec] = useState<number | null>(null);
+  const autoNextTimerRef = useRef<number | null>(null);
+  const autoNextSecRef = useRef<number | null>(null);
+  // «Отмена» гасит countdown до тех пор, пока пользователь не отмотает от конца (>8с).
+  const autoNextDismissedRef = useRef(false);
+  const episodeNavRef = useRef(episodeNav);
+  const onPlayEpisodeRef = useRef(onPlayEpisode);
+  useEffect(() => { episodeNavRef.current = episodeNav; }, [episodeNav]);
+  useEffect(() => { onPlayEpisodeRef.current = onPlayEpisode; }, [onPlayEpisode]);
+  const nextEpisode = !isWatchTogether && episodeNav?.next ? episodeNav.next : null;
+
+  const clearAutoNext = useCallback(() => {
+    if (autoNextTimerRef.current) {
+      clearInterval(autoNextTimerRef.current);
+      autoNextTimerRef.current = null;
+    }
+    autoNextSecRef.current = null;
+    setAutoNextSec(null);
+  }, []);
+
+  const navigateToNext = useCallback(() => {
+    const next = episodeNavRef.current?.next;
+    if (next && !isWatchTogether) {
+      onPlayEpisodeRef.current?.(next.id);
+    }
+  }, [isWatchTogether]);
+
+  const startAutoNext = useCallback((fromSec?: number) => {
+    if (autoNextTimerRef.current) return; // уже тикает
+    let s = fromSec !== undefined ? Math.max(1, Math.min(5, Math.ceil(fromSec))) : 5;
+    autoNextSecRef.current = s;
+    setAutoNextSec(s);
+    setShowControls(true); // countdown виден — контролы не прячем
+    autoNextTimerRef.current = window.setInterval(() => {
+      s -= 1;
+      if (s <= 0) {
+        // Countdown кончился: переходим только если видео реально доиграло
+        // (ended уже был) — иначе держим «0» и ждём ended.
+        if (videoEndedRef.current) {
+          clearAutoNext();
+          navigateToNext();
+        } else {
+          s = 0;
+          autoNextSecRef.current = 0;
+          setAutoNextSec(0);
+        }
+      } else {
+        autoNextSecRef.current = s;
+        setAutoNextSec(s);
+        setShowControls(true);
+      }
+    }, 1000);
+  }, [clearAutoNext, navigateToNext]);
+
+  // Вызывается из timeupdate (web+desktop): запуск/гашение countdown у конца,
+  // переарм после «Отмены» при отмотке от конца.
+  const maybeAutoNext = useCallback((totalPos: number, isPaused: boolean) => {
+    const next = episodeNavRef.current?.next;
+    const dur = effectiveDurationRef.current;
+    if (isWatchTogether || !next || dur <= 0) return;
+    const remaining = dur - totalPos;
+    if (remaining > 8) {
+      autoNextDismissedRef.current = false;
+      if (autoNextTimerRef.current && remaining > 6.5) clearAutoNext();
+      return;
+    }
+    if (autoNextDismissedRef.current) return;
+    // Пауза в последние секунды — countdown не показываем (намеренная остановка).
+    if (remaining <= 5.5 && remaining > 0 && !isPaused && !videoEndedRef.current) {
+      if (!autoNextTimerRef.current) startAutoNext(remaining);
+    }
+  }, [clearAutoNext, startAutoNext, isWatchTogether]);
+
+  useEffect(() => () => clearAutoNext(), [clearAutoNext]);
 
   const audioTracks = useMemo(() => media.tracks?.filter((t: MediaTrack) => t.type === 'AUDIO') || [], [media.tracks]);
   const subtitleTracks = useMemo(() => media.tracks?.filter((t: MediaTrack) => t.type === 'SUBTITLE') || [], [media.tracks]);
@@ -525,20 +625,41 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         if (t > 0.3) {
           setHasVideoFrame(true);
         }
-        if (!isScrubbing) setCurrentTime(t);
+        if (!isScrubbing) {
+          setCurrentTime(t);
+          maybeAutoNext(t, !isPlayingRef.current);
+        }
       }),
       dp.onPlayState((playing: boolean) => {
         setIsPlaying(playing);
         setIsBuffering(false);
+        if (playing) {
+          videoEndedRef.current = false;
+        } else if (!videoEndedRef.current) {
+          clearAutoNext(); // пауза в последние секунды — countdown гасим
+        }
       }),
       dp.onDuration((d: number) => {
-        if (d > 0) setDuration(d);
+        if (d > 0) {
+          setDuration(d);
+          setElemDuration((prev) => (Math.abs(prev - d) > 0.5 ? d : prev));
+        }
       }),
       dp.onBuffering((buf: boolean) => {
         setIsBuffering(buf);
       }),
       dp.onEnded(() => {
         setIsPlaying(false);
+        videoEndedRef.current = true;
+        const next = episodeNavRef.current?.next;
+        if (next && !autoNextDismissedRef.current) {
+          if (autoNextTimerRef.current && (autoNextSecRef.current ?? 1) <= 0) {
+            clearAutoNext();
+            navigateToNext();
+          } else {
+            startAutoNext(5);
+          }
+        }
       })
     ];
 
@@ -974,6 +1095,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     setScrubTime(safePos);
     // Коммит seek всегда завершает скраббинг (иначе timeupdate игносрится и строка/время стоят)
     setIsScrubbing(false);
+    // Перемотка от конца гасит countdown авто-перехода (если тикает) и снимает ended-флаг.
+    videoEndedRef.current = false;
+    if (safePos < effectiveDuration - 8) {
+      autoNextDismissedRef.current = false;
+      clearAutoNext();
+    }
 
     if (isDesktop) {
       const dp = (window as any).desktopPlayer;
@@ -1032,7 +1159,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       video.pause();
       setIsPlaying(false);
     }
-  }, [effectiveDuration, isDesktop, isPlaying, videoRef, buildStreamUrl, selectedQuality, selectedAudioTrack]);
+  }, [effectiveDuration, isDesktop, isPlaying, videoRef, buildStreamUrl, selectedQuality, selectedAudioTrack, clearAutoNext]);
 
   useEffect(() => {
     onAttachSeekHandler?.(doSeek);
@@ -1182,6 +1309,13 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [selectedQuality, selectedAudioTrack, isDirectPlay, isDesktop, buildStreamUrl, loadStreamSource, videoRef, isAppleDevice, media.id, sendHlsSessionEnd]);
 
   // Video Time Update
+  const syncElemDuration = useCallback(() => {
+    const v = videoRef.current;
+    if (v && v.duration && isFinite(v.duration) && v.duration > 0) {
+      setElemDuration((prev) => (Math.abs(prev - v.duration) > 0.5 ? v.duration : prev));
+    }
+  }, [videoRef]);
+
   const handleTimeUpdate = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -1219,14 +1353,22 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       setCurrentTime(totalPos);
     }
 
-    if ((!media.durationSeconds || media.durationSeconds <= 0) && video.duration && !isNaN(video.duration)) {
-      setDuration(video.duration);
+    // Всегда синхронизируем реальную длительность элемента (не только когда БД пуста):
+    // именно она определяет, когда на самом деле сработает ended. Guard: Infinity/NaN
+    // бывает на HLS до загрузки сегментов.
+    if (video.duration && isFinite(video.duration) && video.duration > 0) {
+      setElemDuration((prev) => (Math.abs(prev - video.duration) > 0.5 ? video.duration : prev));
+      if (!media.durationSeconds || media.durationSeconds <= 0) {
+        setDuration(video.duration);
+      }
     }
 
     if (video.buffered.length > 0) {
       const bufEnd = video.buffered.end(video.buffered.length - 1);
       setBufferedTime(bufEnd);
     }
+
+    maybeAutoNext(totalPos, video.paused);
   };
 
   const lastReportedPosRef = useRef<number>(-1);
@@ -1273,7 +1415,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     setShowControls(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     controlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying) {
+      // Countdown авто-перехода держит контролы открытыми (иначе кнопки «Отмена» уходят)
+      if (isPlaying && !autoNextTimerRef.current) {
         setShowControls(false);
         setShowSettingsMenu(false);
       }
@@ -1695,6 +1838,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
         <video
           ref={videoRef}
           onTimeUpdate={handleTimeUpdate}
+          onLoadedMetadata={syncElemDuration}
+          onDurationChange={syncElemDuration}
           onWaiting={handleWaiting}
           onCanPlay={handleCanPlay}
           onCanPlayThrough={() => setIsBuffering(false)}
@@ -1702,16 +1847,32 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             setIsBuffering(false);
             if (videoRef.current) setIsPlaying(!videoRef.current.paused);
           }}
-          onPlay={() => setIsPlaying(true)}
+          onPlay={() => {
+            setIsPlaying(true);
+            videoEndedRef.current = false;
+          }}
           onPause={() => {
             setIsPlaying(false);
+            if (!videoEndedRef.current) clearAutoNext();
             reportProgress();
           }}
           onEnded={() => {
             setIsPlaying(false);
+            videoEndedRef.current = true;
             const dur = effectiveDurationRef.current || media.durationSeconds || 0;
             if (dur > 0) {
               reportProgress(dur);
+            }
+            const next = episodeNavRef.current?.next;
+            if (next && !autoNextDismissedRef.current) {
+              // Countdown уже на «0» (тик опередил ended) — переходим сразу;
+              // иначе запускаем/продолжаем тикать (startAutoNext идемпотентен).
+              if (autoNextTimerRef.current && (autoNextSecRef.current ?? 1) <= 0) {
+                clearAutoNext();
+                navigateToNext();
+              } else {
+                startAutoNext(5);
+              }
             }
           }}
           onClick={togglePlay}
@@ -1770,6 +1931,63 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       <SeekFlash flash={seekFlash} />
       <CenterFlash flash={centerFlash} />
       <ShortcutsModal open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+
+      {/* Auto-next episode countdown (5s at episode end) */}
+      {autoNextSec !== null && nextEpisode && (
+        <div className="absolute bottom-24 sm:bottom-28 right-3 sm:right-6 z-40 w-[290px] max-w-[calc(100vw-1.5rem)] bg-cinema-900/95 border border-cinema-gold/30 backdrop-blur-xl rounded-2xl p-3.5 shadow-cinema-card animate-fade-in pointer-events-auto">
+          <div className="flex items-start gap-3">
+            <div className="relative w-16 h-16 rounded-xl overflow-hidden bg-cinema-800 shrink-0">
+              <img
+                src={nextEpisode.stillPath || `/api/media/item/${nextEpisode.id}/thumbnail`}
+                alt=""
+                className="w-full h-full object-cover"
+                onError={(e) => {
+                  const t = e.currentTarget as HTMLImageElement;
+                  if (!t.src.includes('/thumbnail')) t.src = `/api/media/item/${nextEpisode.id}/thumbnail`;
+                  else t.style.display = 'none';
+                }}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-cinema-gold/90 mb-0.5">
+                Далее через {autoNextSec}с
+              </div>
+              <div className="text-xs font-semibold text-white truncate">
+                {nextEpisode.seasonNumber ? `S${nextEpisode.seasonNumber}E${nextEpisode.episodeNumber}` : ''}
+                {nextEpisode.seasonNumber ? ' · ' : ''}
+                {nextEpisode.title}
+              </div>
+              <div className="mt-2 h-1 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-cinema-gold rounded-full transition-[width] duration-1000 ease-linear"
+                  style={{ width: `${(autoNextSec / 5) * 100}%` }}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={() => {
+                reportProgress();
+                clearAutoNext();
+                onPlayEpisode?.(nextEpisode.id);
+              }}
+              className="flex-1 min-h-[38px] rounded-xl bg-cinema-gold text-black text-xs font-bold hover:bg-amber-400 transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-white"
+            >
+              Смотреть сейчас
+            </button>
+            <button
+              onClick={() => {
+                autoNextDismissedRef.current = true;
+                clearAutoNext();
+              }}
+              className="px-4 min-h-[38px] rounded-xl bg-white/10 text-slate-200 text-xs font-bold hover:bg-white/20 transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold"
+            >
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Seek hint + auto-quality toasts */}
       {(seekHint || autoNotice) && (
@@ -1955,6 +2173,34 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                 <span className="absolute inset-0 flex items-center justify-center text-[7px] font-bold pt-[2px]">10</span>
               </span>
             </button>
+
+            {/* Episode navigation (series only, solo playback) */}
+            {!isWatchTogether && episodeNav?.prev && (
+              <button
+                onClick={() => {
+                  reportProgress();
+                  onPlayEpisode?.(episodeNav.prev!.id);
+                }}
+                aria-label="Предыдущая серия"
+                title={`Предыдущая серия${episodeNav.prev.seasonNumber ? ` — S${episodeNav.prev.seasonNumber}E${episodeNav.prev.episodeNumber}` : ''}`}
+                className="flex p-1.5 sm:p-2 min-w-[36px] sm:min-w-[40px] min-h-[40px] items-center justify-center text-slate-300 hover:text-cinema-gold hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg"
+              >
+                <SkipBack className="w-5 h-5" />
+              </button>
+            )}
+            {!isWatchTogether && episodeNav?.next && (
+              <button
+                onClick={() => {
+                  reportProgress();
+                  onPlayEpisode?.(episodeNav.next!.id);
+                }}
+                aria-label="Следующая серия"
+                title={`Следующая серия${episodeNav.next.seasonNumber ? ` — S${episodeNav.next.seasonNumber}E${episodeNav.next.episodeNumber}` : ''}`}
+                className="flex p-1.5 sm:p-2 min-w-[36px] sm:min-w-[40px] min-h-[40px] items-center justify-center text-slate-300 hover:text-cinema-gold hover:scale-110 active:scale-95 transition-transform cursor-pointer focus-visible:ring-2 focus-visible:ring-cinema-gold rounded-lg"
+              >
+                <SkipForward className="w-5 h-5" />
+              </button>
+            )}
 
             {/* Volume */}
             <div className="flex items-center gap-2">

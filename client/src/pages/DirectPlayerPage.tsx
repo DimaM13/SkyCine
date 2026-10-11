@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { apiClient } from '../api/client';
-import { CustomPlayer } from '../components/player/CustomPlayer';
+import { CustomPlayer, EpisodeNavItem } from '../components/player/CustomPlayer';
 import { MediaItem } from '../types';
 
 export const DirectPlayerPage: React.FC = () => {
@@ -10,10 +10,12 @@ export const DirectPlayerPage: React.FC = () => {
   const navigate = useNavigate();
   const [media, setMedia] = useState<MediaItem | null>(null);
   const [loading, setLoading] = useState(true);
+  const [episodeNav, setEpisodeNav] = useState<{ prev: EpisodeNavItem | null; next: EpisodeNavItem | null } | null>(null);
 
   useEffect(() => {
     if (!id) return;
     setLoading(true);
+    setEpisodeNav(null);
     apiClient.get(`/media/item/${id}`)
       .then((res) => setMedia(res.data.media))
       .catch(() => {
@@ -22,6 +24,37 @@ export const DirectPlayerPage: React.FC = () => {
       })
       .finally(() => setLoading(false));
   }, [id, navigate]);
+
+  // Для серий: соседние серии (отсортированы по season/episode на сервере) —
+  // кнопки prev/next и авто-переход в плеере.
+  const showTitle = (media as any)?.showTitle as string | undefined;
+  useEffect(() => {
+    if (!showTitle || !media?.id) {
+      setEpisodeNav(null);
+      return;
+    }
+    let stale = false;
+    apiClient.get(`/media/shows/${encodeURIComponent(showTitle)}/episodes`)
+      .then((res) => {
+        if (stale) return;
+        const episodes: any[] = res.data.episodes || [];
+        const idx = episodes.findIndex((e) => e.id === media.id);
+        if (idx < 0) return;
+        const brief = (e: any): EpisodeNavItem => ({
+          id: e.id,
+          title: e.title || '',
+          seasonNumber: e.seasonNumber ?? undefined,
+          episodeNumber: e.episodeNumber ?? undefined,
+          stillPath: e.stillPath ?? null,
+        });
+        setEpisodeNav({
+          prev: idx > 0 ? brief(episodes[idx - 1]) : null,
+          next: idx < episodes.length - 1 ? brief(episodes[idx + 1]) : null,
+        });
+      })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [media?.id, showTitle]);
 
   if (loading || !media) {
     return (
@@ -84,6 +117,8 @@ export const DirectPlayerPage: React.FC = () => {
         initialPosition={initialPosition}
         isWatchTogether={false}
         onBack={handleBack}
+        episodeNav={episodeNav || undefined}
+        onPlayEpisode={(epId) => navigate(`/watch/${epId}`)}
       />
     </div>
   );

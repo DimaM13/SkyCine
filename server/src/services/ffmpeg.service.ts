@@ -1132,7 +1132,19 @@ class FFmpegService {
 
     for (let i = 0; i < totalSegments; i++) {
       const numStr = i.toString().padStart(4, '0');
-      m3u8 += `#EXTINF:${segmentDuration.toFixed(6)},\n`;
+      // Последний сегмент реального файла короче номинала (транскод-хвост):
+      // EXTINF хвоста = остаток длительности, иначе сумма EXTINF (то, что браузер
+      // покажет как video.duration) завышена и бар «не доигрывает» до конца.
+      // Копирование с floor-хвостом remaining всегда >= segmentDuration — остаётся
+      // номинал (min ниже), спека TARGETDURATION не нарушается.
+      let segExtinf = segmentDuration;
+      if (i === totalSegments - 1 && duration > 0) {
+        const remaining = duration - (totalSegments - 1) * segmentDuration;
+        if (remaining > 0) {
+          segExtinf = Math.min(segmentDuration, Math.max(0.5, remaining));
+        }
+      }
+      m3u8 += `#EXTINF:${segExtinf.toFixed(6)},\n`;
       m3u8 += `/api/stream/hls/session/${sessionId}/seg_${numStr}${ext}${tokenParam}\n`;
     }
 

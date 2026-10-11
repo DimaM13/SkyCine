@@ -725,17 +725,17 @@ class ScannerService {
           }
         }
 
+        // Контейнерная длительность (format.duration) — источник правды: браузер
+        // берёт её из moov/segment-заголовка, поэтому бар плеера совпадёт с реальным
+        // концом. Раньше брался min(videoStream, format) — аудио-хвост длиннее видео
+        // давал БД-длительность КОРОЧЕ реальной («строка доиграла, видео ещё идёт»).
         let effectiveDuration = durationSeconds;
-        if (videoDurationSeconds > 0) {
-          if (durationSeconds > 0) {
-            effectiveDuration = Math.min(videoDurationSeconds, durationSeconds);
-          } else {
-            effectiveDuration = videoDurationSeconds;
-          }
+        if (durationSeconds <= 0 && videoDurationSeconds > 0) {
+          effectiveDuration = videoDurationSeconds;
         }
 
-        if (videoDurationSeconds > 0 && Math.abs(durationSeconds - videoDurationSeconds) > 5) {
-          logger.warn('SCANNER', `[PROBE] Duration discrepancy corrected for "${path.basename(filePath)}": format.duration=${durationSeconds.toFixed(1)}s vs videoStream.duration=${videoDurationSeconds.toFixed(1)}s -> using ${effectiveDuration.toFixed(1)}s`);
+        if (videoDurationSeconds > 0 && durationSeconds > 0 && Math.abs(durationSeconds - videoDurationSeconds) > 5) {
+          logger.warn('SCANNER', `[PROBE] Duration mismatch for "${path.basename(filePath)}": format.duration=${durationSeconds.toFixed(1)}s vs videoStream.duration=${videoDurationSeconds.toFixed(1)}s -> using container ${effectiveDuration.toFixed(1)}s`);
         }
 
         logger.info('SCANNER', `[PROBE] "${path.basename(filePath)}": dur=${effectiveDuration.toFixed(1)}s, res=${resolution}, video=${videoCodec}, audio=${audioCodec}, tracks=${tracks.length}`);
