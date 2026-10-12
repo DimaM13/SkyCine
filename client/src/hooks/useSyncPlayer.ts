@@ -61,6 +61,13 @@ export function useSyncPlayer({
 
   const internalActionTimer = useRef<NodeJS.Timeout | null>(null);
   const scheduledPlayTimer = useRef<NodeJS.Timeout | null>(null);
+  // Эфемерные UI-таймеры (реакции/фид/rollback): копим id и чистим при уходе
+  // из комнаты, иначе setState стреляют в размонтированный хук.
+  const ephemeralTimers = useRef<number[]>([]);
+  const laterEphemeral = (fn: () => void, ms: number) => {
+    const t = window.setTimeout(fn, ms);
+    ephemeralTimers.current.push(t);
+  };
 
   const blockSyncFor = useCallback((ms: number) => {
     isInternalAction.current = true;
@@ -278,6 +285,9 @@ export function useSyncPlayer({
     if (!socket || !room?.id) return;
 
     const targetRoomId = room.id;
+    // Новая комната (или переподключение с новым эффектом) — initial_state
+    // обязаны применить как первичную синхронизацию, а не пропускать.
+    hasInitializedRef.current = false;
 
     const joinRoom = () => {
       const currentUser = userRef.current;
@@ -444,7 +454,7 @@ export function useSyncPlayer({
 
     socket.on('room:reaction', (reaction: RoomReaction) => {
       setReactions((prev) => [...prev, reaction]);
-      setTimeout(() => {
+      laterEphemeral(() => {
         setReactions((prev) => prev.filter((r) => r.id !== reaction.id));
       }, 3000);
     });
@@ -473,7 +483,7 @@ export function useSyncPlayer({
     socket.on('room:action_feed', (entry: RoomActionFeedEntry) => {
       if (!entry) return;
       setActionFeed((prev) => [...prev.slice(-19), entry]);
-      setTimeout(() => {
+      laterEphemeral(() => {
         setActionFeed((prev) => prev.filter((e) => e.id !== entry.id));
       }, 6000);
     });
@@ -481,7 +491,7 @@ export function useSyncPlayer({
     socket.on('room:rollback_notice', (notice: RoomRollbackNotice) => {
       if (!notice) return;
       setRollbackNotice(notice);
-      setTimeout(() => {
+      laterEphemeral(() => {
         setRollbackNotice((prev) => (prev && prev.timestamp === notice.timestamp ? null : prev));
       }, 9000);
     });
@@ -490,6 +500,8 @@ export function useSyncPlayer({
       if (scheduledPlayTimer.current) clearTimeout(scheduledPlayTimer.current);
       if (internalActionTimer.current) clearTimeout(internalActionTimer.current);
       if (seekDebounceTimer.current) clearTimeout(seekDebounceTimer.current);
+      ephemeralTimers.current.forEach((t) => clearTimeout(t));
+      ephemeralTimers.current = [];
       socket.emit('room:leave', { roomId: targetRoomId });
       socket.off('connect', joinRoom);
       socket.off('room:initial_state');

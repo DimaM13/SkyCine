@@ -1,15 +1,17 @@
 import { LazyImage } from '../components/library/LazyImage';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
  Film, Tv, Video, Radio, Clock, Play, Users, Star, Layers, Sparkles, Clapperboard
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { HeroBanner } from '../components/library/HeroBanner';
+import { plural } from '../utils/plural';
 import { MediaCard } from '../components/library/MediaCard';
 import { MediaModal } from '../components/library/MediaModal';
 import { MediaItem, ContinueWatchingItem, Room, Library } from '../types';
 import { useScrollRestore } from '../hooks/useScrollRestore';
+import { useAuth } from '../context/AuthContext';
 
 interface LibrarySectionData {
  library: Library;
@@ -17,61 +19,96 @@ interface LibrarySectionData {
 }
 
 export const HomePage: React.FC = () => {
- const navigate = useNavigate();
- const [continueWatching, setContinueWatching] = useState<ContinueWatchingItem[]>([]);
- const [activeRooms, setActiveRooms] = useState<Room[]>([]);
- const [librarySections, setLibrarySections] = useState<LibrarySectionData[]>([]);
- const [featuredMovie, setFeaturedMovie] = useState<MediaItem | null>(null);
- const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
- const [isModalOpen, setIsModalOpen] = useState(false);
- const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+  const { isAdmin } = useAuth();
+  // Stale-while-revalidate как в LibraryPage: возврат из плеера показывает
+  // прошлый контент сразу, без спиннера на всю страницу, данные едут фоном.
+  // (Обязан стоять ВЫШЕ useState-инициализаторов — иначе TDZ ReferenceError.)
+  const cached = React.useMemo(() => {
+    try {
+      const raw = sessionStorage.getItem('skycine_home_cache');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && Array.isArray(parsed.librarySections) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }, []);
+  const [continueWatching, setContinueWatching] = useState<ContinueWatchingItem[]>(() => cached?.continueWatching || []);
+  const [activeRooms, setActiveRooms] = useState<Room[]>(() => cached?.activeRooms || []);
+  const [librarySections, setLibrarySections] = useState<LibrarySectionData[]>(() => cached?.librarySections || []);
+  const [featuredMovie, setFeaturedMovie] = useState<MediaItem | null>(() => cached?.featuredMovie || null);
+  const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [loading, setLoading] = useState(() => !cached);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const homeStaleRef = useRef(false);
 
  // Возврат скролла после ухода в плеер (App сбрасывает в 0 при навигации)
  useScrollRestore('skycine_home_scroll', !loading);
 
- const fetchHomeData = async () => {
- setLoading(true);
- try {
- const [cwRes, roomsRes, libsRes] = await Promise.all([
- apiClient.get('/media/continue-watching').catch(() => ({ data: { items: [] } })),
- apiClient.get('/rooms').catch(() => ({ data: { rooms: [] } })),
- apiClient.get('/libraries').catch(() => ({ data: { libraries: [] } })),
- ]);
+  // Кэш вкладки для мгновенного возврата (см. cached выше)
+  useEffect(() => {
+    if (loading) return;
+    try {
+      sessionStorage.setItem(
+        'skycine_home_cache',
+        JSON.stringify({ continueWatching, activeRooms, librarySections, featuredMovie, at: Date.now() })
+      );
+    } catch {}
+  }, [continueWatching, activeRooms, librarySections, featuredMovie, loading]);
 
- setContinueWatching(cwRes.data.items || []);
- setActiveRooms(roomsRes.data.rooms || []);
+  const fetchHomeData = async (opts?: { silent?: boolean }) => {
+  const silent = !!opts?.silent;
+  if (!silent) setLoading(true);
+  setFetchError(null);
+  try {
+  const [cwRes, roomsRes, libsRes] = await Promise.all([
+  apiClient.get('/media/continue-watching').catch(() => ({ data: { items: [] } })),
+  apiClient.get('/rooms').catch(() => ({ data: { rooms: [] } })),
+  apiClient.get('/libraries').catch(() => ({ data: { libraries: [] } })),
+  ]);
 
- const libs: Library[] = libsRes.data.libraries || [];
+  if (homeStaleRef.current) return;
+  setContinueWatching(cwRes.data.items || []);
+  setActiveRooms(roomsRes.data.rooms || []);
 
- // Fetch items for all libraries in parallel (was a sequential loop — slow with many libs)
- const sections: LibrarySectionData[] = await Promise.all(
- libs.map(async (lib) => {
- try {
- if (lib.type === 'SHOWS') {
- const res = await apiClient.get('/media/shows', { params: { libraryId: lib.id } });
- return { library: lib, items: res.data.shows || [] };
- }
- const res = await apiClient.get('/media/movies', { params: { libraryId: lib.id } });
- return { library: lib, items: res.data.movies || [] };
- } catch {
- return { library: lib, items: [] };
- }
- })
- );
+  const libs: Library[] = libsRes.data.libraries || [];
 
- const firstLib = sections.find((s) => s.library.type === 'MOVIES' && s.items.length > 0);
- setFeaturedMovie(firstLib ? (firstLib.items[0] as MediaItem) : null);
- setLibrarySections(sections);
- } catch (err) {
- console.error('fetchHomeData error:', err);
- } finally {
- setLoading(false);
- }
- };
+  // Fetch items for all libraries in parallel (was a sequential loop — slow with many libs)
+  const sections: LibrarySectionData[] = await Promise.all(
+  libs.map(async (lib) => {
+  try {
+  if (lib.type === 'SHOWS') {
+  const res = await apiClient.get('/media/shows', { params: { libraryId: lib.id } });
+  return { library: lib, items: res.data.shows || [] };
+  }
+  const res = await apiClient.get('/media/movies', { params: { libraryId: lib.id } });
+  return { library: lib, items: res.data.movies || [] };
+  } catch {
+  return { library: lib, items: [] };
+  }
+  })
+  );
 
- useEffect(() => {
- fetchHomeData();
- }, []);
+  if (homeStaleRef.current) return;
+  const firstLib = sections.find((s) => s.library.type === 'MOVIES' && s.items.length > 0);
+  setFeaturedMovie(firstLib ? (firstLib.items[0] as MediaItem) : null);
+  setLibrarySections(sections);
+  } catch (err) {
+  console.error('fetchHomeData error:', err);
+  if (!homeStaleRef.current && !silent) setFetchError('Не удалось загрузить главную');
+  } finally {
+  if (!homeStaleRef.current && !silent) setLoading(false);
+  }
+  };
+
+  useEffect(() => {
+  homeStaleRef.current = false;
+  // Есть кэш (возврат из плеера) — данные уже на экране, refetch тихий
+  fetchHomeData({ silent: !!cached });
+  return () => { homeStaleRef.current = true; };
+  }, []);
 
   const handlePlayDirect = (media: MediaItem, startPos?: number) => {
     const state = { from: '/' };
@@ -139,10 +176,11 @@ export const HomePage: React.FC = () => {
  </div>
 
  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
- {continueWatching.map((item) => {
- const percent = item.durationSeconds > 0
- ? Math.round((item.progressSeconds / item.durationSeconds) * 100)
- : 0;
+  {continueWatching.map((item) => {
+  const percent = item.durationSeconds > 0
+  ? Math.min(100, Math.max(0, Math.round((item.progressSeconds / item.durationSeconds) * 100)))
+  : 0;
+  const remainingMin = Math.max(0, Math.round((item.durationSeconds - item.progressSeconds) / 60));
 
  const thumbUrl = item.stillPath || (item.type === 'EPISODE' ? `/api/media/item/${item.mediaId}/thumbnail` : (item.backdropPath || item.posterPath || `/api/media/item/${item.mediaId}/backdrop`));
 
@@ -175,7 +213,7 @@ export const HomePage: React.FC = () => {
  </div>
  <div className="p-3">
  <h4 className="text-xs font-bold text-slate-200 group-hover:text-cinema-gold transition-colors truncate">{item.title}</h4>
- <span className="text-[11px] text-slate-400 mt-0.5 block">Осталось {Math.max(1, Math.round((item.durationSeconds - item.progressSeconds) / 60))} мин</span>
+  <span className="text-[11px] text-slate-400 mt-0.5 block">Осталось {remainingMin} мин</span>
  </div>
  </div>
  );
@@ -236,23 +274,38 @@ export const HomePage: React.FC = () => {
  )}
 
  {/* Dynamic User Libraries Sections */}
- {loading ? (
- <div className="p-16 flex justify-center items-center">
- <div className="w-8 h-8 border-2 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
- </div>
- ) : librarySections.length === 0 ? (
+  {loading ? (
+  <div className="p-16 flex justify-center items-center">
+  <div className="w-8 h-8 border-2 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
+  </div>
+  ) : fetchError && librarySections.length === 0 ? (
+  <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
+  <h3 className="text-base font-bold text-white mb-1">Не удалось загрузить данные</h3>
+  <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">{fetchError}. Проверьте соединение и попробуйте снова.</p>
+  <button
+  onClick={() => fetchHomeData()}
+  className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 cursor-pointer"
+  >
+  Повторить
+  </button>
+  </div>
+  ) : librarySections.length === 0 ? (
  <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
  <Film className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
  <h3 className="text-base font-bold text-white mb-1">Медиатека пока пуста</h3>
- <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">
- Создайте вашу первую библиотеку фильмов, сериалов или видео в панели управления сервером
- </p>
- <button
- onClick={() => navigate('/admin')}
- className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 cursor-pointer"
- >
- Перейти в управление медиатекой
- </button>
+  <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">
+  {isAdmin
+  ? 'Создайте вашу первую библиотеку фильмов, сериалов или видео в панели управления сервером'
+  : 'Попросите администратора создать библиотеку и открыть вам доступ'}
+  </p>
+  {isAdmin && (
+  <button
+  onClick={() => navigate('/admin')}
+  className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 cursor-pointer"
+  >
+  Перейти в управление медиатекой
+  </button>
+  )}
  </div>
  ) : (
  librarySections.map(({ library, items }) => {
@@ -267,7 +320,7 @@ export const HomePage: React.FC = () => {
  <Icon className="w-5 h-5 text-cinema-gold" />
  <h2 className="text-lg font-bold text-white tracking-wide">{library.name}</h2>
  <span className="text-[10px] font-mono font-bold text-cinema-gold bg-cinema-gold/10 px-2 py-0.5 rounded-md border border-cinema-gold/20">
- {items.length} {items.length === 1 ? 'сериал' : 'сериала'}
+  {items.length} {plural(items.length, 'сериал', 'сериала', 'сериалов')}
  </span>
  </div>
  <button
@@ -306,7 +359,7 @@ export const HomePage: React.FC = () => {
 
  <div className="absolute bottom-2 left-2 flex items-center gap-1 bg-black/80 px-2 py-0.5 rounded-md text-[10px] font-bold text-white border border-white/10">
  <Layers className="w-3 h-3 text-cinema-gold" />
- <span>{show.totalSeasons || 1} {show.totalSeasons === 1 ? 'сезон' : 'сезона'}</span>
+  <span>{show.totalSeasons || 1} {plural(show.totalSeasons || 1, 'сезон', 'сезона', 'сезонов')}</span>
  </div>
  </div>
 
@@ -315,7 +368,7 @@ export const HomePage: React.FC = () => {
  {show.showTitle}
  </h3>
  <span className="text-[11px] text-slate-400 mt-0.5 block">
- {show.totalEpisodes} серий {show.year ? `• ${show.year}` : ''}
+  {show.totalEpisodes} {plural(show.totalEpisodes, 'серия', 'серии', 'серий')} {show.year ? `• ${show.year}` : ''}
  </span>
  </div>
  </div>
@@ -333,7 +386,7 @@ export const HomePage: React.FC = () => {
  <Icon className="w-5 h-5 text-cinema-gold" />
  <h2 className="text-lg font-bold text-white tracking-wide">{library.name}</h2>
  <span className="text-[10px] font-mono font-bold text-cinema-gold bg-cinema-gold/10 px-2 py-0.5 rounded-md border border-cinema-gold/20">
- {items.length} {items.length === 1 ? 'видео' : 'видео'}
+  {items.length} {plural(items.length, 'видео', 'видео', 'видео')}
  </span>
  </div>
  <button
@@ -396,7 +449,7 @@ export const HomePage: React.FC = () => {
  <Icon className="w-5 h-5 text-cinema-gold" />
  <h2 className="text-lg font-bold text-white tracking-wide">{library.name}</h2>
  <span className="text-[10px] font-mono font-bold text-cinema-gold bg-cinema-gold/10 px-2 py-0.5 rounded-md border border-cinema-gold/20">
- {items.length} {items.length === 1 ? 'фильм' : 'фильмов'}
+  {items.length} {plural(items.length, 'фильм', 'фильма', 'фильмов')}
  </span>
  </div>
  <button
@@ -409,13 +462,11 @@ export const HomePage: React.FC = () => {
 
  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
  {items.slice(0, 6).map((movie: MediaItem) => (
- <MediaCard
- key={movie.id}
- media={movie}
- onPlayDirect={handlePlayDirect}
- onCreateRoom={handleCreateRoom}
- onOpenDetails={handleOpenDetails}
- />
+  <MediaCard
+  key={movie.id}
+  media={movie}
+  onOpenDetails={handleOpenDetails}
+  />
  ))}
  </div>
  </section>
@@ -424,14 +475,14 @@ export const HomePage: React.FC = () => {
  )}
 
  {/* Media Details Modal */}
- <MediaModal
- mediaId={selectedMediaId}
- isOpen={isModalOpen}
- onClose={() => setIsModalOpen(false)}
- onPlayDirect={handlePlayDirect}
- onCreateRoom={handleCreateRoom}
- onMediaUpdated={fetchHomeData}
- />
+  <MediaModal
+  mediaId={selectedMediaId}
+  isOpen={isModalOpen}
+  onClose={() => setIsModalOpen(false)}
+  onPlayDirect={handlePlayDirect}
+  onCreateRoom={handleCreateRoom}
+  onMediaUpdated={() => fetchHomeData({ silent: true })}
+  />
  </div>
  );
 };

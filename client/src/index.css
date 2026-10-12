@@ -26,15 +26,27 @@
     background: #e5a00d;
   }
 
-  /* Global removal of browser focus outlines and selection rings */
-  *, *:focus, *:focus-visible, *:active {
-    outline: none !important;
+  /* Тап-подсветку гасим везде, а keyboard-фокус оставляем видимым:
+     mouse-фокус (:focus:not(:focus-visible)) без кольца, клавиатурный — с золотым. */
+  *, *:focus, *:active {
     -webkit-tap-highlight-color: transparent !important;
+  }
+  *:focus:not(:focus-visible) {
+    outline: none !important;
+  }
+  *:focus-visible {
+    outline: 2px solid #e5a00d !important;
+    outline-offset: 2px;
   }
 
   button, input, select, textarea, [tabindex], [role="button"], [role="slider"] {
-    outline: none !important;
     box-shadow: none !important;
+  }
+  button:focus:not(:focus-visible), input:focus:not(:focus-visible),
+  select:focus:not(:focus-visible), textarea:focus:not(:focus-visible),
+  [tabindex]:focus:not(:focus-visible), [role="button"]:focus:not(:focus-visible),
+  [role="slider"]:focus:not(:focus-visible) {
+    outline: none !important;
   }
 }
 

@@ -11,6 +11,7 @@ import { MediaItem } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { ShowAccessModal } from '../components/admin/ShowAccessModal';
 import { EpisodeModal } from '../components/library/EpisodeModal';
+import { plural } from '../utils/plural';
 import { useScrollRestore, usePersistentVisibleCount } from '../hooks/useScrollRestore';
 
 export const ShowsPage: React.FC = () => {
@@ -30,6 +31,8 @@ export const ShowsPage: React.FC = () => {
   const [episodes, setEpisodes] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [episodesError, setEpisodesError] = useState<string | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number | 'all'>(() => {
     try {
       const saved = localStorage.getItem('skycine_selectedSeason');
@@ -52,12 +55,21 @@ export const ShowsPage: React.FC = () => {
   const [isSearchingMatch, setIsSearchingMatch] = useState(false);
   const [isApplyingMatch, setIsApplyingMatch] = useState(false);
   const [matchSuccessMsg, setMatchSuccessMsg] = useState('');
+  // Отложенные setState (apply-match) чистим при размонтировании,
+  // иначе уход со страницы всё равно дёргает fetch/select на мёртвом дереве.
+  const timersRef = React.useRef<number[]>([]);
+  useEffect(() => () => { timersRef.current.forEach((t) => clearTimeout(t)); timersRef.current = []; }, []);
+  const later = (fn: () => void, ms: number) => {
+    const t = window.setTimeout(fn, ms);
+    timersRef.current.push(t);
+  };
 
   const fetchShows = () => {
     setLoading(true);
+    setFetchError(null);
     apiClient.get('/media/shows')
       .then((res) => setShows(res.data.shows || []))
-      .catch(() => {})
+      .catch(() => setFetchError('Не удалось загрузить каталог сериалов'))
       .finally(() => setLoading(false));
   };
 
@@ -85,25 +97,35 @@ export const ShowsPage: React.FC = () => {
   // (в рамках библиотеки карточки — одноимённые шоу из разных библиотек не смешиваем).
   useEffect(() => {
     if (selectedShow && episodes.length === 0) {
+      let stale = false;
       setLoadingEpisodes(true);
       apiClient.get(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/episodes`, {
         params: selectedShow.libraryId ? { libraryId: selectedShow.libraryId } : undefined,
       })
         .then((res) => {
+          if (stale) return;
           const eps = res.data.episodes || [];
           setEpisodes(eps);
         })
         .catch(() => {
+          if (stale) return;
           // Show might no longer exist, clear saved state
           setSelectedShow(null);
           localStorage.removeItem('skycine_selectedShow');
         })
-        .finally(() => setLoadingEpisodes(false));
+        .finally(() => { if (!stale) setLoadingEpisodes(false); });
+      return () => { stale = true; };
     }
-  }, [selectedShow?.showTitle]);
+  }, [selectedShow?.showTitle, selectedShow?.libraryId]);
 
+  // Счётчик выбора шоу: быстрые клики по карточкам слали параллельные
+  // запросы эпизодов и побеждал случайный — применяем только последний.
+  const showReqRef = React.useRef(0);
   const handleSelectShow = (show: any) => {
+    const reqId = ++showReqRef.current;
     setSelectedShow(show);
+    setEpisodes([]);
+    setEpisodesError(null);
     setSelectedSeason('all');
     localStorage.setItem('skycine_selectedSeason', JSON.stringify('all'));
     setLoadingEpisodes(true);
@@ -111,6 +133,7 @@ export const ShowsPage: React.FC = () => {
       params: show.libraryId ? { libraryId: show.libraryId } : undefined,
     })
       .then((res) => {
+        if (reqId !== showReqRef.current) return;
         const eps = res.data.episodes || [];
         setEpisodes(eps);
         // Auto select first season if available
@@ -119,8 +142,8 @@ export const ShowsPage: React.FC = () => {
           setSelectedSeason(seasons[0]);
         }
       })
-      .catch(() => {})
-      .finally(() => setLoadingEpisodes(false));
+      .catch(() => { if (reqId === showReqRef.current) setEpisodesError('Не удалось загрузить серии'); })
+      .finally(() => { if (reqId === showReqRef.current) setLoadingEpisodes(false); });
   };
 
   const availableSeasons = useMemo(() => {
@@ -221,9 +244,12 @@ export const ShowsPage: React.FC = () => {
     if (!selectedShow) return;
     setIsApplyingMatch(true);
     try {
-      await apiClient.post(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/match-apply`, cand);
+      await apiClient.post(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/match-apply`, {
+        ...cand,
+        libraryId: selectedShow.libraryId,
+      });
       setMatchSuccessMsg('Метаданные сериала и всех серий успешно обновлены!');
-      setTimeout(() => {
+      later(() => {
         setMatchSuccessMsg('');
         setShowMatchModal(false);
         fetchShows();
@@ -305,7 +331,7 @@ export const ShowsPage: React.FC = () => {
                   )}
                   <span className="flex items-center gap-1 text-xs text-slate-300 font-semibold bg-white/10 px-2.5 py-0.5 rounded-lg">
                     <Layers className="w-3.5 h-3.5 text-cinema-gold" />
-                    {availableSeasons.length || selectedShow.totalSeasons || 1} {availableSeasons.length === 1 ? 'сезон' : 'сезона'} • {episodes.length || selectedShow.totalEpisodes} серий
+                    {availableSeasons.length || selectedShow.totalSeasons || 1} {plural(availableSeasons.length || selectedShow.totalSeasons || 1, 'сезон', 'сезона', 'сезонов')} • {episodes.length || selectedShow.totalEpisodes} {plural(episodes.length || selectedShow.totalEpisodes, 'серия', 'серии', 'серий')}
                   </span>
                 </div>
 
@@ -365,7 +391,7 @@ export const ShowsPage: React.FC = () => {
                 </div>
 
                 <span className="text-xs text-slate-400 font-mono">
-                  {filteredEpisodes.length} {filteredEpisodes.length === 1 ? 'серия' : 'серий'}
+                      {filteredEpisodes.length} {plural(filteredEpisodes.length, 'серия', 'серии', 'серий')}
                 </span>
               </div>
 
@@ -403,7 +429,7 @@ export const ShowsPage: React.FC = () => {
                           Сезон {seasonNum}
                         </h4>
                         <span className="text-[11px] text-slate-400 mt-0.5 block">
-                          {seasonEpisodes.length} {seasonEpisodes.length === 1 ? 'эпизод' : 'эпизодов'}
+                          {seasonEpisodes.length} {plural(seasonEpisodes.length, 'эпизод', 'эпизода', 'эпизодов')}
                         </span>
                       </div>
                     </div>
@@ -430,7 +456,7 @@ export const ShowsPage: React.FC = () => {
                         Все сезоны
                       </h4>
                       <span className="text-[11px] text-slate-400 mt-0.5 block">
-                        {episodes.length} серий
+                        {episodes.length} {plural(episodes.length, 'серия', 'серии', 'серий')}
                       </span>
                     </div>
                   </div>
@@ -443,6 +469,17 @@ export const ShowsPage: React.FC = () => {
                   <div className="w-8 h-8 border-2 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
                   <span className="text-xs">Загрузка серий...</span>
                 </div>
+              ) : episodesError && filteredEpisodes.length === 0 ? (
+                <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
+                  <h3 className="text-base font-bold text-white mb-1">Не удалось загрузить серии</h3>
+                  <p className="text-xs text-slate-500 max-w-md mx-auto mb-4">Проверьте соединение и попробуйте снова.</p>
+                  <button
+                    onClick={() => selectedShow && handleSelectShow(selectedShow)}
+                    className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-colors cursor-pointer"
+                  >
+                    Повторить
+                  </button>
+                </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                   {filteredEpisodes.map((ep) => {
@@ -452,12 +489,16 @@ export const ShowsPage: React.FC = () => {
                       : 0;
                     const posterUrl = ep.stillPath || `/api/media/item/${ep.id}/thumbnail`;
 
-                    return (
-                      <div
-                        key={ep.id}
-                        onClick={() => handleOpenEpisodeModal(ep)}
-                        className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 transition-all duration-300 hover:shadow-cinema-card hover:-translate-y-1 cursor-pointer"
-                      >
+                      return (
+                        <div
+                          key={ep.id}
+                          onClick={() => handleOpenEpisodeModal(ep)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenEpisodeModal(ep); } }}
+                          tabIndex={0}
+                          role="button"
+                          aria-label={`Открыть серию: ${epTitle}`}
+                          className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 focus-within:border-cinema-gold/50 transition-all duration-300 hover:shadow-cinema-card hover:-translate-y-1 cursor-pointer"
+                        >
                         {/* 16:9 Episode Thumbnail with Badges */}
                         <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
                           <LazyImage
@@ -490,8 +531,8 @@ export const ShowsPage: React.FC = () => {
                             )}
                           </div>
 
-                          {/* Quick Play Hover Button */}
-                          <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40">
+                          {/* Quick Play Hover Button (показываем и при клавиатурном фокусе) */}
+                          <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity bg-black/40">
                             <div className="w-11 h-11 rounded-full bg-cinema-gold text-black flex items-center justify-center shadow-glow-gold transform group-hover:scale-105 transition-transform">
                               <Play className="w-5 h-5 fill-current ml-0.5" />
                             </div>
@@ -575,6 +616,17 @@ export const ShowsPage: React.FC = () => {
               <div className="w-8 h-8 border-2 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
               <span className="text-xs">Загрузка каталога сериалов...</span>
             </div>
+          ) : fetchError && shows.length === 0 ? (
+            <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
+              <h3 className="text-base font-bold text-white mb-1">Не удалось загрузить каталог</h3>
+              <p className="text-xs text-slate-500 max-w-md mx-auto mb-4">{fetchError}. Проверьте соединение и попробуйте снова.</p>
+              <button
+                onClick={() => fetchShows()}
+                className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-colors cursor-pointer"
+              >
+                Повторить
+              </button>
+            </div>
           ) : shows.length === 0 ? (
             <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
               <Tv className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
@@ -599,7 +651,11 @@ export const ShowsPage: React.FC = () => {
                 <div
                   key={`${show.libraryId || 'lib'}:${show.showTitle}`}
                   onClick={() => handleSelectShow(show)}
-                  className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelectShow(show); } }}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Открыть сериал ${show.showTitle}`}
+                  className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 focus-within:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
                 >
                   <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
                     <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-slate-500">
@@ -622,7 +678,7 @@ export const ShowsPage: React.FC = () => {
 
                     <div className="absolute bottom-2 left-2 flex items-center gap-1 bg-black/80 backdrop-blur-md px-2 py-0.5 rounded-md text-[10px] font-bold text-white border border-white/10">
                       <Layers className="w-3 h-3 text-cinema-gold" />
-                      <span>{show.totalSeasons || 1} {show.totalSeasons === 1 ? 'сезон' : 'сезона'}</span>
+                      <span>{show.totalSeasons || 1} {plural(show.totalSeasons || 1, 'сезон', 'сезона', 'сезонов')}</span>
                     </div>
                   </div>
 
@@ -631,7 +687,7 @@ export const ShowsPage: React.FC = () => {
                       {show.showTitle}
                     </h3>
                     <span className="text-[11px] text-slate-400 mt-0.5 block">
-                      {show.totalEpisodes} серий {show.year ? `• ${show.year}` : ''}
+                      {show.totalEpisodes} {plural(show.totalEpisodes, 'серия', 'серии', 'серий')} {show.year ? `• ${show.year}` : ''}
                     </span>
                   </div>
                 </div>

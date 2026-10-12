@@ -17,6 +17,7 @@ export const MoviesPage: React.FC = () => {
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = usePersistentVisibleCount('skycine_movies_visible', 36);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
@@ -24,6 +25,7 @@ export const MoviesPage: React.FC = () => {
 
   const fetchMovies = (resetCount = false) => {
     setLoading(true);
+    setFetchError(null);
     if (resetCount) {
       setVisibleCount(36);
       try { window.scrollTo(0, 0); } catch {}
@@ -32,7 +34,7 @@ export const MoviesPage: React.FC = () => {
       params: { search: search.trim() || undefined, sortBy },
     })
       .then((res) => setMovies(res.data.movies || []))
-      .catch(() => {})
+      .catch(() => setFetchError('Не удалось загрузить фильмы'))
       .finally(() => setLoading(false));
   };
 
@@ -150,6 +152,17 @@ export const MoviesPage: React.FC = () => {
         <div className="p-16 flex justify-center items-center">
           <div className="w-8 h-8 border-2 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
         </div>
+      ) : fetchError && movies.length === 0 ? (
+        <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
+          <h3 className="text-base font-bold text-white mb-1">Не удалось загрузить фильмы</h3>
+          <p className="text-xs text-slate-500 max-w-md mx-auto mb-4">Проверьте соединение и попробуйте снова.</p>
+          <button
+            onClick={() => fetchMovies()}
+            className="px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-colors cursor-pointer"
+          >
+            Повторить
+          </button>
+        </div>
       ) : movies.length === 0 ? (
         <div className="p-12 rounded-3xl bg-cinema-900 border border-white/10 text-center text-slate-400">
           <Film className="w-12 h-12 text-cinema-gold/40 mx-auto mb-3" />
@@ -166,8 +179,6 @@ export const MoviesPage: React.FC = () => {
             <MediaCard
               key={movie.id}
               media={movie}
-              onPlayDirect={handlePlayDirect}
-              onCreateRoom={handleCreateRoom}
               onOpenDetails={(m) => {
                 setSelectedMediaId(m.id);
                 setIsModalOpen(true);

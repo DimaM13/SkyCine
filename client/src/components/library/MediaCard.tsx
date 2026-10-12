@@ -1,13 +1,11 @@
 import { LazyImage } from './LazyImage';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Star, Film } from 'lucide-react';
 import { MediaItem } from '../../types';
 
 interface MediaCardProps {
- media: MediaItem;
- onPlayDirect?: (media: MediaItem) => void;
- onCreateRoom?: (media: MediaItem) => void;
- onOpenDetails: (media: MediaItem) => void;
+  media: MediaItem;
+  onOpenDetails: (media: MediaItem) => void;
 }
 
 export const MediaCard: React.FC<MediaCardProps> = ({
@@ -23,9 +21,15 @@ export const MediaCard: React.FC<MediaCardProps> = ({
 
  // Нет TMDB-постера? Тянем сгенерированный из видео (2:3). Битая TMDB-ссылка
  // тоже сваливается в генерированный; если и он не родился — плейсхолдер.
- const generatedPoster = `/api/media/item/${media.id}/poster`;
- const [posterSrc, setPosterSrc] = useState(media.posterPath || generatedPoster);
- const [posterFailed, setPosterFailed] = useState(false);
+  const generatedPoster = `/api/media/item/${media.id}/poster`;
+  const [posterSrc, setPosterSrc] = useState(media.posterPath || generatedPoster);
+  const [posterFailed, setPosterFailed] = useState(false);
+  // Синхронизация с новым media (refetch/TMDB-rematch): иначе карточка
+  // держит старый/битый постер до ремаунта списка.
+  useEffect(() => {
+    setPosterSrc(media.posterPath || generatedPoster);
+    setPosterFailed(false);
+  }, [media.id, media.posterPath]);
  const handlePosterError = () => {
  if (posterSrc !== generatedPoster) setPosterSrc(generatedPoster);
  else setPosterFailed(true);

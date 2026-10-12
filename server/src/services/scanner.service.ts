@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import ffmpeg from 'fluent-ffmpeg';
+import { spawn, ChildProcess } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../config/db';
 import { tmdbService } from './tmdb.service';
@@ -653,16 +653,10 @@ class ScannerService {
       tracks: [],
       rawStreams: [],
     };
-    const probe: Promise<ProbeResult> = new Promise((resolve) => {
-      ffmpeg.ffprobe(filePath, (err, metadata) => {
-        if (err || !metadata) {
-          logger.error('SCANNER', `[PROBE] Failed to probe "${filePath}": ${err?.message || 'No metadata returned'}`);
-          return resolve(fallback);
-        }
-
-        const format = metadata.format || {};
+    const parseMetadata = (metadata: any): ProbeResult => {
+        const format = metadata?.format || {};
         const durationSeconds = format.duration ? parseFloat(format.duration.toString()) : 0;
-        const streams = metadata.streams || [];
+        const streams = metadata?.streams || [];
 
         let videoCodec = 'unknown';
         let audioCodec = 'unknown';
@@ -740,23 +734,69 @@ class ScannerService {
 
         logger.info('SCANNER', `[PROBE] "${path.basename(filePath)}": dur=${effectiveDuration.toFixed(1)}s, res=${resolution}, video=${videoCodec}, audio=${audioCodec}, tracks=${tracks.length}`);
 
-        resolve({
+        return {
           durationSeconds: effectiveDuration,
           resolution,
           videoCodec,
           audioCodec,
           tracks,
           rawStreams: streams,
-        });
+        };
+    };
+    // Висящий ffprobe (битый файл/FIFO) раньше оставлял зомби-процесс навсегда:
+    // Promise.race брал fallback, а дочь-процесс никто не убивал. Теперь процесс
+    // свой (spawn напрямую, не через fluent-ffmpeg) — по таймауту прибиваем SIGKILL.
+    return new Promise<ProbeResult>((resolve) => {
+      let done = false;
+      let proc: ChildProcess | null = null;
+      const finish = (metadata?: any) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { proc?.kill('SIGKILL'); } catch {}
+        if (!metadata) {
+          logger.error('SCANNER', `[PROBE] Failed to probe "${filePath}" — беру fallback`);
+          resolve(fallback);
+          return;
+        }
+        try {
+          resolve(parseMetadata(metadata));
+        } catch {
+          resolve(fallback);
+        }
+      };
+      const timer = setTimeout(() => {
+        logger.error('SCANNER', `[PROBE] Timeout 30s on "${filePath}" — убиваю ffprobe, беру fallback`);
+        finish();
+      }, 30000);
+      try {
+        // БЕЗ shell: массив аргументов — путь с пробелами/$()/`;` безопасен.
+        proc = spawn('ffprobe', [
+          '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath,
+        ], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch {
+        finish();
+        return;
+      }
+      let out = '';
+      proc.stdout?.on('data', (d: any) => {
+        out += d.toString();
+        // Огромный JSON (испорченные теги) не копим бесконечно
+        if (out.length > 8 * 1024 * 1024) finish();
+      });
+      proc.on('error', () => finish());
+      proc.on('close', (code) => {
+        if (code !== 0 || !out) {
+          finish();
+          return;
+        }
+        try {
+          finish(JSON.parse(out));
+        } catch {
+          finish();
+        }
       });
     });
-    // Висящий ffprobe (битый файл/FIFO) раньше кирпичил скан навсегда:
-    // через 30с берём fallback и идём дальше (дочь-процесс прибьёт сама ОС/ffmpeg).
-    const probeTimeout: Promise<ProbeResult> = new Promise((resolve) => setTimeout(() => {
-      logger.error('SCANNER', `[PROBE] Timeout 30s on "${filePath}" — беру fallback`);
-      resolve(fallback);
-    }, 30000));
-    return Promise.race([probe, probeTimeout]);
   }
 }
 

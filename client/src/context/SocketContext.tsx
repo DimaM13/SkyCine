@@ -91,7 +91,10 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, []);
 
-  // Update socket identity when user changes
+  // Update socket identity when user changes AND on (re)connect.
+  // Без isConnected в deps обрыв+автореконнект оставлял сервер с гостем:
+  // 'connect'-хендлер выше замыкает начальный user (часто null), а этот эффект
+  // о реконнекте не узнавал — хост-права резались до смены объекта user.
   useEffect(() => {
     if (socket && socket.connected && user) {
       socket.emit('user:connect', {
@@ -101,7 +104,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         token: localStorage.getItem('myplex_token') || undefined,
       });
     }
-  }, [user, socket]);
+  }, [user, socket, isConnected]);
 
   const performNtpSync = (s: Socket) => {
     s.emit('sync:ping', { clientTimestamp: Date.now() });

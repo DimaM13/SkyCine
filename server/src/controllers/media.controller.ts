@@ -102,13 +102,17 @@ export class MediaController {
       }
 
       if (search) {
-        query += ` AND (m.title LIKE ? OR m.originalTitle LIKE ? OR m.overview LIKE ?)`;
-        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+        // LIKE экранируем как в searchMedia: иначе %/_ из ввода работают
+        // как wildcards и расширяют выдачу за пределы буквального совпадения.
+        const like = `%${search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        query += ` AND (m.title LIKE ? ESCAPE '\\' OR m.originalTitle LIKE ? ESCAPE '\\' OR m.overview LIKE ? ESCAPE '\\')`;
+        params.push(like, like, like);
       }
 
       if (genre) {
-        query += ` AND m.genres LIKE ?`;
-        params.push(`%${genre}%`);
+        const genreLike = `%${genre.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        query += ` AND m.genres LIKE ? ESCAPE '\\'`;
+        params.push(genreLike);
       }
 
       switch (sortBy) {
@@ -465,6 +469,12 @@ export class MediaController {
     try {
       const showTitle = decodeURIComponent(req.params.showTitle as string);
       const { title, originalTitle, year, overview, posterPath, backdropPath, rating, tmdbId } = req.body;
+      // Без привязки к библиотеке переименование/эпизоды били по ВСЕМ
+      // одноимённым шоу (WHERE showTitle = ? без libraryId) — в т.ч. чужим
+      // библиотекам. Клиент шлёт libraryId карточки, сервер фильтрует им всё.
+      const libraryId = ((req.query.libraryId as string) || (req.body as any)?.libraryId || '').trim();
+      const libSql = libraryId ? ` AND libraryId = ?` : '';
+      const libParams = libraryId ? [libraryId] : [];
 
       if (!title) {
         res.status(400).json({ error: 'Название обязательно' });
@@ -472,7 +482,7 @@ export class MediaController {
       }
 
       // Update show base fields (including vertical show poster and backdrop)
-      db.prepare(`
+      const upd = db.prepare(`
         UPDATE media_items SET
           showTitle = ?,
           originalTitle = ?,
@@ -481,7 +491,7 @@ export class MediaController {
           backdropPath = ?,
           rating = ?,
           updatedAt = CURRENT_TIMESTAMP
-        WHERE showTitle = ? AND type = 'EPISODE'
+        WHERE showTitle = ? AND type = 'EPISODE'${libSql}
       `).run(
         title,
         originalTitle || '',
@@ -489,16 +499,21 @@ export class MediaController {
         sanitizeMediaUrl(posterPath),
         sanitizeMediaUrl(backdropPath),
         rating || 0,
-        showTitle
+        showTitle,
+        ...libParams
       );
+      if (upd.changes === 0) {
+        res.status(404).json({ error: 'Сериал не найден в указанной библиотеке' });
+        return;
+      }
 
       // If TMDB ID is provided, fetch detailed episode names, overviews, stills, and ratings!
       if (tmdbId) {
         const seasons = db.prepare(`
           SELECT DISTINCT seasonNumber
           FROM media_items
-          WHERE showTitle = ? AND type = 'EPISODE'
-        `).all(title) as { seasonNumber: number }[];
+          WHERE showTitle = ? AND type = 'EPISODE'${libSql}
+        `).all(title, ...libParams) as { seasonNumber: number }[];
 
         for (const s of seasons) {
           const sNum = s.seasonNumber || 1;
@@ -511,7 +526,7 @@ export class MediaController {
                 stillPath = ?,
                 overview = ?,
                 rating = COALESCE(?, rating)
-              WHERE showTitle = ? AND seasonNumber = ? AND episodeNumber = ? AND type = 'EPISODE'
+              WHERE showTitle = ? AND seasonNumber = ? AND episodeNumber = ? AND type = 'EPISODE'${libSql}
             `).run(
               epTitle,
               sanitizeMediaUrl(ep.stillPath) || null,
@@ -519,7 +534,8 @@ export class MediaController {
               ep.rating || rating || null,
               title,
               sNum,
-              ep.episodeNumber
+              ep.episodeNumber,
+              ...libParams
             );
           }
         }

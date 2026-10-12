@@ -12,6 +12,7 @@ import { EpisodeModal } from '../components/library/EpisodeModal';
 import { ShowAccessModal } from '../components/admin/ShowAccessModal';
 import { useScrollRestore, usePersistentVisibleCount, saveScroll } from '../hooks/useScrollRestore';
 import { MediaItem, Library } from '../types';
+import { plural } from '../utils/plural';
 import { useAuth } from '../context/AuthContext';
 
 export const LibraryPage: React.FC = () => {
@@ -42,6 +43,13 @@ export const LibraryPage: React.FC = () => {
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   // Предыдущая библиотека: отличаем "вернулся из плеера" от "перешёл в другую"
   const prevLibraryIdRef = useRef<string | undefined>(undefined);
+  // Отложенные setState (scan/apply-match) чистим при размонтировании
+  const timersRef = useRef<number[]>([]);
+  useEffect(() => () => { timersRef.current.forEach((t) => clearTimeout(t)); timersRef.current = []; }, []);
+  const later = (fn: () => void, ms: number) => {
+    const t = window.setTimeout(fn, ms);
+    timersRef.current.push(t);
+  };
   // Первый маунт (в т.ч. возврат из плеера): сбросы ниже не применяем,
   // иначе скроллу некуда возвращаться (см. useEffect [sortBy])
   const firstSortRef = useRef(true);
@@ -50,6 +58,7 @@ export const LibraryPage: React.FC = () => {
   useScrollRestore(scrollKey, !loading && !!library);
 
   // Movies state
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [movies, setMovies] = useState<MediaItem[]>(() => cached?.movies || []);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('recent');
@@ -127,6 +136,7 @@ export const LibraryPage: React.FC = () => {
 
   const fetchMovies = (libId = libraryId, silent = false) => {
     if (!silent) setLoading(true);
+    setFetchError(null);
     apiClient.get('/media/movies', {
       params: {
         libraryId: libId,
@@ -135,17 +145,18 @@ export const LibraryPage: React.FC = () => {
       },
     })
       .then((res) => { setMovies(res.data.movies || []); setVisibleCount((prev) => Math.max(prev, 50)); })
-      .catch(() => {})
+      .catch(() => { if (!silent) setFetchError('Не удалось загрузить содержимое библиотеки'); })
       .finally(() => { if (!silent) setLoading(false); });
   };
 
   const fetchShows = (libId = libraryId, silent = false) => {
     if (!silent) setLoading(true);
+    setFetchError(null);
     apiClient.get('/media/shows', {
       params: { libraryId: libId }
     })
       .then((res) => setShows(res.data.shows || []))
-      .catch(() => {})
+      .catch(() => { if (!silent) setFetchError('Не удалось загрузить содержимое библиотеки'); })
       .finally(() => { if (!silent) setLoading(false); });
   };
 
@@ -170,22 +181,27 @@ export const LibraryPage: React.FC = () => {
   // одноимённого шоу из других библиотек).
   useEffect(() => {
     if (selectedShow && episodes.length === 0 && libraryId) {
+      let stale = false;
       setLoadingEpisodes(true);
       apiClient.get(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/episodes`, {
         params: { libraryId },
       })
-        .then((res) => setEpisodes(res.data.episodes || []))
+        .then((res) => { if (!stale) setEpisodes(res.data.episodes || []); })
         .catch(() => {
+          if (stale) return;
           setSelectedShow(null);
           localStorage.removeItem('skycine_library_selectedShow');
         })
-        .finally(() => setLoadingEpisodes(false));
+        .finally(() => { if (!stale) setLoadingEpisodes(false); });
+      return () => { stale = true; };
     }
-  }, [selectedShow?.showTitle, libraryId]);
+  }, [selectedShow?.showTitle, selectedShow?.libraryId, libraryId]);
 
   useEffect(() => {
-    const isSwitch = prevLibraryIdRef.current !== undefined && prevLibraryIdRef.current !== libraryId;
-    prevLibraryIdRef.current = libraryId;
+    const libId = libraryId;
+    let stale = false;
+    const isSwitch = prevLibraryIdRef.current !== undefined && prevLibraryIdRef.current !== libId;
+    prevLibraryIdRef.current = libId;
 
     if (isSwitch) {
       // Переход в ДРУГУЮ библиотеку: чужой открытый сериал/поиск/скролл
@@ -200,26 +216,38 @@ export const LibraryPage: React.FC = () => {
         localStorage.removeItem('skycine_library_selectedSeason');
       } catch {}
       fetchLibraryInfoAndData();
-      return;
+      return () => { stale = true; };
     }
 
     // Та же библиотека (первый маунт / возврат из плеера): восстанавливаем сериал
-    // Don't wipe selectedShow if we have a saved one for this library — keep user on same show after Back
-    const saved = libraryId ? localStorage.getItem(`skycine_lib_${libraryId}_selectedShow`) : null;
-    const generic = localStorage.getItem('skycine_library_selectedShow');
+    // Don't wipe selectedShow if we have a saved one for this library — keep user on same show after Back.
+    // ВАЖНО: generic-ключ читаем только если per-library нет — иначе прямой заход
+    // на lib B подхватит шоу от lib A. setState синхронно (React 18 батчит),
+    // stale-guard отменяет применение при быстром переключении библиотек.
+    // Инициализатор useState мог уже подтянуть generic-шоу чужой библиотеки —
+    // такое сбрасываем, иначе в lib B откроется шоу из lib A.
+    if (!stale && selectedShow?.libraryId && libId && selectedShow.libraryId !== libId) {
+      setSelectedShow(null);
+      setEpisodes([]);
+      setSelectedSeason('all');
+    }
+    const saved = libId ? localStorage.getItem(`skycine_lib_${libId}_selectedShow`) : null;
+    const generic = saved ? null : localStorage.getItem('skycine_library_selectedShow');
     const toRestore = saved || generic;
     if (toRestore) {
       try {
         const parsed = JSON.parse(toRestore);
-        // only restore if still null (i.e., first mount after Back), not when user explicitly switched library
-        if (!selectedShow || selectedShow.showTitle !== parsed.showTitle) {
-          // defer set to next tick so fetchLibraryInfoAndData already started
-          setTimeout(() => setSelectedShow(parsed), 0);
-          const seasonSaved = libraryId ? localStorage.getItem(`skycine_lib_${libraryId}_selectedSeason`) : null;
+        // only restore if still null (i.e., first mount after Back), not when user explicitly switched library.
+        // Привязываем restore к библиотеке: чужую per-lib запись не применяем.
+        const parsedLib = (parsed as any)?.libraryId as string | undefined;
+        const sameLibrary = !parsedLib || !libId || parsedLib === libId;
+        if (sameLibrary && (!selectedShow || selectedShow.showTitle !== parsed.showTitle)) {
+          if (!stale) setSelectedShow(parsed);
+          const seasonSaved = libId ? localStorage.getItem(`skycine_lib_${libId}_selectedSeason`) : null;
           const seasonGeneric = localStorage.getItem('skycine_library_selectedSeason');
           const seasonToRestore = seasonSaved || seasonGeneric;
-          if (seasonToRestore) {
-            try { setTimeout(() => setSelectedSeason(JSON.parse(seasonToRestore)), 0); } catch {}
+          if (seasonToRestore && !stale) {
+            try { setSelectedSeason(JSON.parse(seasonToRestore)); } catch {}
           }
         }
       } catch {}
@@ -231,6 +259,7 @@ export const LibraryPage: React.FC = () => {
     // скроллу некуда будет возвращаться (контент ужмётся до 36)
     // Есть кэш вкладки (возврат из плеера) — данные уже на экране, refetch тихий
     fetchLibraryInfoAndData({ silent: !!cached });
+    return () => { stale = true; };
   }, [libraryId]);
 
   useEffect(() => {
@@ -292,7 +321,7 @@ export const LibraryPage: React.FC = () => {
     try {
       await apiClient.post(`/libraries/${libraryId}/scan`);
       alert('Сканирование библиотеки запущено в фоновом режиме!');
-      setTimeout(() => {
+      later(() => {
         fetchLibraryInfoAndData();
         setIsScanning(false);
       }, 2500);
@@ -327,8 +356,13 @@ export const LibraryPage: React.FC = () => {
     }
   };
 
+  // Быстрые клики по шоу слали параллельные запросы эпизодов и побеждал
+  // случайный — применяем только последний выбор.
+  const showReqRef = useRef(0);
   const handleSelectShow = (show: any) => {
+    const reqId = ++showReqRef.current;
     setSelectedShow(show);
+    setEpisodes([]);
     setSelectedSeason('all');
     localStorage.setItem('skycine_library_selectedSeason', JSON.stringify('all'));
     if (libraryId) localStorage.setItem(`skycine_lib_${libraryId}_selectedSeason`, JSON.stringify('all'));
@@ -337,6 +371,7 @@ export const LibraryPage: React.FC = () => {
       params: { libraryId: show.libraryId || libraryId },
     })
       .then((res) => {
+        if (reqId !== showReqRef.current) return;
         const eps = res.data.episodes || [];
         setEpisodes(eps);
         const seasons = Array.from(new Set(eps.map((e: any) => e.seasonNumber || 1))).sort((a: any, b: any) => a - b) as number[];
@@ -345,7 +380,7 @@ export const LibraryPage: React.FC = () => {
         }
       })
       .catch(() => {})
-      .finally(() => setLoadingEpisodes(false));
+      .finally(() => { if (reqId === showReqRef.current) setLoadingEpisodes(false); });
   };
 
   const availableSeasons = useMemo(() => {
@@ -415,9 +450,12 @@ export const LibraryPage: React.FC = () => {
     if (!selectedShow) return;
     setIsApplyingMatch(true);
     try {
-      await apiClient.post(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/match-apply`, cand);
+      await apiClient.post(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/match-apply`, {
+        ...cand,
+        libraryId: selectedShow.libraryId || libraryId,
+      });
       setMatchSuccessMsg('Метаданные сериала успешно обновлены!');
-      setTimeout(() => {
+      later(() => {
         setMatchSuccessMsg('');
         setShowMatchModal(false);
         fetchShows();
@@ -471,12 +509,12 @@ export const LibraryPage: React.FC = () => {
   const getItemCountLabel = () => {
     if (!library) return '';
     if (library.type === 'SHOWS') {
-      return `${shows.length} ${shows.length === 1 ? 'сериал' : 'сериалов'}`;
+      return `${shows.length} ${plural(shows.length, 'сериал', 'сериала', 'сериалов')}`;
     }
     if (library.type === 'VIDEOS') {
-      return `${movies.length} ${movies.length === 1 ? 'видео' : 'видео'}`;
+      return `${movies.length} ${plural(movies.length, 'видео', 'видео', 'видео')}`;
     }
-    return `${movies.length} ${movies.length === 1 ? 'фильм' : 'фильмов'}`;
+    return `${movies.length} ${plural(movies.length, 'фильм', 'фильма', 'фильмов')}`;
   };
 
   const getLibrarySubheading = () => {
@@ -565,6 +603,19 @@ export const LibraryPage: React.FC = () => {
         </div>
       )}
 
+      {/* Fetch error banner (retry keeps current filters) */}
+      {fetchError && !loading && (
+        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <span className="text-xs text-red-300 font-semibold">{fetchError}. Проверьте соединение и попробуйте снова.</span>
+          <button
+            onClick={() => fetchLibraryInfoAndData()}
+            className="px-4 py-2 rounded-xl bg-cinema-gold text-black text-xs font-bold hover:bg-yellow-400 transition-colors cursor-pointer shrink-0"
+          >
+            Повторить
+          </button>
+        </div>
+      )}
+
       {/* Content Section: Movies */}
       {library?.type === 'MOVIES' && (
         <>
@@ -597,8 +648,6 @@ export const LibraryPage: React.FC = () => {
                 <MediaCard
                   key={movie.id}
                   media={movie}
-                  onPlayDirect={handlePlayDirect}
-                  onCreateRoom={handleCreateRoom}
                   onOpenDetails={(m) => {
                     setSelectedMediaId(m.id);
                     setIsModalOpen(true);
@@ -816,7 +865,7 @@ export const LibraryPage: React.FC = () => {
                       )}
                       <span className="flex items-center gap-1 text-xs text-slate-300 font-semibold bg-white/10 px-2.5 py-0.5 rounded-lg">
                         <Layers className="w-3.5 h-3.5 text-cinema-gold" />
-                        {availableSeasons.length || selectedShow.totalSeasons || 1} {availableSeasons.length === 1 ? 'сезон' : 'сезона'} • {episodes.length || selectedShow.totalEpisodes} серий
+                        {availableSeasons.length || selectedShow.totalSeasons || 1} {plural(availableSeasons.length || selectedShow.totalSeasons || 1, 'сезон', 'сезона', 'сезонов')} • {episodes.length || selectedShow.totalEpisodes} {plural(episodes.length || selectedShow.totalEpisodes, 'серия', 'серии', 'серий')}
                       </span>
                     </div>
 
@@ -876,7 +925,7 @@ export const LibraryPage: React.FC = () => {
                     </div>
 
                     <span className="text-xs text-slate-400 font-mono">
-                      {filteredEpisodes.length} {filteredEpisodes.length === 1 ? 'серия' : 'серий'}
+                      {filteredEpisodes.length} {plural(filteredEpisodes.length, 'серия', 'серии', 'серий')}
                     </span>
                   </div>
 
@@ -914,7 +963,7 @@ export const LibraryPage: React.FC = () => {
                               Сезон {seasonNum}
                             </h4>
                             <span className="text-[11px] text-slate-400 mt-0.5 block">
-                              {seasonEpisodes.length} {seasonEpisodes.length === 1 ? 'эпизод' : 'эпизодов'}
+                              {seasonEpisodes.length} {plural(seasonEpisodes.length, 'эпизод', 'эпизода', 'эпизодов')}
                             </span>
                           </div>
                         </div>
@@ -941,7 +990,7 @@ export const LibraryPage: React.FC = () => {
                             Все сезоны
                           </h4>
                           <span className="text-[11px] text-slate-400 mt-0.5 block">
-                            {episodes.length} серий
+                            {episodes.length} {plural(episodes.length, 'серия', 'серии', 'серий')}
                           </span>
                         </div>
                       </div>
@@ -970,7 +1019,11 @@ export const LibraryPage: React.FC = () => {
                               setSelectedEpisode(ep);
                               setIsEpisodeModalOpen(true);
                             }}
-                            className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 transition-all duration-300 hover:shadow-cinema-card hover:-translate-y-1 cursor-pointer"
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedEpisode(ep); setIsEpisodeModalOpen(true); } }}
+                            tabIndex={0}
+                            role="button"
+                            aria-label={`Открыть серию: ${epTitle}`}
+                            className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 focus-within:border-cinema-gold/50 transition-all duration-300 hover:shadow-cinema-card hover:-translate-y-1 cursor-pointer"
                           >
                             {/* 16:9 Episode Thumbnail with Badges */}
                             <div className="relative aspect-video w-full bg-cinema-950 overflow-hidden">
@@ -1000,8 +1053,8 @@ export const LibraryPage: React.FC = () => {
                                 )}
                               </div>
 
-                              {/* Quick Play Hover Button */}
-                              <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40">
+                              {/* Quick Play Hover Button (показываем и при клавиатурном фокусе) */}
+                              <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity bg-black/40">
                                 <div className="w-11 h-11 rounded-full bg-cinema-gold text-black flex items-center justify-center shadow-glow-gold transform group-hover:scale-105 transition-transform">
                                   <Play className="w-5 h-5 fill-current ml-0.5" />
                                 </div>
@@ -1098,7 +1151,11 @@ export const LibraryPage: React.FC = () => {
                     <div
                       key={`${show.libraryId || libraryId || 'lib'}:${show.showTitle}`}
                       onClick={() => handleSelectShow(show)}
-                      className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelectShow(show); } }}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Открыть сериал ${show.showTitle}`}
+                      className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 focus-within:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
                     >
                       <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
                         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-slate-500">
@@ -1122,7 +1179,7 @@ export const LibraryPage: React.FC = () => {
 
                         <div className="absolute bottom-2 left-2 flex items-center gap-1 bg-black/80 backdrop-blur-md px-2 py-0.5 rounded-md text-[10px] font-bold text-white border border-white/10">
                           <Layers className="w-3 h-3 text-cinema-gold" />
-                          <span>{show.totalSeasons || 1} {show.totalSeasons === 1 ? 'сезон' : 'сезона'}</span>
+                          <span>{show.totalSeasons || 1} {plural(show.totalSeasons || 1, 'сезон', 'сезона', 'сезонов')}</span>
                         </div>
                       </div>
 
@@ -1132,7 +1189,7 @@ export const LibraryPage: React.FC = () => {
                             {show.showTitle}
                           </h3>
                           <span className="text-[11px] text-slate-400 mt-0.5 block">
-                            {show.totalEpisodes} серий {show.year ? `• ${show.year}` : ''}
+                            {show.totalEpisodes} {plural(show.totalEpisodes, 'серия', 'серии', 'серий')} {show.year ? `• ${show.year}` : ''}
                           </span>
                         </div>
 

@@ -9,6 +9,11 @@ export const LazyImage: React.FC<LazyImageProps> = ({ src, fallbackSrc, classNam
   const [hasError, setHasError] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
+  // Новый src — новая попытка: иначе битый→починенный постер остаётся скрытым.
+  useEffect(() => {
+    setHasError(false);
+  }, [src]);
+
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {

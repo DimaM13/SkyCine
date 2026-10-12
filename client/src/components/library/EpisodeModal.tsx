@@ -7,6 +7,7 @@ import {
 import { MediaItem } from '../../types';
 import { apiClient } from '../../api/client';
 import { VlcOpenButton } from './VlcOpenButton';
+import { useModalBehavior } from '../../hooks/useModalBehavior';
 
 interface EpisodeModalProps {
   episode: MediaItem | null;
@@ -26,6 +27,7 @@ export const EpisodeModal: React.FC<EpisodeModalProps> = ({
   onCreateRoom,
 }) => {
   const navigate = useNavigate();
+  useModalBehavior(isOpen && !!episode, onClose);
 
   if (!isOpen || !episode) return null;
 
@@ -91,6 +93,7 @@ export const EpisodeModal: React.FC<EpisodeModalProps> = ({
         {/* Close Button */}
         <button
           onClick={onClose}
+          aria-label="Закрыть"
           className="absolute top-4 right-4 z-20 p-2 rounded-full bg-black/60 text-slate-300 hover:text-white hover:bg-black/90 border border-white/10 transition-all cursor-pointer"
         >
           <X className="w-5 h-5" />

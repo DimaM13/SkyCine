@@ -7,6 +7,7 @@ import {
 import { apiClient } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { useScrollRestore } from '../hooks/useScrollRestore';
+import { LazyImage } from '../components/library/LazyImage';
 import { Room, MediaItem } from '../types';
 
 export const RoomsPage: React.FC = () => {
@@ -207,9 +208,10 @@ export const RoomsPage: React.FC = () => {
                     {/* Thumbnail / Poster */}
                     <div className="relative w-20 aspect-video rounded-xl overflow-hidden bg-cinema-950 shrink-0 border border-white/10">
                       {room.posterPath ? (
-                        <img
+                        <LazyImage
                           src={room.posterPath}
                           alt={room.title}
+                          loading="lazy"
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         />
                       ) : (
@@ -247,6 +249,7 @@ export const RoomsPage: React.FC = () => {
                             onClick={(e) => handleDeleteRoom(e, room.id)}
                             className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer"
                             title="Закрыть / удалить комнату"
+                            aria-label="Закрыть комнату"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>

@@ -6,6 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import { MediaItem } from '../../types';
 import { MediaAccessModal } from '../admin/MediaAccessModal';
 import { VlcOpenButton } from './VlcOpenButton';
+import { useModalBehavior } from '../../hooks/useModalBehavior';
 
 interface MediaModalProps {
   mediaId: string | null;
@@ -43,23 +44,20 @@ export const MediaModal: React.FC<MediaModalProps> = ({
   const [isApplyingMatch, setIsApplyingMatch] = useState(false);
   const [matchSuccessMsg, setMatchSuccessMsg] = useState('');
 
-  const fetchMedia = () => {
-    if (!mediaId) return;
+  useEffect(() => {
+    if (!isOpen || !mediaId) return;
+    let stale = false;
     setLoading(true);
     apiClient.get(`/media/item/${mediaId}`)
       .then((res) => {
+        if (stale) return;
         setMedia(res.data.media);
         setSearchQuery(res.data.media?.title || '');
         setSearchYear(res.data.media?.year ? String(res.data.media.year) : '');
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => {
-    if (isOpen && mediaId) {
-      fetchMedia();
-    }
+      .catch(() => { if (!stale) setMedia(null); })
+      .finally(() => { if (!stale) setLoading(false); });
+    return () => { stale = true; };
   }, [isOpen, mediaId]);
 
   const handleSearchMatch = async (e?: React.FormEvent) => {
@@ -115,6 +113,8 @@ export const MediaModal: React.FC<MediaModalProps> = ({
     }
   };
 
+  useModalBehavior(isOpen && !!mediaId, onClose);
+
   if (!isOpen || !mediaId) return null;
 
   const formatDuration = (secs: number) => {
@@ -130,12 +130,19 @@ export const MediaModal: React.FC<MediaModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in">
-      <div className="bg-cinema-900 border border-white/15 rounded-3xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col relative max-h-[90vh]">
+    <div
+      className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="bg-cinema-900 border border-white/15 rounded-3xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col relative max-h-[90vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Close Button */}
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 z-30 p-2.5 rounded-full bg-black/60 hover:bg-black text-slate-300 hover:text-white border border-white/10 backdrop-blur-md transition-colors"
+          aria-label="Закрыть"
+          className="absolute top-4 right-4 z-30 p-2.5 rounded-full bg-black/60 hover:bg-black text-slate-300 hover:text-white border border-white/10 backdrop-blur-md transition-colors cursor-pointer"
         >
           <X className="w-5 h-5" />
         </button>

@@ -10,20 +10,22 @@ export const DirectPlayerPage: React.FC = () => {
   const navigate = useNavigate();
   const [media, setMedia] = useState<MediaItem | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [episodeNav, setEpisodeNav] = useState<{ prev: EpisodeNavItem | null; next: EpisodeNavItem | null } | null>(null);
 
   useEffect(() => {
     if (!id) return;
+    let stale = false;
     setLoading(true);
+    setLoadError(null);
     setEpisodeNav(null);
+    setMedia(null);
     apiClient.get(`/media/item/${id}`)
-      .then((res) => setMedia(res.data.media))
-      .catch(() => {
-        alert('Медиафайл не найден');
-        navigate('/');
-      })
-      .finally(() => setLoading(false));
-  }, [id, navigate]);
+      .then((res) => { if (!stale) setMedia(res.data.media); })
+      .catch(() => { if (!stale) setLoadError('Медиафайл не найден или недоступен'); })
+      .finally(() => { if (!stale) setLoading(false); });
+    return () => { stale = true; };
+  }, [id]);
 
   // Для серий: соседние серии (отсортированы по season/episode на сервере) —
   // кнопки prev/next и авто-переход в плеере. Строго в рамках своей библиотеки,
@@ -73,6 +75,19 @@ export const DirectPlayerPage: React.FC = () => {
   }, [location.state]);
 
   if (loading || !media) {
+    if (loadError) {
+      return (
+        <div className="h-screen w-screen bg-black flex flex-col items-center justify-center gap-3 text-slate-400 px-6 text-center">
+          <span className="text-sm font-bold text-white">{loadError}</span>
+          <button
+            onClick={() => navigate(returnToRef.current || '/', { replace: true })}
+            className="mt-2 px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-colors cursor-pointer"
+          >
+            Назад к каталогу
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="h-screen w-screen bg-black flex flex-col items-center justify-center gap-3 text-slate-400">
         <div className="w-10 h-10 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>

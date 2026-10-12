@@ -67,6 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
 
           <button
             onClick={onCloseMobile}
+            aria-label="Закрыть меню"
             className="p-1.5 rounded-xl bg-white/5 border border-white/10 text-slate-400 hover:text-white"
           >
             <X className="w-5 h-5" />
@@ -105,6 +106,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
                   onClick={() => handleNavClick('/admin')}
                   className="p-1 rounded-md bg-white/5 hover:bg-cinema-gold text-slate-400 hover:text-black transition-colors"
                   title="Создать библиотеку"
+                  aria-label="Создать библиотеку"
                 >
                   <Plus className="w-3 h-3" />
                 </button>

@@ -123,6 +123,24 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   // с целью и hold отпускался ДО того, как loadSource/session-restart мигнул
   // нулём — поэтому нужен !seeking + продление таймаута на медленный рестарт.
   const seekHoldRef = useRef<{ pos: number; until: number; since: number; ext: number } | null>(null);
+  // Re-assert сброшенных seek'ов: присвоение video.currentTime иногда тихо
+  // дропается (readyState 0 после loadSource/buffer-reset — исключение глотается
+  // catch'ем в doSeek): элемент стоит на месте, hold 5с держит дисплей на цели
+  // и отпускает назад — «перемотал, а оно не мотнулось». Пока hold жив, элемент
+  // НЕ в seeking, данные есть (readyState>0), а реальная позиция далека от цели —
+  // повторяем присвоение (троттлинг 400мс, не больше 6 попыток на seek).
+  const seekAssertRef = useRef<{ pos: number; last: number; tries: number } | null>(null);
+  // Троттлинг loadSource: каждый seek за окном буфера делал полный reload
+  // манифеста + рестарт HLS-сессии на сервере (прайминг — секунды). Серия быстрых
+  // перемоток убивала предыдущий рестарт — ничего не успевало допраймиться
+  // («мотается раз из пяти»). Повторный loadSource чаще раза в 800мс пропускаем:
+  // хватает startLoad + присвоения currentTime, recovery всё равно смотрит на
+  // актуальный hlsUrlRef.
+  const lastLoadSourceAtRef = useRef(0);
+  // Намерение играть после seek (веб-соло): video.play() после перемотки может
+  // абортнуться overlapping-нагрузкой — кадр замирает на цели. onSeeked при
+  // взведённом флаге и стоящем видео дожимает play. Гасится любой паузой.
+  const pendingPlayRef = useRef(false);
   const effectiveDurationRef = useRef<number>(effectiveDuration);
   useEffect(() => {
     effectiveDurationRef.current = effectiveDuration;
@@ -279,6 +297,27 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   }, [defaultAudioTrackIndex]);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Эфемерные UI-таймеры (флеши/хинты/тосты): копим id и гасим при размонтировании,
+  // иначе setState стреляют в закрытый плеер.
+  const uiTimersRef = useRef<number[]>([]);
+  const laterUi = useCallback((fn: () => void, ms: number) => {
+    const t = window.setTimeout(fn, ms);
+    uiTimersRef.current.push(t);
+    return t;
+  }, []);
+  const tapStateRef = useRef<{
+    lastTap: number; lastSide: 'left' | 'right' | null; pendingSingle: number | null;
+    streakSide: 'left' | 'right' | null; streakCount: number; streakAt: number;
+  }>({ lastTap: 0, lastSide: null, pendingSingle: null, streakSide: null, streakCount: 0, streakAt: 0 });
+  useEffect(() => () => {
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    uiTimersRef.current.forEach((t) => clearTimeout(t));
+    uiTimersRef.current = [];
+    if (tapStateRef.current.pendingSingle) {
+      clearTimeout(tapStateRef.current.pendingSingle);
+      tapStateRef.current.pendingSingle = null;
+    }
+  }, []);
 
   // Сообщаем наружу видимость интерфейса (топ-бар здоровья прячется вместе с ним)
   const onControlsVisibilityChangeRef = useRef(onControlsVisibilityChange);
@@ -527,7 +566,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       try { setSelectedQuality(next); } catch {}
       try {
         setAutoNotice(`Авто-качество: ${qualityLabel(next)} (было тяжело)`);
-        window.setTimeout(() => setAutoNotice(null), 4000);
+        laterUi(() => setAutoNotice(null), 4000);
         setTechStats((s) => ({ ...s, fallbackStage: fallbackStageRef.current }));
       } catch {}
       evictLogRef.current = [];
@@ -536,7 +575,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     } catch {
       return false;
     }
-  }, [sendPlayerLog]);
+  }, [sendPlayerLog, laterUi]);
 
   // PiP: доступность + синхронизация иконки с системным событием
   useEffect(() => {
@@ -1104,6 +1143,12 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     if (isDesktop) {
       const dp = (window as any).desktopPlayer;
+      // Оптимистичный дисплей как на вебе: бэкенд может не прислать timeupdate
+      // во время seek/прайминга — без этого строка стоит на старой позиции.
+      currentTimeRef.current = safePos;
+      setCurrentTime(safePos);
+      setScrubTime(safePos);
+      setIsScrubbing(false);
       dp?.seek(safePos);
       const shouldPlay = forcePlayState !== undefined ? forcePlayState : isPlaying;
       if (shouldPlay) dp?.play();
@@ -1116,6 +1161,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     // Пин отображаемой позиции: пока <video> не доедет до цели (после loadSource
     // он мигает нулём), строка времени не должна сбрасываться в 0.
     seekHoldRef.current = { pos: safePos, until: Date.now() + 5000, since: Date.now(), ext: 0 };
+    // Re-assert сброшенных seek'ов (см. seekAssertRef): стартуем заново.
+    seekAssertRef.current = { pos: safePos, last: 0, tries: 0 };
 
     const shouldPlay = forcePlayState !== undefined ? forcePlayState : !video.paused;
 
@@ -1141,17 +1188,25 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
       if (covered) {
         hls.startLoad(safePos);
-      } else {
+      } else if (Date.now() - lastLoadSourceAtRef.current > 800) {
         // Дальше буфера (перемотка назад за окно сегментов или далеко вперёд):
         // перезапускаем источник с новым startTime — сервер поднимет HLS-сессию
         // сразу под целевую позицию вместо каскада 404 по старому окну.
+        lastLoadSourceAtRef.current = Date.now();
         try {
           hls.loadSource(hlsUrlRef.current);
+          hls.startLoad(safePos);
+        } catch {}
+      } else {
+        // Внутри шторма быстрых перемоток: манифест уже грузится, дублирующий
+        // loadSource только убил бы его — хватает startLoad + присвоения ниже.
+        try {
           hls.startLoad(safePos);
         } catch {}
       }
     }
     try { video.currentTime = safePos; } catch (e) {}
+    pendingPlayRef.current = shouldPlay;
     if (shouldPlay) {
       video.play().catch(() => {});
       setIsPlaying(true);
@@ -1187,6 +1242,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     }
     const video = videoRef.current;
     if (!video) return;
+    pendingPlayRef.current = false;
     video.pause();
     setIsPlaying(false);
   }, [isDesktop, videoRef]);
@@ -1334,6 +1390,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       const reached = Math.abs(totalPos - hold.pos) <= 1.0 && !video.seeking;
       if (reached) {
         seekHoldRef.current = null;
+        seekAssertRef.current = null;
       } else if (Date.now() > hold.until) {
         // Первый seek может ждать серверный рестарт HLS-сессии (секции генерируются
         // синхронно до ~6с) — если <video> ещё в состоянии seeking, продлеваем пин,
@@ -1343,9 +1400,28 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           hold.ext += 1;
         } else {
           seekHoldRef.current = null;
+          seekAssertRef.current = null;
         }
       } else {
         totalPos = hold.pos; // реальное время ещё не на цели (мигнул 0 после loadSource) — держим отображение
+        // Re-assert: присвоение currentTime в doSeek могло тихо дропнуться
+        // (readyState 0 — исключение съел catch), а seeking при этом false:
+        // элемент стоит, дисплей пиннится, потом «отпускает назад». Дожимаем.
+        if (!video.seeking && video.readyState > 0) {
+          const realPos = video.currentTime || 0;
+          if (Math.abs(realPos - hold.pos) > 1.5) {
+            const a = seekAssertRef.current;
+            const nowA = Date.now();
+            if (a && a.pos === hold.pos && a.tries < 6 && nowA - a.last > 400) {
+              a.tries += 1;
+              a.last = nowA;
+              try { video.currentTime = hold.pos; } catch {}
+              if (a.tries === 1) {
+                try { sendPlayerLog('seek-reassert', 'warn', { detail: `target=${hold.pos.toFixed(1)} real=${realPos.toFixed(1)} rs=${video.readyState}` }); } catch {}
+              }
+            }
+          }
+        }
       }
     }
     currentTimeRef.current = totalPos;
@@ -1427,10 +1503,10 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     flashKeyRef.current += 1;
     const key = flashKeyRef.current;
     setCenterFlash({ kind, key });
-    window.setTimeout(() => {
+    laterUi(() => {
       setCenterFlash((cur) => (cur && cur.key === key ? null : cur));
     }, 600);
-  }, []);
+  }, [laterUi]);
 
   const togglePlay = () => {
     if (isWatchTogether) {
@@ -1456,6 +1532,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
     if (!video.paused) {
       popCenter('pause');
+      pendingPlayRef.current = false;
       video.pause();
       setIsPlaying(false);
       reportProgress();
@@ -1519,10 +1596,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
   // Дабл-тап как в YouTube: одиночный тап по бокам тогглит play с задержкой 300мс,
   // второй тап в то же место отменяет тоггл и мотает ∓10с; дальнейшие быстрые тапы
   // суммируются (∓20, ∓30…) с ютуб-анимацией. Работает и тачем, и мышью.
-  const tapStateRef = useRef<{
-    lastTap: number; lastSide: 'left' | 'right' | null; pendingSingle: number | null;
-    streakSide: 'left' | 'right' | null; streakCount: number; streakAt: number;
-  }>({ lastTap: 0, lastSide: null, pendingSingle: null, streakSide: null, streakCount: 0, streakAt: 0 });
+  // (tapStateRef объявлен выше рядом с uiTimersRef — там же чистка при размонтировании.)
 
   const handleZoneTap = useCallback((side: 'left' | 'right') => {
     const st = tapStateRef.current;
@@ -1535,7 +1609,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
       flashKeyRef.current += 1;
       const key = flashKeyRef.current;
       setSeekFlash({ side, seconds: total, key });
-      window.setTimeout(() => {
+      laterUi(() => {
         setSeekFlash((cur) => (cur && cur.key === key ? null : cur));
       }, 780);
     };
@@ -1567,11 +1641,11 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
     st.streakSide = null;
     st.streakCount = 0;
     if (st.pendingSingle) window.clearTimeout(st.pendingSingle);
-    st.pendingSingle = window.setTimeout(() => {
+    st.pendingSingle = laterUi(() => {
       st.pendingSingle = null;
       togglePlay();
     }, 300);
-  }, [triggerSeek, togglePlay, currentTime, videoRef]);
+  }, [triggerSeek, togglePlay, currentTime, videoRef, laterUi]);
 
   const changeVolume = (val: number) => {
     setVolume(val);
@@ -1604,8 +1678,8 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
 
   const flashSeekHint = useCallback((text: string) => {
     setSeekHint(text);
-    window.setTimeout(() => setSeekHint((cur) => (cur === text ? null : cur)), 900);
-  }, []);
+    laterUi(() => setSeekHint((cur) => (cur === text ? null : cur)), 900);
+  }, [laterUi]);
 
   const applyPlaybackRate = useCallback((r: number) => {
     setPlaybackRate(r);
@@ -1845,7 +1919,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           onCanPlayThrough={() => setIsBuffering(false)}
           onSeeked={() => {
             setIsBuffering(false);
-            if (videoRef.current) setIsPlaying(!videoRef.current.paused);
+            if (videoRef.current) {
+              setIsPlaying(!videoRef.current.paused);
+              // Дожим play после seek: video.play() в doSeek мог абортнуться
+              // overlapping-нагрузкой — иначе кадр замирает на цели («не мотается»).
+              if (pendingPlayRef.current && videoRef.current.paused && !videoRef.current.ended) {
+                videoRef.current.play().catch(() => {});
+              }
+              pendingPlayRef.current = false;
+            }
           }}
           onPlay={() => {
             setIsPlaying(true);
@@ -1853,6 +1935,9 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
           }}
           onPause={() => {
             setIsPlaying(false);
+            // Внешняя пауза (BT-наушники, ОС) между doSeek и seeked: без этого
+            // pendingPlay потом самовольно возобновил бы воспроизведение.
+            pendingPlayRef.current = false;
             if (!videoEndedRef.current) clearAutoNext();
             reportProgress();
           }}
@@ -2098,6 +2183,15 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
               // Новый жест — снимаем защиту от запоздалых тач-событий прошлого коммита.
               // (ref пишем всегда, поведение одиночки не меняется)
               if (isWatchTogether) seekCommitGuardRef.current = false;
+              // Скраб инициализируем ТЕКУЩЕЙ позицией (не координатой касания!):
+              // иначе displayTime переключается на stale scrubTime (0 на свежем
+              // плеере после resume) и мигает в 0.
+              // Координату сюда писать НЕЛЬЗЯ: слайдер контролируемый
+              // (value={displayTime}), и программная установка value ДО нативной
+              // обработки жеста заставляет браузер решить, что ползунок уже на
+              // месте — input/change не стреляют, коммит не происходит. Тап по
+              // строке умирал в 4 случаях из 5 (выживал лишь на округлении step).
+              setScrubTime(currentTimeRef.current);
               setIsScrubbing(true);
             }}
             onInput={(e) => {
@@ -2133,10 +2227,14 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
             onPointerCancel={(e) => {
               // Прерванный жест (тач, второй палец, увод указателя): без этого isScrubbing
               // залипает в true, timeupdate игнорируется и строка/время стоят при играющем видео.
-              // Только joint — одиночный слайдер не трогаем.
               if (isWatchTogether) {
                 seekCommitGuardRef.current = true;
                 commitSeekFromPointer(e);
+              } else {
+                // Соло: запоздалых input/change бояться нечего (guard только для
+                // joint) — следующий onChange просто перемотает туда же. Зато
+                // висящий isScrubbing морозит дисплей, его обязательно снимаем.
+                setIsScrubbing(false);
               }
               if (e.pointerType !== 'mouse') setHoverPreview(null);
             }}
@@ -2241,7 +2339,7 @@ export const CustomPlayer: React.FC<CustomPlayerProps> = ({
                     if (isHost) onForceSyncAll?.();
                     else onSyncToHost?.();
                     setJustSynced(true);
-                    setTimeout(() => setJustSynced(false), 2000);
+                    laterUi(() => setJustSynced(false), 2000);
                   }}
                   className="px-2 py-1 min-h-[32px] rounded-md border text-[10px] font-bold bg-white/10 hover:bg-white/20 text-cinema-gold border-cinema-gold/30 cursor-pointer ml-1 sm:ml-2 whitespace-nowrap"
                   title={isHost ? 'Выровнять всех' : 'Выровнять с хостом'}

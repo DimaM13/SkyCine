@@ -36,7 +36,19 @@ export class StreamController {
       }
 
       const quality = (req.query.quality as string) || 'original';
-      const audioIndex = parseInt(req.query.audioIndex as string || '0', 10);
+      const rawAudioIndex = parseInt(req.query.audioIndex as string || '0', 10);
+      // Дорожка обязана принадлежать этому медиа (как у субтитров ниже) —
+      // иначе произвольный -map 0:N уходит в спавн ffmpeg.
+      const audioIndex = Number.isInteger(rawAudioIndex) && rawAudioIndex >= 0 ? rawAudioIndex : 0;
+      if (audioIndex > 0) {
+        const audioTrack = db.prepare(
+          `SELECT streamIndex FROM media_tracks WHERE mediaItemId = ? AND streamIndex = ? AND type = 'AUDIO'`
+        ).get(id, audioIndex) as any;
+        if (!audioTrack) {
+          res.status(400).json({ error: 'Аудиодорожка не найдена' });
+          return;
+        }
+      }
       const startTime = Math.max(0, parseFloat(req.query.startTime as string || '0'));
 
       const encoder = await ffmpegService.detectHardwareEncoder();

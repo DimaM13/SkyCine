@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Lock, Check, Shield, Search, UserCheck, UserX, Tv } from 'lucide-react';
 import { apiClient } from '../../api/client';
+import { useModalBehavior } from '../../hooks/useModalBehavior';
 
 interface ShowAccessModalProps {
   showTitle: string | null;
@@ -20,21 +21,29 @@ export const ShowAccessModal: React.FC<ShowAccessModalProps> = ({
   const [search, setSearch] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
+  useModalBehavior(isOpen && !!showTitle, onClose);
+  const saveTimerRef = useRef<number | null>(null);
+  useEffect(() => () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); }, []);
+
   const fetchAccess = () => {
     if (!showTitle) return;
+    let stale = false;
     setLoading(true);
     apiClient.get(`/admin/permissions/show/${encodeURIComponent(showTitle)}`)
       .then((res) => {
+        if (stale) return;
         setUsers(res.data.users || []);
         setTotalEpisodes(res.data.totalEpisodes || 0);
       })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => { if (!stale) setLoading(false); });
+    return () => { stale = true; };
   };
 
   useEffect(() => {
     if (isOpen && showTitle) {
-      fetchAccess();
+      const cleanup = fetchAccess();
+      return cleanup;
     }
   }, [isOpen, showTitle]);
 
@@ -71,7 +80,7 @@ export const ShowAccessModal: React.FC<ShowAccessModalProps> = ({
 
       await apiClient.post(`/admin/permissions/show/${encodeURIComponent(showTitle)}`, { userIds: allowedUserIds });
       setSuccessMsg('Права доступа ко всем сериям сериала сохранены!');
-      setTimeout(() => {
+      saveTimerRef.current = window.setTimeout(() => {
         setSuccessMsg('');
         onClose();
       }, 1000);
@@ -89,8 +98,14 @@ export const ShowAccessModal: React.FC<ShowAccessModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
-      <div className="relative w-full max-w-lg rounded-3xl bg-cinema-900 border border-white/10 p-6 shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-lg rounded-3xl bg-cinema-900 border border-white/10 p-6 shadow-2xl flex flex-col max-h-[85vh] overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-white/10 shrink-0">
           <div className="flex items-center gap-2.5">
@@ -106,7 +121,8 @@ export const ShowAccessModal: React.FC<ShowAccessModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-xl hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+            aria-label="Закрыть"
+            className="p-1.5 rounded-xl hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -135,7 +151,8 @@ export const ShowAccessModal: React.FC<ShowAccessModalProps> = ({
           <div className="flex items-center gap-1.5">
             <button
               onClick={handleGrantAll}
-              className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-[11px] font-bold text-slate-300 hover:text-white border border-white/10 transition-colors flex items-center gap-1"
+              disabled={saving || loading}
+              className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-[11px] font-bold text-slate-300 hover:text-white border border-white/10 transition-colors flex items-center gap-1 disabled:opacity-50 cursor-pointer"
               title="Открыть всем"
             >
               <UserCheck className="w-3 h-3 text-emerald-400" />
@@ -143,7 +160,8 @@ export const ShowAccessModal: React.FC<ShowAccessModalProps> = ({
             </button>
             <button
               onClick={handleRevokeAll}
-              className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-[11px] font-bold text-slate-300 hover:text-white border border-white/10 transition-colors flex items-center gap-1"
+              disabled={saving || loading}
+              className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-[11px] font-bold text-slate-300 hover:text-white border border-white/10 transition-colors flex items-center gap-1 disabled:opacity-50 cursor-pointer"
               title="Забрать у всех"
             >
               <UserX className="w-3 h-3 text-red-400" />

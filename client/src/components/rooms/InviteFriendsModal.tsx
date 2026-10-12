@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Copy, Check, UserPlus, Sparkles } from 'lucide-react';
 import { apiClient } from '../../api/client';
 import { Friend, Room } from '../../types';
+import { useModalBehavior } from '../../hooks/useModalBehavior';
 
 interface InviteFriendsModalProps {
   room: Room;
@@ -21,11 +22,19 @@ export const InviteFriendsModal: React.FC<InviteFriendsModalProps> = ({
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
+  useModalBehavior(isOpen, onClose);
+  const copyTimersRef = useRef<number[]>([]);
+  useEffect(() => () => { copyTimersRef.current.forEach((t) => clearTimeout(t)); copyTimersRef.current = []; }, []);
+
   useEffect(() => {
     if (isOpen) {
+      // Модалка переиспользуется без ремаунта — сбрасываем состояние приглашений
+      setInvitedIds(new Set());
+      let stale = false;
       apiClient.get('/friends')
-        .then((res) => setFriends(res.data.friends || []))
+        .then((res) => { if (!stale) setFriends(res.data.friends || []); })
         .catch(() => {});
+      return () => { stale = true; };
     }
   }, [isOpen]);
 
@@ -34,24 +43,36 @@ export const InviteFriendsModal: React.FC<InviteFriendsModalProps> = ({
   const roomLink = `${window.location.origin}/rooms/${room.code}`;
 
   const copyToClipboard = (text: string, isLink: boolean) => {
-    navigator.clipboard.writeText(text);
+    navigator.clipboard.writeText(text).catch(() => {});
+    const later = (fn: () => void, ms: number) => {
+      const t = window.setTimeout(fn, ms);
+      copyTimersRef.current.push(t);
+    };
     if (isLink) {
       setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
+      later(() => setCopiedLink(false), 2000);
     } else {
       setCopiedCode(true);
-      setTimeout(() => setCopiedCode(false), 2000);
+      later(() => setCopiedCode(false), 2000);
     }
   };
 
   const handleInvite = (friendId: string) => {
+    // Guard от даблклика до ререндера disabled-кнопки
+    if (invitedIds.has(friendId)) return;
     onInviteFriend(friendId);
     setInvitedIds((prev) => new Set(prev).add(friendId));
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in">
-      <div className="bg-cinema-900 border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col">
+    <div
+      className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="bg-cinema-900 border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="p-6 border-b border-white/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -65,7 +86,8 @@ export const InviteFriendsModal: React.FC<InviteFriendsModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+            aria-label="Закрыть"
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>

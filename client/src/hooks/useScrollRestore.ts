@@ -79,10 +79,16 @@ export function useScrollRestore(storageKey: string, ready: boolean) {
   // pendingY обновляется только пока документ цел; cleanup выполняется ПОСЛЕ
   // размонтирования контента — если страница схлопнулась (уход в плеер),
   // пишем последнюю валидную позицию, а не заclamp-енный ноль.
+  // Старт — из хранилища: зашёл и сразу вышел (App nav-reset уже поставил 0)
+  // иначе затёр бы сохранённую позицию нулём и возвращаться было бы некуда.
   useEffect(() => {
     let last = 0;
     let timer: any = null;
-    let pendingY = Math.max(0, Math.round(window.scrollY || 0));
+    let pendingY = readScroll(storageKey);
+    try {
+      const cur = Math.max(0, Math.round(window.scrollY || 0));
+      if (!isDocCollapsed() && cur > 0) pendingY = cur;
+    } catch {}
 
     const flush = () => {
       try {

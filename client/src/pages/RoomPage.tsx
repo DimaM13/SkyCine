@@ -18,6 +18,7 @@ export const RoomPage: React.FC = () => {
   const [room, setRoom] = useState<Room | null>(null);
   const [media, setMedia] = useState<MediaItem | null>(null);
   const [loading, setLoading] = useState(true);
+  const [roomError, setRoomError] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(
     typeof window !== 'undefined' ? window.innerWidth >= 768 : true
   );
@@ -27,13 +28,22 @@ export const RoomPage: React.FC = () => {
 
   useEffect(() => {
     if (!code) return;
+    let stale = false;
     setLoading(true);
+    setRoomError(null);
+    setRoom(null);
+    setMedia(null);
     apiClient.get(`/rooms/${code}`)
       .then((res) => {
+        if (stale) return;
         const roomData: Room = res.data.room;
         setRoom(roomData);
 
         if (roomData.sourceType !== 'YOUTUBE') {
+          if (!roomData.mediaItemId) {
+            setRoomError('В комнате нет выбранного медиа');
+            return;
+          }
           setMedia({
             id: roomData.mediaItemId || '',
             libraryId: (roomData as any).libraryId || '',
@@ -57,11 +67,11 @@ export const RoomPage: React.FC = () => {
         }
       })
       .catch(() => {
-        alert('Комната не найдена');
-        navigate('/rooms');
+        if (!stale) setRoomError('Комната не найдена или недоступна');
       })
-      .finally(() => setLoading(false));
-  }, [code, navigate]);
+      .finally(() => { if (!stale) setLoading(false); });
+    return () => { stale = true; };
+  }, [code]);
 
   const doSeekRef = useRef<((pos: number, shouldPlay?: boolean) => void) | null>(null);
   const doPlayRef = useRef<(() => void) | null>(null);
@@ -132,7 +142,20 @@ export const RoomPage: React.FC = () => {
     },
   });
 
-  if (loading || !room) {
+  if (loading || !room || roomError) {
+    if (roomError) {
+      return (
+        <div className="h-[80vh] flex flex-col items-center justify-center gap-3 text-slate-400 px-6 text-center">
+          <span className="text-sm font-bold text-white">{roomError}</span>
+          <button
+            onClick={() => navigate('/rooms')}
+            className="mt-2 px-5 py-2.5 rounded-xl bg-cinema-gold text-black text-xs font-bold shadow-glow-gold hover:bg-yellow-400 transition-colors cursor-pointer"
+          >
+            К списку комнат
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="h-[80vh] flex flex-col items-center justify-center gap-3 text-slate-400">
         <div className="w-10 h-10 border-4 border-cinema-gold/20 border-t-cinema-gold rounded-full animate-spin"></div>
