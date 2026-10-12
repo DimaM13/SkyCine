@@ -155,12 +155,16 @@ export class MediaController {
 
       const filter = permissionService.getMediaFilter(userId, userRole, 'm');
 
+      // Группируем по паре (showTitle, libraryId): одноимённые шоу из разных
+      // библиотек — это разные карточки. Иначе MIN(m.id)/m.libraryId отдавали
+      // случайную библиотеку, а серии смешивались.
       let query = `
         SELECT MIN(m.id) as id,
                m.showTitle,
                m.showTitle as title,
                'SHOW' as type,
                m.libraryId,
+               MAX(l.name) as libraryName,
                COUNT(m.id) as totalEpisodes,
                COUNT(DISTINCT m.seasonNumber) as totalSeasons,
                MIN(m.posterPath) as posterPath,
@@ -169,6 +173,7 @@ export class MediaController {
                MIN(m.rating) as rating,
                MIN(m.overview) as overview
         FROM media_items m
+        JOIN libraries l ON m.libraryId = l.id
         WHERE m.type = 'EPISODE' AND m.showTitle IS NOT NULL AND ${filter.sql}
       `;
       const params: any[] = [...filter.params];
@@ -179,7 +184,7 @@ export class MediaController {
       }
 
       query += `
-        GROUP BY m.showTitle
+        GROUP BY m.showTitle, m.libraryId
         ORDER BY m.showTitle ASC
       `;
 
@@ -196,9 +201,10 @@ export class MediaController {
       const showTitle = decodeURIComponent(req.params.showTitle as string);
       const userId = req.user?.id || '';
       const userRole = req.user?.role || 'USER';
+      const libraryId = (req.query.libraryId as string || '').trim();
       const filter = permissionService.getMediaFilter(userId, userRole, 'm');
 
-      const episodes = db.prepare(`
+      let sql = `
         SELECT m.*, l.name as libraryName,
                wh.progressSeconds as userProgress, wh.isCompleted as userCompleted,
                wh.lastWatchedAt as userLastWatchedAt
@@ -206,8 +212,17 @@ export class MediaController {
         JOIN libraries l ON m.libraryId = l.id
         LEFT JOIN watch_history wh ON (wh.mediaItemId = m.id AND wh.userId = ?)
         WHERE m.showTitle = ? AND ${filter.sql}
-        ORDER BY m.seasonNumber ASC, m.episodeNumber ASC
-      `).all(userId, showTitle, ...filter.params);
+      `;
+      const params: any[] = [userId, showTitle, ...filter.params];
+      // Без фильтра по библиотеке одноимённые шоу из разных библиотек
+      // смешивались в один список серий.
+      if (libraryId) {
+        sql += ` AND m.libraryId = ?`;
+        params.push(libraryId);
+      }
+      sql += ` ORDER BY m.seasonNumber ASC, m.episodeNumber ASC`;
+
+      const episodes = db.prepare(sql).all(...params);
 
       const parsedEpisodes = episodes.map((ep: any) => {
         let tracks = [];

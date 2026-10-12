@@ -236,7 +236,9 @@ export const MediaModal: React.FC<MediaModalProps> = ({
                     <button
                       onClick={() => {
                         onClose();
-                        navigate(`/watch/${media.id}?start=0`);
+                        navigate(`/watch/${media.id}?start=0`, {
+                          state: { from: window.location.pathname },
+                        });
                       }}
                       className="px-4 py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs md:text-sm flex items-center gap-2 border border-white/15 transition-all cursor-pointer"
                       title="Начать фильм с самого начала"

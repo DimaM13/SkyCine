@@ -78,10 +78,11 @@ export const MoviesPage: React.FC = () => {
   };
 
   const handlePlayDirect = (media: MediaItem, startPos?: number) => {
+    const state = { from: '/movies' };
     if (startPos !== undefined && startPos >= 0) {
-      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`);
+      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`, { state });
     } else {
-      navigate(`/watch/${media.id}`);
+      navigate(`/watch/${media.id}`, { state });
     }
   };
 

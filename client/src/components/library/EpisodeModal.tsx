@@ -51,7 +51,9 @@ export const EpisodeModal: React.FC<EpisodeModalProps> = ({
     if (onPlayDirect) {
       onPlayDirect(episode, startPos);
     } else {
-      navigate(`/watch/${episode.id}${startPos > 0 ? `?start=${Math.floor(startPos)}` : '?start=0'}`);
+      navigate(`/watch/${episode.id}${startPos > 0 ? `?start=${Math.floor(startPos)}` : '?start=0'}`, {
+        state: { from: window.location.pathname },
+      });
     }
     onClose();
   };

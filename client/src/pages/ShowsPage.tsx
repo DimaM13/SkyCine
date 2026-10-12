@@ -82,10 +82,13 @@ export const ShowsPage: React.FC = () => {
   }, [selectedSeason]);
 
   // Restore episodes when selectedShow is loaded from localStorage on mount
+  // (в рамках библиотеки карточки — одноимённые шоу из разных библиотек не смешиваем).
   useEffect(() => {
     if (selectedShow && episodes.length === 0) {
       setLoadingEpisodes(true);
-      apiClient.get(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/episodes`)
+      apiClient.get(`/media/shows/${encodeURIComponent(selectedShow.showTitle)}/episodes`, {
+        params: selectedShow.libraryId ? { libraryId: selectedShow.libraryId } : undefined,
+      })
         .then((res) => {
           const eps = res.data.episodes || [];
           setEpisodes(eps);
@@ -104,7 +107,9 @@ export const ShowsPage: React.FC = () => {
     setSelectedSeason('all');
     localStorage.setItem('skycine_selectedSeason', JSON.stringify('all'));
     setLoadingEpisodes(true);
-    apiClient.get(`/media/shows/${encodeURIComponent(show.showTitle)}/episodes`)
+    apiClient.get(`/media/shows/${encodeURIComponent(show.showTitle)}/episodes`, {
+      params: show.libraryId ? { libraryId: show.libraryId } : undefined,
+    })
       .then((res) => {
         const eps = res.data.episodes || [];
         setEpisodes(eps);
@@ -137,10 +142,11 @@ export const ShowsPage: React.FC = () => {
   };
 
   const handlePlayDirect = (media: MediaItem, startPos?: number) => {
+    const state = { from: '/shows' };
     if (startPos !== undefined && startPos >= 0) {
-      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`);
+      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`, { state });
     } else {
-      navigate(`/watch/${media.id}`);
+      navigate(`/watch/${media.id}`, { state });
     }
   };
 
@@ -589,9 +595,9 @@ export const ShowsPage: React.FC = () => {
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-              {shows.slice(0, visibleCount).map((show, idx) => (
+              {shows.slice(0, visibleCount).map((show) => (
                 <div
-                  key={idx}
+                  key={`${show.libraryId || 'lib'}:${show.showTitle}`}
                   onClick={() => handleSelectShow(show)}
                   className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
                 >

@@ -26,15 +26,19 @@ export const DirectPlayerPage: React.FC = () => {
   }, [id, navigate]);
 
   // Для серий: соседние серии (отсортированы по season/episode на сервере) —
-  // кнопки prev/next и авто-переход в плеере.
+  // кнопки prev/next и авто-переход в плеере. Строго в рамках своей библиотеки,
+  // иначе серии одноимённых шоу из разных библиотек смешивались.
   const showTitle = (media as any)?.showTitle as string | undefined;
+  const mediaLibraryId = (media as any)?.libraryId as string | undefined;
   useEffect(() => {
     if (!showTitle || !media?.id) {
       setEpisodeNav(null);
       return;
     }
     let stale = false;
-    apiClient.get(`/media/shows/${encodeURIComponent(showTitle)}/episodes`)
+    apiClient.get(`/media/shows/${encodeURIComponent(showTitle)}/episodes`, {
+      params: mediaLibraryId ? { libraryId: mediaLibraryId } : undefined,
+    })
       .then((res) => {
         if (stale) return;
         const episodes: any[] = res.data.episodes || [];
@@ -54,7 +58,19 @@ export const DirectPlayerPage: React.FC = () => {
       })
       .catch(() => {});
     return () => { stale = true; };
-  }, [media?.id, showTitle]);
+  }, [media?.id, showTitle, mediaLibraryId]);
+
+  // Откуда пришли в плеер: все handlePlayDirect передают state { from }.
+  // Сохраняем в ref при первом появлении, чтобы переходы prev/next внутри
+  // плеера (replace + тот же from) его не затирали.
+  // (Хуки обязаны стоять до раннего return, иначе меняется их порядок.)
+  const returnToRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const from = (location.state as any)?.from;
+    if (typeof from === 'string' && from.startsWith('/') && !from.startsWith('/watch')) {
+      returnToRef.current = from;
+    }
+  }, [location.state]);
 
   if (loading || !media) {
     return (
@@ -66,23 +82,29 @@ export const DirectPlayerPage: React.FC = () => {
   }
 
   const handleBack = () => {
-    // For series episodes keep user on the show's episode list, not catalog root
     const mediaAny = media as any;
     const isEpisode = !!(mediaAny?.showTitle || mediaAny?.seasonNumber || mediaAny?.episodeNumber);
-    // Try history back first - ShowsPage restores selectedShow/selectedSeason from localStorage
-    if (window.history.length > 1) {
-      navigate(-1);
-      // Fallback if history back didn't stay inside app (e.g., direct link) - ensure shows page
-      setTimeout(() => {
-        if (isEpisode && window.location.pathname.startsWith('/watch')) {
-          navigate('/shows');
-        }
-      }, 300);
+    const saved = returnToRef.current;
+    // Доверяем только внутренним путям (не /watch, не /rooms/:code).
+    if (saved && saved.startsWith('/') && !saved.startsWith('/watch') && !/^\/rooms\/[^/]+$/.test(saved)) {
+      navigate(saved, { replace: true });
       return;
     }
-    if (isEpisode) navigate('/shows');
-    else if ((media as any)?.type === 'MOVIE' || (media as any)?.libraryType === 'movies') navigate('/movies');
-    else navigate('/');
+    // Fallback по типу медиа: эпизод — в свою библиотеку (точный контекст),
+    // иначе на глобальную страницу сериалов; фильмы — в фильмы.
+    if (isEpisode) {
+      if (mediaAny?.libraryId) navigate(`/library/${mediaAny.libraryId}`, { replace: true });
+      else navigate('/shows', { replace: true });
+    }
+    else if ((media as any)?.type === 'MOVIE' || (media as any)?.libraryType === 'movies') {
+      if (mediaAny?.libraryId) navigate(`/library/${mediaAny.libraryId}`, { replace: true });
+      else navigate('/movies', { replace: true });
+    }
+    else if ((media as any)?.type === 'VIDEO') {
+      if (mediaAny?.libraryId) navigate(`/library/${mediaAny.libraryId}`, { replace: true });
+      else navigate('/', { replace: true });
+    }
+    else navigate('/', { replace: true });
   };
 
   // Determine initial position: URL query ?start= overrides saved progress; otherwise use saved userProgress
@@ -118,7 +140,12 @@ export const DirectPlayerPage: React.FC = () => {
         isWatchTogether={false}
         onBack={handleBack}
         episodeNav={episodeNav || undefined}
-        onPlayEpisode={(epId) => navigate(`/watch/${epId}`)}
+        onPlayEpisode={(epId) => navigate(`/watch/${epId}`, {
+          // replace: история не копит /watch/ep1 -> /watch/ep2, иначе Back
+          // сначала откатывался на предыдущую серию и только потом выходил.
+          replace: true,
+          state: returnToRef.current ? { from: returnToRef.current } : undefined,
+        })}
       />
     </div>
   );

@@ -74,10 +74,11 @@ export const HomePage: React.FC = () => {
  }, []);
 
   const handlePlayDirect = (media: MediaItem, startPos?: number) => {
+    const state = { from: '/' };
     if (startPos !== undefined && startPos >= 0) {
-      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`);
+      navigate(`/watch/${media.id}?start=${Math.floor(startPos)}`, { state });
     } else {
-      navigate(`/watch/${media.id}`);
+      navigate(`/watch/${media.id}`, { state });
     }
   };
 
@@ -278,10 +279,10 @@ export const HomePage: React.FC = () => {
  </div>
 
  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
- {items.slice(0, 6).map((show, idx) => (
- <div
- key={idx}
- onClick={() => navigate(`/library/${library.id}`)}
+  {items.slice(0, 6).map((show) => (
+  <div
+  key={`${(show as any).libraryId || library.id}:${(show as any).showTitle || (show as any).id}`}
+  onClick={() => navigate(`/library/${library.id}`)}
  className="group relative flex flex-col rounded-2xl overflow-hidden bg-cinema-900 border border-white/10 hover:border-cinema-gold/50 cursor-pointer shadow-cinema-card transition-all duration-300 hover:-translate-y-1.5"
  >
  <div className="relative aspect-[2/3] w-full overflow-hidden bg-cinema-950">
