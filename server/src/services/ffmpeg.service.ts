@@ -292,8 +292,87 @@ class FFmpegService {
   constructor() {
     this.validateRamDisk();
     this.cleanupOrphanedTranscodes();
+    // Сироты прошлого запуска (сервер перезапустили, а ffmpeg сессий остался):
+    // бьём ТОЛЬКО процессы, чья командная строка ссылается на НАШУ папку сессий.
+    // Чужой софт (качалки, yt-dlp-мерджи и т.д.) не трогаем никогда.
+    this.cleanupPreviousRunOrphans().catch(() => {});
     // Periodically clean dead sessions & orphaned files on RAM disk every 5s
     setInterval(() => this.cleanupIdleSessions(), 5000);
+  }
+
+  // Порог «потерянности» своего спавна: жив, но ни к одной сессии не привязан.
+  // Все честные короткие спавны (тамбнейл ≤8с, субтитры ≤30с, encoder-тест ≤15с)
+  // укладываются с запасом; remux идёт через activeDirectPids и сюда не попадает.
+  private static readonly STALE_KNOWN_PID_MS = 90_000;
+  // Допуск сверки времени старта процесса (защита от переиспользования PID
+  // чужим процессом: время старта чужого не совпадёт с нашей записью о спавне).
+  private static readonly PID_START_TIME_TOLERANCE_MS = 60_000;
+
+  /** Время старта процесса по PID (мс, UTC) или null если узнать не вышло. */
+  private async getProcessStartTimeMs(pid: number): Promise<number | null> {
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    try {
+      const out = await new Promise<string | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 8000);
+        execFile(
+          'powershell',
+          ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`],
+          { windowsHide: true },
+          (err, stdout) => {
+            clearTimeout(timer);
+            if (err) return resolve(null);
+            resolve(String(stdout || '').trim());
+          }
+        );
+      });
+      if (!out) return null;
+      const ms = Date.parse(out);
+      return Number.isFinite(ms) ? ms : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Сироты прошлого запуска сервера: наши HLS-процессы, пережившие рестарт
+   * (у нового процесса нет их PID в реестрах). Идентифицируем по командной
+   * строке — наши сессии всегда пишут в <baseTempDir>/hls_sessions. Всё, что
+   * туда не пишет — чужое, не трогаем.
+   */
+  private async cleanupPreviousRunOrphans(): Promise<void> {
+    if (process.platform !== 'win32') return;
+    try {
+      const sessionsRoot = path.join(this.getBaseTempDir(), 'hls_sessions').toLowerCase();
+      const probe = new Promise<string | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 15000);
+        execFile(
+          'powershell',
+          ['-NoProfile', '-NonInteractive', '-Command',
+            `Get-CimInstance Win32_Process -Filter "Name='ffmpeg.exe'" | ForEach-Object { "$($_.ProcessId)|$($_.CommandLine)" }`],
+          { windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+          (err, stdout) => {
+            clearTimeout(timer);
+            if (err) return resolve(null);
+            resolve(String(stdout || ''));
+          }
+        );
+      });
+      const out = await probe;
+      if (!out) return;
+      for (const line of out.split('\n')) {
+        const sep = line.indexOf('|');
+        if (sep < 0) continue;
+        const pid = parseInt(line.slice(0, sep).trim(), 10);
+        const cmd = line.slice(sep + 1).trim().toLowerCase();
+        if (!Number.isInteger(pid) || pid <= 0 || !cmd) continue;
+        // Наш маркер — папка сессий (с учётом обоих видов слэшей в cmdline).
+        const norm = cmd.replace(/\//g, '\\');
+        if (norm.includes(sessionsRoot.replace(/\//g, '\\')) || norm.includes('hls_sessions')) {
+          logger.info('SWEEPER', `🧹 Глушу сироту прошлого запуска: свой ffmpeg PID ${pid}`);
+          ProcessController.kill(pid).catch(() => {});
+        }
+      }
+    } catch {}
   }
 
   private getBaseTempDir(): string {
@@ -1609,7 +1688,11 @@ class FFmpegService {
         }
       }
 
-      // 2. Scan and terminate any zombie ffmpeg.exe processes on Windows not owned by active sessions
+      // 2. Подчищаем ТОЛЬКО свои потерянные процессы: PID из knownSpawnedPids,
+      // которые живы, но больше не привязаны ни к одной сессии и старше порога.
+      // ЧУЖИЕ ffmpeg (другой софт на той же машине — качалки, yt-dlp-мерджи и т.д.)
+      // НЕ ТРОГАЕМ НИКОГДА: tasklist ниже используется лишь чтобы отличить
+      // мёртвые записи реестра от живых, kill по его списку не бьём.
       if (process.platform === 'win32') {
         try {
           // If a session is being created or restarted, skip process sweeping to avoid race conditions
@@ -1619,6 +1702,15 @@ class FFmpegService {
 
           // Re-check after awaiting tasklist!
           if (this.sessionCreationPromises.size > 0) return;
+
+          const alivePids = new Set<number>();
+          for (const line of stdout.split('\r\n')) {
+            const match = line.match(/^"ffmpeg\.exe","(\d+)"/i);
+            if (match) {
+              const pid = parseInt(match[1], 10);
+              if (pid) alivePids.add(pid);
+            }
+          }
 
           const activePids = new Set<number>();
           for (const session of this.continuousSessions.values()) {
@@ -1638,23 +1730,27 @@ class FFmpegService {
             }
           }
 
-          const lines = stdout.split('\r\n').filter(l => l.trim());
-          for (const line of lines) {
-            const match = line.match(/^"ffmpeg\.exe","(\d+)"/i);
-            if (match) {
-              const pid = parseInt(match[1], 10);
-              if (pid && !activePids.has(pid)) {
-                // Final safety check: re-verify against latest active sessions and spawn timestamps
-                const spawnTime = FFmpegService.knownSpawnedPids.get(pid);
-                if (spawnTime && Date.now() - spawnTime < 30000) continue;
-                if (Array.from(this.continuousSessions.values()).some(s => s.process?.pid === pid)) continue;
-                if (Array.from(this.closingSessions.values()).some(s => s.process?.pid === pid)) continue;
-
-                logger.info('SWEEPER', `🧹 Terminating zombie FFmpeg PID ${pid}`);
-                ProcessController.kill(pid).catch(() => {});
-                FFmpegService.knownSpawnedPids.delete(pid);
-              }
+          for (const [pid, spawnTime] of Array.from(FFmpegService.knownSpawnedPids.entries())) {
+            if (activePids.has(pid)) continue;
+            if (!alivePids.has(pid)) {
+              // Процесс уже мёртв — просто чистим запись реестра.
+              FFmpegService.knownSpawnedPids.delete(pid);
+              continue;
             }
+            if (nowTs - spawnTime < FFmpegService.STALE_KNOWN_PID_MS) continue;
+            // Последний рубеж (переиспользование PID): время старта процесса в ОС
+            // обязано совпасть с нашей записью о спавне, иначе это чужой процесс,
+            // занявший освободившийся PID. Не смогли проверить — не трогаем.
+            const startedAt = await this.getProcessStartTimeMs(pid);
+            if (startedAt === null) continue;
+            if (Math.abs(startedAt - spawnTime) > FFmpegService.PID_START_TIME_TOLERANCE_MS) {
+              logger.warn('SWEEPER', `PID ${pid} числится нашим, но время старта ОС не совпало (PID переиспользован чужим процессом?) — не трогаю`);
+              FFmpegService.knownSpawnedPids.delete(pid);
+              continue;
+            }
+            logger.info('SWEEPER', `🧹 Terminating lost own FFmpeg PID ${pid}`);
+            ProcessController.kill(pid).catch(() => {});
+            FFmpegService.knownSpawnedPids.delete(pid);
           }
         } catch {}
       }

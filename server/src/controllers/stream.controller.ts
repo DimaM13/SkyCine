@@ -6,7 +6,7 @@ import path from 'path';
 import mime from 'mime-types';
 import { db } from '../config/db';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { ffmpegService, buildHlsSessionId, parseTvClient, TvClient } from '../services/ffmpeg.service';
+import { ffmpegService, buildHlsSessionId, parseTvClient, TvClient, FFmpegService } from '../services/ffmpeg.service';
 import { MediaItem } from '../types';
 import { permissionService } from '../services/permission.service';
 
@@ -110,13 +110,21 @@ export class StreamController {
       });
 
       const proc = spawn('ffmpeg', args, { windowsHide: true });
+      // Регистрируем как свой процесс: иначе долгоживущий remux (фильм целиком)
+      // свипер сочтёт потерянным. unregister идемпотентен — зовём отовсюду.
+      FFmpegService.registerDirectPid(proc.pid);
+      const unregRemux = () => FFmpegService.unregisterDirectPid(proc.pid);
       proc.stdout.pipe(res);
 
       req.on('close', () => {
         try { proc.kill(); } catch (e) {}
+        unregRemux();
       });
 
+      proc.on('close', () => unregRemux());
+
       proc.on('error', (err) => {
+        unregRemux();
         logger.error('STREAM', `Remux ffmpeg error for ${id}: ${err?.message || err}`);
       });
     } catch (err: any) {

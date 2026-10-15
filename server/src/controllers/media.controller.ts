@@ -9,6 +9,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { MediaItem } from '../types';
 import { tmdbService } from '../services/tmdb.service';
 import { permissionService } from '../services/permission.service';
+import { FFmpegService } from '../services/ffmpeg.service';
 
 const activeThumbnailTasks = new Map<string, Promise<string | null>>();
 const failedThumbnailIds = new Map<string, number>();
@@ -613,6 +614,9 @@ export class MediaController {
               if (done) return;
               done = true;
               clearTimeout(timer);
+              try {
+                if (proc?.pid) FFmpegService.unregisterSpawnedPid(proc.pid);
+              } catch {}
               if (ok && fs.existsSync(thumbFile)) resolve(thumbFile);
               else {
                 failedThumbnailIds.set(cacheKey, Date.now());
@@ -628,6 +632,9 @@ export class MediaController {
                 '-y', '-ss', String(seekSec), '-i', media.filePath,
                 '-vframes', '1', '-q:v', '4', '-vf', GENERATED_IMAGE_VF[kind], thumbFile,
               ], { windowsHide: true, stdio: 'ignore' });
+              // Помечаем своим, чтобы свипер зомби-процессов его не трогал
+              // (живёт ≤8с по таймеру выше — в stale-порог 90с не упирается).
+              FFmpegService.registerSpawnedPid(proc.pid);
             } catch {
               finish(false);
               return;
